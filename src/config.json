@@ -1,0 +1,14 @@
+{
+  "sapi_url": "http://sapi.ruidc.joyent.us",
+  "domain_name": "east.joyent.us",
+
+  "shards": [
+      {
+        "host": "3.moray.staging.joyent.us"
+      },
+      {
+        "host": "2.moray.staging.joyent.us",
+        "last": true
+      }
+   ]
+}

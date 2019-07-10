@@ -1,0 +1,6 @@
+{
+  "sapi_url": "http://sapi.ruidc.joyent.us",
+  "domain_name": {{DOMAIN_NAME}},
+  "index_shards": {{INDEX_MORAY_SHARDS}},
+  "min_avail_mb": 1000,
+}
