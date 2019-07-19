@@ -1,8 +1,17 @@
+/*
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ */
+
+/*
+ * Copyright (c) 2019, Joyent, Inc.
+ */
 use std::collections::HashMap;
 use std::fs;
 use std::fs::File;
-//use std::io::Error;
 use std::net::*;
+use std::ffi::OsString;
 use std::path::Path;
 use std::sync::{mpsc, Arc, Mutex, RwLock};
 
@@ -10,7 +19,6 @@ use futures::future;
 use futures::future::*;
 use futures::stream::*;
 
-//use gotham::extractor::QueryStringExtractor;
 use gotham::handler::{Handler, HandlerFuture, IntoHandlerError, NewHandler};
 use gotham::helpers::http::response::{create_empty_response, create_response};
 use gotham::router::{builder::*, Router};
@@ -18,7 +26,7 @@ use gotham::state::{FromState, State};
 use gotham_derive::{StateData, StaticResponseExtender};
 
 use base64;
-use hyper::{Body, Chunk, Method, Uri};
+use hyper::{Body, Chunk, Method};
 use libmanta::moray::MantaObjectShark;
 use md5::{Digest, Md5};
 
@@ -27,21 +35,47 @@ use crate::job::TaskStatus;
 
 use reqwest::StatusCode;
 use rusqlite;
-use serde::ser::SerializeMap;
-use serde_derive::Deserialize;
+use serde_derive::{Deserialize, Serialize};
 use threadpool::ThreadPool;
 use trust_dns_resolver::Resolver;
 use uuid::Uuid;
 use walkdir::WalkDir;
 
-type Assignments = HashMap<String, Arc<RwLock<Vec<Task>>>>;
+type Assignments = HashMap<String, Arc<RwLock<Assignment>>>;
 
-static REMORA_SCHEDULED_DIR: &str = "/manta/remora";
-static REMORA_FINISHED_DIR: &str = "/var/tmp/remora";
+static REBALANCER_SCHEDULED_DIR: &str = "/manta/rebalancer";
+static REBALANCER_FINISHED_DIR: &str = "/var/tmp/rebalancer";
 
-#[derive(Deserialize, StateData, StaticResponseExtender)]
-struct QueryStringExtractor {
-    uuid: String,
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub enum AgentAssignmentState {
+    Scheduled,                   // Haven't even started it yet
+    Running,                     // Currently processing it
+    Complete(Option<Vec<Task>>), // Done.  Include any failed tasks
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AgentAssignmentStats {
+    pub state: AgentAssignmentState,
+    pub failed: usize,
+    pub complete: usize,
+    pub total: usize,
+}
+
+impl AgentAssignmentStats {
+    pub fn new(total: usize) -> AgentAssignmentStats {
+        AgentAssignmentStats {
+            state: AgentAssignmentState::Scheduled,
+            failed: 0,
+            complete: 0,
+            total,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, StateData, StaticResponseExtender)]
+struct PathExtractor {
+    #[serde(rename = "*")]
+    parts: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -53,76 +87,95 @@ pub struct Agent {
 impl Agent {
     pub fn new(tx: Arc<Mutex<mpsc::Sender<String>>>) -> Agent {
         let assignments = Arc::new(Mutex::new(Assignments::new()));
-        Agent {
-            assignments,
-            tx,
-        }
+        Agent { assignments, tx }
+    }
+
+    pub fn run(addr: &'static str) {
+        println!("Listening for requests at {}", addr);
+        gotham::start(addr, router());
     }
 }
 
-impl serde::ser::Serialize for Agent {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::ser::Serializer,
-    {
-        let work = self.assignments.lock().unwrap();
-        let mut map = serializer.serialize_map(Some(work.len()))?;
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Assignment {
+    pub uuid: String,
+    pub stats: AgentAssignmentStats,
 
-        for (k, v) in &*work {
-            let _tasks = v.read().unwrap();
-            map.serialize_entry(&k.to_string(), &**v)?;
+    #[serde(skip_serializing)]
+    pub tasks: Vec<Task>,
+}
+
+impl Assignment {
+    fn new(v: Vec<Task>, uuid: &str) -> Assignment {
+        Assignment {
+            uuid: uuid.to_string(),
+            stats: AgentAssignmentStats::new(v.len()),
+            tasks: v,
         }
-        map.end()
     }
 }
 
 fn load_saved_assignments(agent: &Agent) {
-    for entry in WalkDir::new(REMORA_SCHEDULED_DIR)
+    for entry in WalkDir::new(REBALANCER_SCHEDULED_DIR)
         .min_depth(1)
         .follow_links(false)
         .into_iter()
-        .filter_map(|e| e.ok())
-    {
+        .filter_map(|e| e.ok()) {
         let uuid = entry.file_name().to_string_lossy();
-        println!("{}/{}", REMORA_SCHEDULED_DIR, uuid);
-        match assignment_recall(format!("{}/{}", REMORA_SCHEDULED_DIR, &uuid)) {
+        println!("{}/{}", REBALANCER_SCHEDULED_DIR, uuid);
+        match assignment_recall(format!("{}/{}", REBALANCER_SCHEDULED_DIR,
+            &uuid)) {
             Ok(v) => assignment_add(&agent, v, &uuid),
             Err(e) => panic!(format!("Error loading database: {}", e)),
         }
     }
 }
 
-fn assignment_save(uuid: &str, path: &str, tasks: Arc<RwLock<Vec<Task>>>) {
+fn assignment_save(
+    uuid: &str,
+    path: &str,
+    assignment: Arc<RwLock<Assignment>>,
+) {
     let conn = match rusqlite::Connection::open(format!("{}/{}", path, uuid)) {
         Ok(conn) => conn,
-        Err(e) => panic!("DB error {}", e),
+        Err(e) => panic!("DB error opening {}/{}: {}", path, uuid, e),
     };
 
-    let tasklist = tasks.read().unwrap();
+    let assn = assignment.read().unwrap();
+    let tasklist = &assn.tasks;
+    let stats = &assn.stats;
 
-    let result = conn.execute(
+    // Create the table for our tasks.
+    match conn.execute(
         "create table if not exists tasks (
-		object_id text primary key not null unique,
-		owner text not null,
-		md5sum text not null,
-		datacenter text not null,
-		manta_storage_id text not null,
-		status text not null
-	    )",
+        object_id text primary key not null unique,
+        owner text not null,
+        md5sum text not null,
+        datacenter text not null,
+        manta_storage_id text not null,
+        status text not null
+	)",
         rusqlite::params![],
-    );
-
-    match result {
+    ) {
         Ok(_) => (),
         Err(e) => panic!("Database creation error: {}", e),
-    };
+    }
 
+    // Create the table for our stats.
+    match conn.execute(
+        "create table if not exists stats (stats text not null)",
+        rusqlite::params![],
+    ) {
+        Ok(_) => (),
+        Err(e) => panic!("Database creation error: {}", e),
+    }
+
+    // Populate the task table with the tasks in this assignment.
     for task in &*tasklist {
         match conn.execute(
             "INSERT INTO tasks
-			(object_id, owner, md5sum, datacenter, manta_storage_id,
-			status)
-			values (?1, ?2, ?3, ?4, ?5, ?6)",
+            (object_id, owner, md5sum, datacenter, manta_storage_id, status)
+            values (?1, ?2, ?3, ?4, ?5, ?6)",
             rusqlite::params![
                 task.object_id,
                 task.owner,
@@ -136,6 +189,15 @@ fn assignment_save(uuid: &str, path: &str, tasks: Arc<RwLock<Vec<Task>>>) {
             Err(e) => panic!("Task insertion error: {}", e),
         };
     }
+
+    // Populate the stats table with our stats
+    match conn.execute(
+        "INSERT INTO stats values (?1)",
+        rusqlite::params![serde_json::to_vec(&stats).unwrap()],
+    ) {
+        Ok(_) => (),
+        Err(e) => panic!("Task insertion error: {}", e),
+    };
 }
 
 // Given a uuid of a particular assignment, extract its contents from
@@ -143,10 +205,19 @@ fn assignment_save(uuid: &str, path: &str, tasks: Arc<RwLock<Vec<Task>>>) {
 // files named after their uuid.  The format is an sqlite database.  We
 // construct a vector of tasks based on the contents of the only table
 // in the file called `tasks'.
-fn assignment_recall(path: String) -> Result<Arc<RwLock<Vec<Task>>>, String> {
-    if !Path::new(&path).exists() {
+fn assignment_recall(path: String) -> Result<Arc<RwLock<Assignment>>, String> {
+    let file_path = Path::new(&path);
+
+    if !file_path.exists() {
         return Err(format!("File does not exist: {}", path));
     }
+
+    // The uuid is obtained from the file name.  All files stored to disk will
+    // always be named after the assignment uuid.  This will never change,
+    // however if it does, then the uuid of the assignment must be stored
+    // somewhere within the database.
+    let uuid = OsString::from(file_path.file_stem().unwrap()).
+        into_string().unwrap();
 
     let conn = match rusqlite::Connection::open(path) {
         Ok(conn) => conn,
@@ -195,19 +266,43 @@ fn assignment_recall(path: String) -> Result<Arc<RwLock<Vec<Task>>>, String> {
         tasks.push(i.unwrap());
     }
 
-    Ok(Arc::new(RwLock::new(tasks)))
+    stmt = match conn.prepare("SELECT stats FROM stats") {
+        Ok(s) => s,
+        Err(e) => return Err(format!("Query creation error: {}", e)),
+    };
+
+    let stats_iter = match stmt.query_map(rusqlite::params![], |row| {
+        let data: Vec<u8> = row.get(0)?;
+        let s = String::from_utf8(data).unwrap();
+        let stats: AgentAssignmentStats = serde_json::from_str(&s).unwrap();
+        Ok(stats)
+    }) {
+        Ok(iter) => iter,
+        Err(e) => return Err(format!("Query execution error: {}", e)),
+    };
+
+    let mut stats = Vec::new();
+
+    for i in stats_iter {
+        stats.push(i.unwrap());
+    }
+
+    let mut assignment = Assignment::new(tasks, &uuid);
+    assignment.stats = stats[0].clone();
+
+    Ok(Arc::new(RwLock::new(assignment)))
 }
 
 // Take our current assignment that we have just finished processing and flush
 // out the contents (with updated status for each task) out to a new database
-// file in /var/tmp/remora.  Next, delete the original file from /manta/remora
-// so that we do not process it again on restart of the agent.  Finally, remove
-// the assignment from our HashMap.
+// file in /var/tmp/rebalancer.  Next, delete the original file from
+// /manta/rebalancer so that we do not process it again on restart of the agent.
+// Finally, remove the assignment from our HashMap.
 fn assignment_complete(assignments: Arc<Mutex<Assignments>>, uuid: String) {
-    let tasks = assignment_get(&assignments, &uuid).unwrap();
+    let assn = assignment_get(&assignments, &uuid).unwrap();
 
-    assignment_save(&uuid, REMORA_FINISHED_DIR, tasks);
-    let src = format!("{}/{}", REMORA_SCHEDULED_DIR, uuid);
+    assignment_save(&uuid, REBALANCER_FINISHED_DIR, assn);
+    let src = format!("{}/{}", REBALANCER_SCHEDULED_DIR, uuid);
 
     match fs::remove_file(&src) {
         Ok(_) => (),
@@ -225,12 +320,12 @@ fn assignment_complete(assignments: Arc<Mutex<Assignments>>, uuid: String) {
 // worker will begin procesing it.  There are basically two ways that this
 // function can get called:
 //
-// 1. At the start of the remora agent when we are loading incomplete
+// 1. At the start of the rebalancer agent when we are loading incomplete
 //    assignments from disk.
-// 2. When we receive an assignment over the network from the remora zone.
+// 2. When we receive an assignment over the network from the rebalancer zone.
 fn assignment_add(
     agent: &Agent,
-    assignment: Arc<RwLock<Vec<Task>>>,
+    assignment: Arc<RwLock<Assignment>>,
     uuidstr: &str,
 ) {
     let mut work = agent.assignments.lock().unwrap();
@@ -246,13 +341,24 @@ fn post(agent: Agent, mut state: State) -> Box<HandlerFuture> {
         .concat2()
         .then(move |full_body| match full_body {
             Ok(valid_body) => {
-                let v = Arc::new(RwLock::new(
-                    validate_assignment(&valid_body).unwrap(),
-                ));
-
+                // Ceremony for parsing the information needed to create an
+                // an assignent out of the message body.
+                let v = validate_assignment(&valid_body).unwrap();
                 let uuid = Uuid::new_v4().to_hyphenated().to_string();
-                assignment_save(&uuid, REMORA_SCHEDULED_DIR, v.clone());
+                let assignment =
+                    Arc::new(RwLock::new(Assignment::new(v, &uuid)));
 
+                // Before we even process the assignment, save it to persistent
+                // storage.
+                assignment_save(
+                    &uuid,
+                    REBALANCER_SCHEDULED_DIR,
+                    assignment.clone(),
+                );
+
+                // Create a response containing our newly initialized stats.
+                // This serves as confirmation to the client that we recieved
+                // their request correctly and are working on it.
                 let res = create_response(
                     &state,
                     StatusCode::OK,
@@ -261,7 +367,8 @@ fn post(agent: Agent, mut state: State) -> Box<HandlerFuture> {
                         .expect("serialized assignment id"),
                 );
 
-                assignment_add(&agent, v, &uuid);
+                // Add the assignment to the queue for processing.
+                assignment_add(&agent, assignment.clone(), &uuid);
                 future::ok((state, res))
             }
             Err(e) => future::err((state, e.into_handler_error())),
@@ -269,29 +376,18 @@ fn post(agent: Agent, mut state: State) -> Box<HandlerFuture> {
     Box::new(f)
 }
 
-fn get(agent: Agent, state: State) -> Box<HandlerFuture> {
-    // Note, it is not necessary to explicitly obtain the lock on our
-    // hashmap when iterating through assignment/task information  because
-    // the underlying serialization procedure (Agent serialization)
-    // acquires it.
-    let res = {
-        create_response(
-            &state,
-            StatusCode::OK,
-            mime::APPLICATION_JSON,
-            serde_json::to_vec(&agent).expect("serialized assignments"),
-        )
-    };
+fn empty_response(state: State, code: StatusCode) -> Box<HandlerFuture> {
+    let res = create_empty_response(&state, code);
     Box::new(future::ok((state, res)))
 }
 
 // First check to see if the assignment in question is located in memory.  If
 // it is, then just return it to the caller, otherwise, go to disk and look
 // through assignments that have already been full processed.
-fn get_specific_impl(
+fn get_assignment_impl(
     agent: &Agent,
     uuid: &str,
-) -> Option<Arc<RwLock<Vec<Task>>>> {
+) -> Option<Arc<RwLock<Assignment>>> {
     match assignment_get(&agent.assignments, &uuid) {
         Some(assignment) => Some(assignment),
         None => {
@@ -300,7 +396,7 @@ fn get_specific_impl(
             // completed.
             match assignment_recall(format!(
                 "{}/{}",
-                REMORA_FINISHED_DIR, &uuid
+                REBALANCER_FINISHED_DIR, &uuid
             )) {
                 Ok(assignment) => Some(assignment),
                 Err(e) => {
@@ -312,18 +408,35 @@ fn get_specific_impl(
     }
 }
 
-fn get_specific(agent: Agent, mut state: State) -> Box<HandlerFuture> {
-    let query_param = QueryStringExtractor::take_from(&mut state);
-    let uuid = query_param.uuid;
+fn get_assignment(
+    agent: Agent,
+    state: State,
+    path: PathExtractor,
+) -> Box<HandlerFuture> {
+    // If the uuid supplied by the client does not represent a valid UUID,
+    // return a response indicating that they sent a bad request.
+    let uuid = match Uuid::parse_str(&path.parts[1]) {
+        Ok(_u) => &path.parts[1],
+        Err(e) => {
+            let msg = format!("Invalid uuid: {}", e);
+            let res = create_response(
+                &state,
+                StatusCode::BAD_REQUEST,
+                mime::TEXT_PLAIN,
+                serde_json::to_vec(&msg).expect("serialized message"),
+            );
+            return Box::new(future::ok((state, res)));
+        },
+    };
 
-    let res = match get_specific_impl(&agent, &uuid) {
-        Some(assignment) => {
-            let tasks = assignment.read().unwrap();
+    let res = match get_assignment_impl(&agent, uuid) {
+        Some(a) => {
+            let assignment = a.read().unwrap();
             create_response(
                 &state,
                 StatusCode::OK,
                 mime::APPLICATION_JSON,
-                serde_json::to_vec(&**tasks).expect("serialized assignments"),
+                serde_json::to_vec(&*assignment).expect("serialized task"),
             )
         }
         None => create_empty_response(&state, StatusCode::NOT_FOUND),
@@ -341,25 +454,35 @@ fn validate_assignment(body: &Chunk) -> Result<Vec<Task>, String> {
     };
 
     let assignment: Vec<Task> = serde_json::from_value(v).unwrap();
-    Ok(assignment.clone())
+    Ok(assignment)
 }
 
 impl Handler for Agent {
     fn handle(self, state: State) -> Box<HandlerFuture> {
         let method = Method::borrow_from(&state);
-        let path = Uri::borrow_from(&state).path();
 
         // If we are here, then the method must either be
         // POST or GET.  It can not be anything else.
         match method.as_str() {
             "POST" => post(self, state),
-            _ => {
-                if path == "/assignment" {
-                    get_specific(self, state)
-                } else {
-                    get(self, state)
+            "GET" => {
+                let path = PathExtractor::borrow_from(&state).clone();
+
+                // If we received a GET request, there must be at least one
+                // part of a path specified (which we match for below),
+                // otherwise, return a 404 to the client.
+                if path.parts.is_empty() {
+                    return empty_response(state, StatusCode::NOT_FOUND);
                 }
-            }
+
+                match path.parts[0].as_str() {
+                    "assignment" => get_assignment(self, state, path),
+                    _ => empty_response(state, StatusCode::NOT_FOUND),
+                }
+            },
+            _ => {
+                empty_response(state, StatusCode::METHOD_NOT_ALLOWED)
+            },
         }
     }
 }
@@ -519,19 +642,41 @@ fn process_task(task: &mut Task) {
 fn assignment_get(
     assignments: &Arc<Mutex<Assignments>>,
     uuid: &str,
-) -> Option<Arc<RwLock<Vec<Task>>>> {
+) -> Option<Arc<RwLock<Assignment>>> {
     let work = assignments.lock().unwrap();
     match work.get(uuid) {
-        Some(assignment) => Some(assignment.clone()),
+        Some(assignment) => Some(Arc::clone(&assignment)),
         None => None,
     }
 }
 
-fn process_assignment(assn: Arc<Mutex<Assignments>>, uuid: String) {
-    let tasks = assignment_get(&assn, &uuid).unwrap();
-    let len = tasks.read().unwrap().len();
+// Invoked by the worker thread, this function receives a caller-supplied
+// HashMap and a uuid that it uses as a key to find the assignment within
+// it.  Once it has obtained it, it processes each task in the assignment
+// sequentially.  It is important to take note that this function takes the
+// assignment and runs it to completion.  While being processed, no other
+// worker can modify the assignment (whether that be task information within
+// it, its associated stats, or its position in the HashMap).  Upon completing
+// the processing of the assignment, the exact same thread removes it from
+// the HashMap allowing the process to reclaim the memory it occupied.  If,
+// for some reason in the future, we allow other threads to modify an assignment
+// while it is in flight (i.e. while we are currently processing it), we must
+// make considerations here among (probably) other places too.  In the current
+// implementation however, we have the assurance that the thread invoking this
+// function is the only one that will ever access this assignment with the
+// intention of modifying it and further, the same thread invoking this function
+// is the only one that will clean up the assignment when we have finished
+// processing it, by calling `assignment_complete()'.
+fn process_assignment(assignments: Arc<Mutex<Assignments>>, uuid: String) {
+    let assignment = assignment_get(&assignments, &uuid).unwrap();
+    let len = assignment.read().unwrap().tasks.len();
+    let mut failures = Vec::new();
+
+    assignment.write().unwrap().stats.state = AgentAssignmentState::Running;
 
     for i in 0..len {
+        let assn = assignment.clone();
+
         // Obtain a copy of the current task from our task list.  We
         // will update the state information of the task and write it
         // back in to the vector.  We want to retain ownership of the
@@ -541,7 +686,7 @@ fn process_assignment(assn: Arc<Mutex<Assignments>>, uuid: String) {
         // to the task list which is why we obtain a copy of the task
         // as opposed to a reference to it.
         let mut t = {
-            let mut tmp = tasks.write().unwrap();
+            let tmp = &mut assn.write().unwrap().tasks;
             tmp[i].set_status(TaskStatus::Running);
             tmp[i].clone()
         };
@@ -549,12 +694,29 @@ fn process_assignment(assn: Arc<Mutex<Assignments>>, uuid: String) {
         // Process it.
         process_task(&mut t);
 
+        // Grab the write lock on the assignment.  It will only be held until
+        // the end of the loop (which is not for very long).
+        let tmp = &mut assn.write().unwrap();
+
+        // Update our stats.
+        match t.status {
+            TaskStatus::Pending => (),
+            TaskStatus::Running => (),
+            TaskStatus::Complete => tmp.stats.complete += 1,
+            TaskStatus::Failed(_) => {
+                tmp.stats.complete += 1;
+                tmp.stats.failed += 1;
+                failures.push(t.clone());
+            }
+        }
+
         // Update the task in the vector.
-        let mut tmp = tasks.write().unwrap();
-        tmp[i] = t;
+        tmp.tasks[i] = t;
     }
 
-    assignment_complete(assn, uuid);
+    assignment.write().unwrap().stats.state =
+        AgentAssignmentState::Complete(Some(failures));
+    assignment_complete(assignments, uuid);
 }
 
 /// Create a `Router`
@@ -567,23 +729,30 @@ fn router() -> Router {
         let agent = Agent::new(tx.clone());
         let pool = ThreadPool::new(1);
 
+        create_dir(REBALANCER_SCHEDULED_DIR);
+        create_dir(REBALANCER_FINISHED_DIR);
+
         for _ in 0..1 {
-            let rx = rx.clone();
-            let assignments = agent.assignments.clone();
+            let rx = Arc::clone(&rx);
+            let assignments = Arc::clone(&agent.assignments);
             pool.execute(move || loop {
-                let uuid = rx.lock().unwrap().recv().unwrap();
-                process_assignment(assignments.clone(), uuid);
+                let uuid = match rx.lock().unwrap().recv() {
+                    Ok(r) => r,
+                    Err(e) => {
+                        println!("Channel read error: {}", e);
+                        return;
+                    }
+                };
+                process_assignment(Arc::clone(&assignments), uuid);
             });
         }
 
         load_saved_assignments(&agent);
 
         route
-            .get("assignment")
-            .with_query_string_extractor::<QueryStringExtractor>()
+            .get("/*")
+            .with_path_extractor::<PathExtractor>()
             .to_new_handler(agent.clone());
-
-        route.get("assignments").to_new_handler(agent.clone());
 
         route.post("assignments").to_new_handler(agent.clone());
     })
@@ -592,15 +761,5 @@ fn router() -> Router {
 fn create_dir(dirname: &str) {
     if let Err(e) = fs::create_dir_all(dirname) {
         panic!("Error creating directory {}", e);
-    }
-}
-
-impl Agent {
-    pub fn run(addr: &'static str) {
-        create_dir(REMORA_SCHEDULED_DIR);
-        create_dir(REMORA_FINISHED_DIR);
-
-        println!("Listening for requests at {}", addr);
-        gotham::start(addr, router());
     }
 }

@@ -64,7 +64,6 @@ impl Command {
     pub fn parse_config() -> Result<Config, Error> {
         let file = File::open("./target/debug/config.json")?;
         let reader = BufReader::new(file);
-        println!("parsing config");
         let config: Config = serde_json::from_reader(reader)?;
 
         Ok(config)

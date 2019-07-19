@@ -1,6 +1,12 @@
-// Copyright 2019 Joyent, Inc.
+/*
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ */
 
-
+/*
+ * Copyright (c) 2019, Joyent, Inc.
+ */
 use crate::config::Config;
 use crate::error::{CrossbeamError, Error, InternalError, InternalErrorCode};
 use crate::picker as mod_picker;
@@ -43,12 +49,12 @@ pub enum JobAction {
 
 #[derive(Debug, Clone, PartialEq)]
 enum EvacuateObjectStatus {
-    Unprocessed,    // Default state
-    Processing,     // Object has been included in an assignment and that
-                    // assignment has been submitted to a remora agent.
-    Skipped,        // Could not find a shark to put this object in. TODO: Why?
-     // TODO: Failed,   // Failed to Evacuate Object ???
-     // TODO: Retrying, // Retrying a failed evacuate attempt
+    Unprocessed, // Default state
+    Processing,  // Object has been included in an assignment and that
+    // assignment has been submitted to a remora agent.
+    Skipped, // Could not find a shark to put this object in. TODO: Why?
+             // TODO: Failed,   // Failed to Evacuate Object ???
+             // TODO: Retrying, // Retrying a failed evacuate attempt
 }
 
 #[derive(Debug, Clone)]
@@ -384,12 +390,9 @@ fn run_evacuate_job(job: Job) -> Result<(), Error> {
 
     picker.fini();
 
-    sharkspotter_handle
-        .join()
-        .unwrap()
-        .unwrap_or_else(|e| {
-            error!("Error joining sharkspotter handle: {}\n", e);
-            std::process::exit(1);
+    sharkspotter_handle.join().unwrap().unwrap_or_else(|e| {
+        error!("Error joining sharkspotter handle: {}\n", e);
+        std::process::exit(1);
     });
 
     assignment_generator
@@ -425,25 +428,26 @@ fn start_sharkspotter(
     thread::Builder::new()
         .name(String::from("sharkspotter"))
         .spawn(move || {
-        let mut count = 0;
-        sharkspotter::run(&config, move |obj, _shard| {
-            // while testing limit the number of objects processed for now
-            count += 1;
-            if count > 2000 {
-                return Err(std::io::Error::new(
-                    ErrorKind::Other,
-                    "Just stop already",
-                ));
-            }
+            let mut count = 0;
+            sharkspotter::run(&config, move |obj, _shard| {
+                // while testing limit the number of objects processed for now
+                count += 1;
+                if count > 2000 {
+                    return Err(std::io::Error::new(
+                        ErrorKind::Other,
+                        "Just stop already",
+                    ));
+                }
 
-            // TODO:
-            // - add shard number
-            sender.send(obj).map_err(CrossbeamError::from).map_err(|e| {
-                std::io::Error::new(ErrorKind::Other, e.description())
+                // TODO:
+                // - add shard number
+                sender.send(obj).map_err(CrossbeamError::from).map_err(|e| {
+                    std::io::Error::new(ErrorKind::Other, e.description())
+                })
             })
+            .map_err(Error::from)
         })
         .map_err(Error::from)
-    }).map_err(Error::from)
 }
 
 /// The assignment manager manages the destination sharks and
@@ -741,18 +745,14 @@ fn start_assignment_generator(
                     &assignment
                 );
 
-                full_assignment_tx
-                    .send(assignment)
-                    .map_err(|e| {
-                        error!(
-                            "Error sending assignment back to manager: {}", e
-                        );
+                full_assignment_tx.send(assignment).map_err(|e| {
+                    error!("Error sending assignment back to manager: {}", e);
 
-                        InternalError::new(
-                            Some(InternalErrorCode::Crossbeam),
-                            CrossbeamError::from(e).description(),
-                        )
-                    })?;
+                    InternalError::new(
+                        Some(InternalErrorCode::Crossbeam),
+                        CrossbeamError::from(e).description(),
+                    )
+                })?;
             }
 
             Ok(())
