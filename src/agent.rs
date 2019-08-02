@@ -8,10 +8,9 @@
  * Copyright (c) 2019, Joyent, Inc.
  */
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::fs;
 use std::fs::File;
-use std::net::*;
-use std::ffi::OsString;
 use std::path::Path;
 use std::sync::{mpsc, Arc, Mutex, RwLock};
 
@@ -37,7 +36,6 @@ use reqwest::StatusCode;
 use rusqlite;
 use serde_derive::{Deserialize, Serialize};
 use threadpool::ThreadPool;
-use trust_dns_resolver::Resolver;
 use uuid::Uuid;
 use walkdir::WalkDir;
 
@@ -115,19 +113,57 @@ impl Assignment {
     }
 }
 
-fn load_saved_assignments(agent: &Agent) {
+// Inform the work threads that of an assignment that needs to be processed.
+// Whenever a worker is available, they will receive the UUID of the assignment
+// from the receiving end of the channel and will then attempt to load it from
+// disk in to memory for processing.
+fn assignment_signal(agent: &Agent, uuid: &str) {
+    let tx = agent.tx.lock().unwrap();
+    tx.send(uuid.to_string()).unwrap();
+}
+
+// Given a uuid of an assignment (presumably on disk) and access to the
+// HashMap, locate the assignment, load it in to memory and store it in the
+// HashMap.  Currently, this should really only be called by a worker thread
+// with the intention of immediately processing whatever it gets.
+fn load_saved_assignment(
+    assignments: &Arc<Mutex<Assignments>>,
+    uuid: &str,
+) -> Result<(), String> {
+    match assignment_recall(format!("{}/{}", REBALANCER_SCHEDULED_DIR, &uuid)) {
+        Ok(a) => {
+            let mut work = assignments.lock().unwrap();
+            work.insert(uuid.to_string(), a);
+            Ok(())
+        }
+        Err(e) => {
+            // We need to take some kind of remedial action here.  We have a
+            // database file that (for one reason or another) we are unable to
+            // load.  Rather than bring down the house by calling panic, it
+            // is better to log the error and move on.  It may also be desirable
+            // to quarantine problematic database files so that they can be
+            // examined later, but not rediscovered by the agent.
+            Err(format!("Error loading database: {}", e))
+        }
+    }
+}
+
+// Locate all saved assignments on disk and signal their presence to our pool
+// of workers.  To be clear, this does not explicitly load assignments in to
+// memory -- it merely notifies the thread pool of their existence.  Ultimately,
+// worker(s) will load assignemnts in to memory right before processing them.
+// This ensures that our memory footprint remains relateively low even if we
+// experience a major backlog of assignments.
+fn discover_saved_assignments(agent: &Agent) {
     for entry in WalkDir::new(REBALANCER_SCHEDULED_DIR)
         .min_depth(1)
         .follow_links(false)
         .into_iter()
-        .filter_map(|e| e.ok()) {
+        .filter_map(|e| e.ok())
+    {
         let uuid = entry.file_name().to_string_lossy();
         println!("{}/{}", REBALANCER_SCHEDULED_DIR, uuid);
-        match assignment_recall(format!("{}/{}", REBALANCER_SCHEDULED_DIR,
-            &uuid)) {
-            Ok(v) => assignment_add(&agent, v, &uuid),
-            Err(e) => panic!(format!("Error loading database: {}", e)),
-        }
+        assignment_signal(&agent, &uuid);
     }
 }
 
@@ -136,17 +172,23 @@ fn assignment_save(
     path: &str,
     assignment: Arc<RwLock<Assignment>>,
 ) {
-    let conn = match rusqlite::Connection::open(format!("{}/{}", path, uuid)) {
-        Ok(conn) => conn,
-        Err(e) => panic!("DB error opening {}/{}: {}", path, uuid, e),
-    };
+    let mut conn =
+        match rusqlite::Connection::open(format!("{}/{}", path, uuid)) {
+            Ok(conn) => conn,
+            Err(e) => panic!("DB error opening {}/{}: {}", path, uuid, e),
+        };
 
     let assn = assignment.read().unwrap();
     let tasklist = &assn.tasks;
     let stats = &assn.stats;
 
+    // Create a transaction.  All database operations within this function
+    // will be part of this transaction.  This includes the creation of both
+    // the `tasks' and the `stats' table and the insertion of data in to each.
+    let transaction = conn.transaction().unwrap();
+
     // Create the table for our tasks.
-    match conn.execute(
+    match transaction.execute(
         "create table if not exists tasks (
         object_id text primary key not null unique,
         owner text not null,
@@ -162,7 +204,7 @@ fn assignment_save(
     }
 
     // Create the table for our stats.
-    match conn.execute(
+    match transaction.execute(
         "create table if not exists stats (stats text not null)",
         rusqlite::params![],
     ) {
@@ -171,8 +213,8 @@ fn assignment_save(
     }
 
     // Populate the task table with the tasks in this assignment.
-    for task in &*tasklist {
-        match conn.execute(
+    for task in tasklist.iter() {
+        match transaction.execute(
             "INSERT INTO tasks
             (object_id, owner, md5sum, datacenter, manta_storage_id, status)
             values (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -191,13 +233,21 @@ fn assignment_save(
     }
 
     // Populate the stats table with our stats
-    match conn.execute(
+    match transaction.execute(
         "INSERT INTO stats values (?1)",
         rusqlite::params![serde_json::to_vec(&stats).unwrap()],
     ) {
         Ok(_) => (),
         Err(e) => panic!("Task insertion error: {}", e),
     };
+
+    // Finally, kick off the transaction as a whole.  Up until this point,
+    // nothing has been committed to the database.  If this does not complete
+    // successfully, we likely have a systemic problem that retrying or
+    // "handling" will not mitigate.
+    if let Err(e) = transaction.commit() {
+        panic!("Transaction error on uuid: {}: {}", uuid, e);
+    }
 }
 
 // Given a uuid of a particular assignment, extract its contents from
@@ -216,8 +266,9 @@ fn assignment_recall(path: String) -> Result<Arc<RwLock<Assignment>>, String> {
     // always be named after the assignment uuid.  This will never change,
     // however if it does, then the uuid of the assignment must be stored
     // somewhere within the database.
-    let uuid = OsString::from(file_path.file_stem().unwrap()).
-        into_string().unwrap();
+    let uuid = OsString::from(file_path.file_stem().unwrap())
+        .into_string()
+        .unwrap();
 
     let conn = match rusqlite::Connection::open(path) {
         Ok(conn) => conn,
@@ -314,28 +365,6 @@ fn assignment_complete(assignments: Arc<Mutex<Assignments>>, uuid: String) {
     hm.remove(&uuid);
 }
 
-// Take a given assignment (i.e. a vector of Task objects) and add it to
-// the our HashMap which contains all outstanding work to be processed.  Then
-// signal the uuid of that assignment to our workers.  The first available
-// worker will begin procesing it.  There are basically two ways that this
-// function can get called:
-//
-// 1. At the start of the rebalancer agent when we are loading incomplete
-//    assignments from disk.
-// 2. When we receive an assignment over the network from the rebalancer zone.
-fn assignment_add(
-    agent: &Agent,
-    assignment: Arc<RwLock<Assignment>>,
-    uuidstr: &str,
-) {
-    let mut work = agent.assignments.lock().unwrap();
-
-    work.insert(uuidstr.to_string(), assignment);
-
-    let tx = agent.tx.lock().unwrap();
-    tx.send(uuidstr.to_string()).unwrap();
-}
-
 fn post(agent: Agent, mut state: State) -> Box<HandlerFuture> {
     let f = Body::take_from(&mut state)
         .concat2()
@@ -367,8 +396,9 @@ fn post(agent: Agent, mut state: State) -> Box<HandlerFuture> {
                         .expect("serialized assignment id"),
                 );
 
-                // Add the assignment to the queue for processing.
-                assignment_add(&agent, assignment.clone(), &uuid);
+                // Signal the workers that there is a new assignent ready for
+                // processing.
+                assignment_signal(&agent, &uuid);
                 future::ok((state, res))
             }
             Err(e) => future::err((state, e.into_handler_error())),
@@ -383,29 +413,32 @@ fn empty_response(state: State, code: StatusCode) -> Box<HandlerFuture> {
 
 // First check to see if the assignment in question is located in memory.  If
 // it is, then just return it to the caller, otherwise, go to disk and look
-// through assignments that have already been full processed.
+// through both scheduled and completed assignments for a match.
 fn get_assignment_impl(
     agent: &Agent,
     uuid: &str,
 ) -> Option<Arc<RwLock<Assignment>>> {
-    match assignment_get(&agent.assignments, &uuid) {
-        Some(assignment) => Some(assignment),
-        None => {
-            // If it was not found in memory, then we should check
-            // our records of assignments that have already been
-            // completed.
-            match assignment_recall(format!(
-                "{}/{}",
-                REBALANCER_FINISHED_DIR, &uuid
-            )) {
-                Ok(assignment) => Some(assignment),
-                Err(e) => {
-                    println!("Assignment recall: {}", e);
-                    None
-                }
-            }
-        }
+    // Check in memory.
+    if let Some(assignment) = assignment_get(&agent.assignments, &uuid) {
+        return Some(assignment);
     }
+
+    // Check completed assignments on disk.
+    if let Ok(assignment) =
+        assignment_recall(format!("{}/{}", REBALANCER_FINISHED_DIR, &uuid))
+    {
+        return Some(assignment);
+    }
+
+    // Check scheduled assignments on disk.
+    if let Ok(assignment) =
+        assignment_recall(format!("{}/{}", REBALANCER_SCHEDULED_DIR, &uuid))
+    {
+        return Some(assignment);
+    }
+
+    // No assignment of the supplied uuid was found.
+    None
 }
 
 fn get_assignment(
@@ -426,7 +459,7 @@ fn get_assignment(
                 serde_json::to_vec(&msg).expect("serialized message"),
             );
             return Box::new(future::ok((state, res)));
-        },
+        }
     };
 
     let res = match get_assignment_impl(&agent, uuid) {
@@ -479,10 +512,8 @@ impl Handler for Agent {
                     "assignment" => get_assignment(self, state, path),
                     _ => empty_response(state, StatusCode::NOT_FOUND),
                 }
-            },
-            _ => {
-                empty_response(state, StatusCode::METHOD_NOT_ALLOWED)
-            },
+            }
+            _ => empty_response(state, StatusCode::METHOD_NOT_ALLOWED),
         }
     }
 }
@@ -579,16 +610,6 @@ fn download(
     }
 }
 
-fn name_to_address(name: &str) -> Result<String, String> {
-    let resolver = Resolver::from_system_conf().unwrap();
-    let response = match resolver.lookup_ip(name) {
-        Ok(resp) => resp,
-        Err(e) => return Err(format!("DNS lookup {}", e)),
-    };
-    let shark_ip: Vec<IpAddr> = response.iter().collect();
-    Ok(shark_ip[0].to_string())
-}
-
 fn process_task(task: &mut Task) {
     let file_path = manta_file_path(&task.owner, &task.object_id);
     let path = Path::new(&file_path);
@@ -603,25 +624,11 @@ fn process_task(task: &mut Task) {
         return;
     }
 
-    // Resolve the storage id of the shark to an ip address.
-    // This will be part of the url that we generate to
-    // download the object.
-    let shark_ip = match name_to_address(&task.source.manta_storage_id) {
-        Ok(addr) => addr,
-        Err(e) => {
-            task.set_status(TaskStatus::Failed(e));
-            println!("DNS lookup error");
-            return;
-        }
-    };
-
     // Put it all together.  The format of the url is:
-    // http://<shark ip>/<owner id>/<object id>
+    // http://<storage id>/<owner id>/<object id>
     let url = format!(
         "http://{}/{}/{}",
-        shark_ip.to_string(),
-        &task.owner,
-        &task.object_id
+        &task.source.manta_storage_id, &task.owner, &task.object_id
     );
 
     // Reach out to the storage node to download
@@ -668,6 +675,13 @@ fn assignment_get(
 // is the only one that will clean up the assignment when we have finished
 // processing it, by calling `assignment_complete()'.
 fn process_assignment(assignments: Arc<Mutex<Assignments>>, uuid: String) {
+    // If we are unsuccessful in loading the assignment from disk, there is
+    // nothing left to do here, other than return.
+    if let Err(e) = load_saved_assignment(&assignments, &uuid) {
+        error!("Unable to load assignment {} from disk: {}", &uuid, e);
+        return;
+    }
+
     let assignment = assignment_get(&assignments, &uuid).unwrap();
     let len = assignment.read().unwrap().tasks.len();
     let mut failures = Vec::new();
@@ -747,7 +761,7 @@ fn router() -> Router {
             });
         }
 
-        load_saved_assignments(&agent);
+        discover_saved_assignments(&agent);
 
         route
             .get("/*")
