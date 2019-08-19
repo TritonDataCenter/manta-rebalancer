@@ -5,7 +5,7 @@
  */
 
 /*
- * Copyright (c) 2019, Joyent, Inc.
+ * Copyright 2019, Joyent, Inc.
  */
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -29,8 +29,8 @@ use hyper::{Body, Chunk, Method};
 use libmanta::moray::MantaObjectShark;
 use md5::{Digest, Md5};
 
-use crate::job::Task;
-use crate::job::TaskStatus;
+use crate::jobs::Task;
+use crate::jobs::TaskStatus;
 
 use reqwest::StatusCode;
 use rusqlite;
@@ -99,7 +99,7 @@ pub struct Assignment {
     pub uuid: String,
     pub stats: AgentAssignmentStats,
 
-    #[serde(skip_serializing)]
+    #[serde(skip_serializing, skip_deserializing)]
     pub tasks: Vec<Task>,
 }
 

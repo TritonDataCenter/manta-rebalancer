@@ -42,6 +42,20 @@ SUBCOMMANDS:
 
 ```
 
+## Configuration Parameters
+The remora zone leverages configuration parameters in `src/config.json`.  This
+file is populated by the config-agent using `src/config.json.in` as a template.
+
+*Parameters:*
+* sapi_url<String>: The url of the SAPI zone.  Populated by the manta deployment zone.
+* domain_name<String>: The domain name of the manta deployment.  From SAPI application
+metadata (`DOMAIN_NAME`).
+* database_url<String>: Location and name of the zone's local database.
+* database_buffer_size<uint>:  Writes to the database are buffered by up to this
+number of records.
+* shards<Array>: The first and last shard.  From SAPI application metadata `INDEX_MORAY_SHARDS`.
+
+
 ## Development
 
 Before integration run `fmt`, `check`, `test`, and

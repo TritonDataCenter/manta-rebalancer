@@ -1,4 +1,12 @@
-// Copyright 2019 Joyent, Inc.
+/*
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ */
+
+/*
+ * Copyright 2019, Joyent, Inc.
+ */
 
 use std::fmt;
 
@@ -6,6 +14,9 @@ use std::fmt;
 pub enum Error {
     Internal(InternalError),
     IoError(std::io::Error),
+    Hyper(hyper::Error),
+    Diesel(diesel::result::Error),
+    SerdeJson(serde_json::error::Error),
 }
 
 impl std::error::Error for Error {
@@ -13,7 +24,16 @@ impl std::error::Error for Error {
         match self {
             Error::Internal(e) => e.msg.as_str(),
             Error::IoError(e) => e.description(),
+            Error::Hyper(e) => e.description(),
+            Error::Diesel(e) => e.description(),
+            Error::SerdeJson(e) => e.description(),
         }
+    }
+}
+
+impl From<hyper::Error> for Error {
+    fn from(error: hyper::Error) -> Self {
+        Error::Hyper(error)
     }
 }
 
@@ -29,26 +49,44 @@ impl From<InternalError> for Error {
     }
 }
 
+impl From<diesel::result::Error> for Error {
+    fn from(error: diesel::result::Error) -> Self {
+        Error::Diesel(error)
+    }
+}
+
+impl From<serde_json::error::Error> for Error {
+    fn from(error: serde_json::error::Error) -> Self {
+        Error::SerdeJson(error)
+    }
+}
+
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             Error::Internal(e) => write!(f, "{}", e),
             Error::IoError(e) => write!(f, "{}", e),
+            Error::Hyper(e) => write!(f, "{}", e),
+            Error::Diesel(e) => write!(f, "{}", e),
+            Error::SerdeJson(e) => write!(f, "{}", e),
         }
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct InternalError {
     msg: String,
-    code: InternalErrorCode,
+    pub code: InternalErrorCode,
 }
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialEq)]
 pub enum InternalErrorCode {
-    Other = 0,
-    InvalidJobAction = 1,
-    Crossbeam = 2,
+    Other,
+    InvalidJobAction,
+    Crossbeam,
+    PickerError,
+    AssignmentLookupError,
+    LockError,
 }
 
 impl fmt::Display for InternalError {

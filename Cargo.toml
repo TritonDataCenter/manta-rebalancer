@@ -4,12 +4,15 @@ version = "0.1.0"
 authors = ["Rui Loura <rjloura@gmail.com>"]
 edition = "2018"
 
+[profile.dev]
+panic = "abort"
+
 [dependencies]
 base64 = "0.10.1"
 uuid = { version = "0.7.4", features = ["v4"] }
-libmanta = { git = "https://github.com/joyent/rust-libmanta" }
+libmanta = { git = "https://github.com/joyent/rust-libmanta", tag = "v0.1.0" }
 clap = "2.33.0"
-sharkspotter = { git = "https://github.com/joyent/rust-sharkspotter"}
+sharkspotter = { git = "https://github.com/joyent/rust-sharkspotter", tag = "v0.2.0" }
 crossbeam-channel = "0.3.8"
 serde = { version = "1.0.91", features = ["derive"] }
 serde_derive = "1.0.91"
@@ -19,7 +22,7 @@ gotham_derive = "0.3.0"
 hyper = "0.12"
 mime = "0.3.13"
 # TODO: remove in favor of rust-libmanta
-moray = { git = "https://github.com/joyent/rust-moray", branch = "reconnect" }
+moray = { git = "https://github.com/joyent/rust-moray", tag = "v0.1.0" }
 futures = "0.1.27"
 tokio = "0.1.21"
 tokio-threadpool = "0.1.14"
@@ -34,3 +37,21 @@ rusqlite = "0.19.0"
 walkdir = "2"
 log = "0.4.6"
 pretty_env_logger = "0.3.0"
+rand = "0.7.0"
+quickcheck = "0.8.5"
+failure = "0.1.5"
+bytes = "0.4.12"
+
+diesel = {version = "1.4.2", features = ["sqlite"]}
+diesel-derive-enum = {git = "https://github.com/adwhit/diesel-derive-enum.git", features = ["sqlite"]}
+
+slog = "2.5.2"
+slog-bunyan = { git = "https://github.com/kellymclaughlin/bunyan", branch = "build-on-smartos" }
+
+## TODO: is this needed?
+slog-term = "2.4.1" 
+
+
+[patch.crates-io]
+diesel = { git = 'https://github.com/diesel-rs/diesel' }
+diesel_derives = { git = "https://github.com/diesel-rs/diesel" }

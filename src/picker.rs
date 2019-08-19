@@ -1,8 +1,16 @@
-// Copyright 2019 Joyent, Inc.
+/*
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ */
+
+/*
+ * Copyright 2019, Joyent, Inc.
+ */
 
 use crate::error::Error;
 use reqwest;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -11,7 +19,7 @@ use std::sync::{
 use std::thread::JoinHandle;
 use std::{thread, time};
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct StorageNode {
     #[serde(alias = "availableMB")]
     pub available_mb: u64,
@@ -41,40 +49,39 @@ pub enum PickerAlgorithm<'a> {
     Default(&'a DefaultPickerAlgorithm),
 }
 
+#[derive(Default)]
 pub struct DefaultPickerAlgorithm {
     pub blacklist: Vec<String>,
     pub min_avail_mb: Option<u64>,
 }
 
 impl<'a> PickerAlgorithm<'a> {
-    fn choose(&self, sharks: Vec<StorageNode>) -> Vec<StorageNode> {
+    fn choose(&self, sharks: &[StorageNode]) -> Vec<StorageNode> {
         match self {
-            PickerAlgorithm::Default(algo) => default_method(algo, &sharks),
+            PickerAlgorithm::Default(algo) => algo.method(sharks),
         }
     }
 }
 
-// TODO: put me somewhere more sensible
-fn default_method(
-    algo: &DefaultPickerAlgorithm,
-    sharks: &[StorageNode],
-) -> Vec<StorageNode> {
-    let mut ret: Vec<StorageNode> = vec![];
+impl DefaultPickerAlgorithm {
+    fn method(&self, sharks: &[StorageNode]) -> Vec<StorageNode> {
+        let mut ret: Vec<StorageNode> = vec![];
 
-    // if the min_avail_mb is not specified or if the sharks available space
-    // is less than min_avail_mb skip it.
-    for s in sharks.iter() {
-        if let Some(min_avail_mb) = algo.min_avail_mb {
-            if algo.blacklist.contains(&s.datacenter)
-                || s.available_mb < min_avail_mb
-            {
-                continue;
+        // If the min_avail_mb is specified and the sharks available space is less
+        // than min_avail_mb skip it.
+        for s in sharks.iter() {
+            if let Some(min_avail_mb) = self.min_avail_mb {
+                if self.blacklist.contains(&s.datacenter)
+                    || s.available_mb < min_avail_mb
+                {
+                    continue;
+                }
             }
+            ret.push(s.to_owned())
         }
-        ret.push(s.to_owned())
-    }
 
-    ret
+        ret
+    }
 }
 
 impl Picker {
@@ -108,19 +115,6 @@ impl Picker {
         }
     }
 
-    /// Choose the sharks based on the specified algorithm
-    pub fn choose(&self, algo: &PickerAlgorithm) -> Option<Vec<StorageNode>> {
-        let mut sharks: Vec<StorageNode>;
-
-        if let Some(s) = self.get_sharks() {
-            sharks = s.clone();
-        } else {
-            return None;
-        }
-
-        Some(algo.choose(sharks))
-    }
-
     /// Get the the Vec<sharks> from the picker.
     pub fn get_sharks(&self) -> Option<Vec<StorageNode>> {
         self.sharks.lock().unwrap().take()
@@ -147,6 +141,25 @@ impl Picker {
             }
         })
     }
+}
+
+impl SharkSource for Picker {
+    /// Choose the sharks based on the specified algorithm
+    fn choose(&self, algo: &PickerAlgorithm) -> Option<Vec<StorageNode>> {
+        let mut sharks: Vec<StorageNode>;
+
+        if let Some(s) = self.get_sharks() {
+            sharks = s.clone();
+        } else {
+            return None;
+        }
+
+        Some(algo.choose(&sharks))
+    }
+}
+
+pub trait SharkSource: Sync + Send {
+    fn choose(&self, algo: &PickerAlgorithm) -> Option<Vec<StorageNode>>;
 }
 
 // Use our prototype picker zone for now.  Might change this to a shard 1 moray

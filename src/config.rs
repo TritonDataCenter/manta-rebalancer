@@ -1,4 +1,12 @@
-// Copyright 2019 Joyent, Inc.
+/*
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ */
+
+/*
+ * Copyright 2019, Joyent, Inc.
+ */
 
 extern crate clap;
 
@@ -6,8 +14,9 @@ use clap::{App, AppSettings, Arg, ArgMatches, SubCommand as ClapSubCommand};
 use serde::Deserialize;
 use std::fs::File;
 use std::io::{BufReader, Error};
+use std::process;
 
-use crate::job::{EvacuateJob, Job, JobAction};
+use crate::jobs::{evacuate::EvacuateJob, Job, JobAction};
 use crate::util;
 
 #[derive(Deserialize, Default, Debug, Clone)]
@@ -20,6 +29,7 @@ pub struct Config {
     pub sapi_url: String,
     pub domain_name: String,
     pub shards: Vec<Shard>,
+    pub database_url: String,
 }
 
 impl Config {
@@ -47,14 +57,13 @@ impl Config {
         })
     }
 }
-#[derive(Debug)]
+
 pub enum SubCommand {
     Server, // Start the server
     Agent,
     DoJob(Box<Job>),
 }
 
-#[derive(Debug)]
 pub struct Command {
     pub config: Config,
     pub subcommand: SubCommand,
@@ -118,7 +127,6 @@ impl Command {
                                             .value_name("SHARK")
                                             .help("shark to evacuate"),
                                     )
-                                    // TODO: use picker
                                     .arg(
                                         Arg::with_name("to_shark")
                                             .short("d")
@@ -180,12 +188,22 @@ impl Command {
     }
 }
 
+// TODO:
+// This should really be removed in favor of the following:
+// 1. Command::new() handling override of domain_name from config file
+// 2. Job::new() taking all args necssary to create new Job Action (e.g.
+// EvacuateJob)
 fn job_subcommand_handler(matches: &ArgMatches, config: Config) -> SubCommand {
     let shark_id = matches.value_of("from_shark").unwrap_or("").to_string();
     let domain_name = matches.value_of("domain").unwrap_or(&config.domain_name);
 
     let from_shark = format!("{}.{}", shark_id, domain_name);
-    let job_action = JobAction::Evacuate(EvacuateJob::new(from_shark));
+    // TODO: This should probably be based on the Job UUID and not the pid as
+    // we plan to have a server mode that will generate multiple jobs in a
+    // single process.
+    let db_url = format!("{}.{}", &config.database_url, process::id());
+    let job_action =
+        JobAction::Evacuate(Box::new(EvacuateJob::new(from_shark, &db_url)));
     let job = Job::new(job_action, config);
 
     SubCommand::DoJob(Box::new(job))
