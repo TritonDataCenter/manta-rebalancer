@@ -110,7 +110,7 @@ impl Task {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize, Debug)]
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
 pub enum TaskStatus {
     Pending,
     Running,

@@ -41,8 +41,8 @@ use walkdir::WalkDir;
 
 type Assignments = HashMap<String, Arc<RwLock<Assignment>>>;
 
-static REBALANCER_SCHEDULED_DIR: &str = "/manta/rebalancer";
-static REBALANCER_FINISHED_DIR: &str = "/var/tmp/rebalancer";
+static REBALANCER_SCHEDULED_DIR: &str = "/var/tmp/rebalancer/scheduled";
+static REBALANCER_FINISHED_DIR: &str = "/var/tmp/rebalancer/completed";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum AgentAssignmentState {
@@ -99,7 +99,7 @@ pub struct Assignment {
     pub uuid: String,
     pub stats: AgentAssignmentStats,
 
-    #[serde(skip_serializing, skip_deserializing)]
+    #[serde(skip_serializing, skip_deserializing, default)]
     pub tasks: Vec<Task>,
 }
 
@@ -250,7 +250,7 @@ fn assignment_save(
     }
 }
 
-// Given a uuid of a particular assignment, extract its contents from
+// Given the path of a particular assignment, extract its contents from
 // persistent storage.  All assignements on disk are stored in separate
 // files named after their uuid.  The format is an sqlite database.  We
 // construct a vector of tasks based on the contents of the only table
@@ -563,7 +563,7 @@ fn verify_file_md5(file_path: &str, csum: &str) -> bool {
         }
     };
 
-    let result_ascii = base64::encode(&hasher.result().to_ascii_lowercase());
+    let result_ascii = base64::encode(&hasher.result());
     result_ascii == csum
 }
 
@@ -775,5 +775,257 @@ fn router() -> Router {
 fn create_dir(dirname: &str) {
     if let Err(e) = fs::create_dir_all(dirname) {
         panic!("Error creating directory {}", e);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gotham::handler::assets::FileOptions;
+    use gotham::router::builder::{
+        build_simple_router, DefineSingleRoute, DrawRoutes,
+    };
+    use gotham::test::TestServer;
+    use std::{mem, thread, time};
+
+    static MANTA_SRC_DIR: &str = "/var/tmp/rebalancer/src";
+
+    // Very basic web server used to serve out files upon request.  This is
+    // intended to be a replacement for a normal storage node in Manta (for
+    // non-mako-specific testing.  That is, it is a means for testing basic
+    // agent functionality.  It runs on port 80, as a normal web server would
+    // and it treats GET requests in a similar manner that mako would, routing
+    // GET requests based on account id and object id.  In the context of
+    // testing, it is expected that the account id is "rebalancer", therefore,
+    // requests for objects should look like:
+    // GET /rebalancer/<object>.  To test with a wide variety of accounts, use
+    // a real storage node.
+    fn simple_server() {
+        let addr = "127.0.0.1:80";
+        let router = build_simple_router(|route| {
+            // You can add a `to_dir` or `to_file` route simply using a
+            // `String` or `str` as above, or a `Path` or `PathBuf` to accept
+            // default options.
+            // route.get("/").to_file("assets/doc.html");
+            // Or you can customize options for comressed file handling, cache
+            // control headers etc by building a `FileOptions` instance.
+            route.get("/rebalancer/*").to_dir(
+                FileOptions::new(MANTA_SRC_DIR)
+                    .with_cache_control("no-cache")
+                    .with_gzip(true)
+                    .build(),
+            );
+        });
+
+        thread::spawn(move || gotham::start(addr, router));
+    }
+
+    // Utility that actually forms the request, sends it off to the test
+    // server and verifies that it was received as intended.  Upon success,
+    // return the uuid of the assignment which we will use to monitor progress.
+    fn send_assignment(
+        test_server: &TestServer,
+        assignment: Arc<RwLock<Assignment>>,
+    ) -> String {
+        let tasks = &assignment.read().unwrap().tasks;
+        let body: Vec<u8> =
+            serde_json::to_vec(tasks).expect("Serialized assignment");
+
+        let response = test_server
+            .client()
+            .post(
+                "http://localhost/assignments",
+                hyper::Body::from(body),
+                mime::APPLICATION_JSON,
+            )
+            .perform()
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = response.read_body().unwrap();
+        let data = String::from_utf8(body.to_vec()).unwrap();
+        let uuid: String = match serde_json::from_str(&data) {
+            Ok(s) => s,
+            Err(e) => panic!(format!("Error: {}", e)),
+        };
+
+        println!("response: {:?}", uuid);
+        uuid.to_string()
+    }
+
+    // Given a path of an assignment on disk, load it in to memory.  If for
+    // some reason this does not succeed, panic, causing the test case that
+    // invoked it to fail.
+    fn load_assignment(path: String) -> Arc<RwLock<Assignment>> {
+        let assignment = match assignment_recall(path) {
+            Ok(a) => a,
+            Err(e) => panic!(format!("Unable to load assignment: {}", e)),
+        };
+
+        assignment
+    }
+
+    // Send a request to get the latest information on an assignment.  This
+    // information is used by the test automation to determine how far along
+    // the agent is in processing the assignment.  During testing, this will
+    // likely be called repeatedly for a particular assignment until it is
+    // observed that the number of tasks completed is equal to the total number
+    // of tasks in the assignment.
+    fn get_progress(test_server: &TestServer, uuid: &str) -> Assignment {
+        let url = format!("http://localhost/assignment/{}", uuid);
+        let response = test_server.client().get(url).perform().unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response.read_body().unwrap();
+        let data = String::from_utf8(body.to_vec()).unwrap();
+        let assignment: Assignment = match serde_json::from_str(&data) {
+            Ok(a) => a,
+            Err(e) => panic!(format!("Failed to deserialize: {}", e)),
+        };
+
+        assignment
+    }
+
+    // Poll the server indefinitely on the status of a given assignment until
+    // it is complete.  Currently, it's not clear if there should be an
+    // expectation on how long an assignment should take to complete, especially
+    // in a test scenario.  If the agent is inoperable due to being wedged, a
+    // request will timeout causing a panic for a given test case anyway.  For
+    // that reason, it is probably reasonable to allow this function to loop
+    // indefinitely with the assumption that the agent is not hung.
+    fn monitor_progress(test_server: &TestServer, uuid: &str) -> Assignment {
+        loop {
+            let assignment = get_progress(test_server, uuid);
+            thread::sleep(time::Duration::from_secs(10));
+
+            // If we have finished processing all tasks, return the assignment
+            // to the caller.
+            if mem::discriminant(&assignment.stats.state)
+                == mem::discriminant(&AgentAssignmentState::Complete(None))
+            {
+                return assignment;
+            }
+            thread::sleep(time::Duration::from_secs(10));
+        }
+    }
+
+    // Given the uuid of a single assignment, monitor its progress until
+    // it is complete.  Ensure that all tasks in the assignment have the
+    // expected status at the end.
+    fn monitor_assignment(
+        test_server: &TestServer,
+        uuid: &str,
+        expected: TaskStatus,
+    ) {
+        // Wait for the assignment to complete.
+        let assignment = monitor_progress(test_server, &uuid);
+        let stats = &assignment.stats;
+
+        if let AgentAssignmentState::Complete(opt) = &stats.state {
+            match opt {
+                None => {
+                    if expected != TaskStatus::Complete {
+                        panic!("Missing expected list of failed tasks.");
+                    }
+                }
+                Some(tasks) => {
+                    for t in tasks.iter() {
+                        assert_eq!(t.status, expected);
+                    }
+                }
+            }
+        }
+    }
+
+    // Utility function which is very frequently used to set up both the test
+    // server (the agent) as well as a simple web server (which acts as a
+    // storage node).  It only takes one argument which is the path of an
+    // assignment to load.  Functions called from unit_test_init() that do not
+    // succeed will panic, so there is no need to return anything other than the
+    // the test server and the newly loaded assignment.
+    fn unit_test_init(path: &str) -> (TestServer, Arc<RwLock<Assignment>>) {
+        simple_server();
+        let test_server: TestServer = TestServer::new(router()).unwrap();
+        let assignment = load_assignment(path.to_string());
+        (test_server, assignment)
+    }
+
+    // Test name:    Download
+    // Description:  Download a healthy file from a storage node that the agent
+    //               does not already have.
+    // Expected:     The operation should be a success.  Specifically,
+    //               TaskStatus for any/all tasks as part of this assignment
+    //               should appear as "Complete".
+    #[test]
+    fn download() {
+        let (test_server, assignment) = unit_test_init("test/agent/areacodes");
+        let uuid = send_assignment(&test_server, assignment);
+        monitor_assignment(&test_server, &uuid, TaskStatus::Complete);
+    }
+
+    // Test name:    Replace healthy
+    // Description:  First, download a known healthy file that the agent (may or
+    //               may not already have).  After successful completion of the
+    //               first download, repeat the process a second time with the
+    //               exact same assignment information.
+    // Expected:     TaskStatus for all tasks in the assignment should appear
+    //               as "Complete".
+    #[test]
+    fn replace_healthy() {
+        // Download a file once.
+        let (test_server, assignment) = unit_test_init("test/agent/areacodes");
+        let uuid = send_assignment(&test_server, assignment);
+        monitor_assignment(&test_server, &uuid, TaskStatus::Complete);
+
+        // Download it again, but this time use the uuid to the database in
+        // /manta/rebalancer/uuid to make sure that the task status is complete
+        // after the second run.
+        let assignment = load_assignment("test/agent/areacodes".to_string());
+        let uuid = send_assignment(&test_server, assignment);
+        monitor_assignment(&test_server, &uuid, TaskStatus::Complete);
+    }
+
+    // Test name:   Object not found.
+    // Description: Attempt to download an object from a storage node where
+    //              the object does not reside.
+    // Expected:    TaskStatus for all tasks in the assignment should appear
+    //              as "Failed("Failed request with status: 404 Not Found")".
+    #[test]
+    fn object_not_found() {
+        let reason = "Failed request with status: 404 Not Found".to_string();
+        let (test_server, assignment) = unit_test_init("test/agent/areacodes");
+
+        // Rename the object id to something that we know is not on the storage
+        // server.  In this case, a file by the name of "abc".
+        assignment.write().unwrap().tasks[0].object_id = "abc".to_string();
+        let uuid = send_assignment(&test_server, assignment);
+        monitor_assignment(&test_server, &uuid, TaskStatus::Failed(reason));
+    }
+
+    // Test name:   Fail to repair a damaged file due to checksum failure.
+    // Description: Download a file in order to replace a known damaged copy.
+    //              Upon completion of the download, the checksum of the file
+    //              should fail.  It is important to note that the purpose of
+    //              this test is not to specifcally test the correctness of
+    //              the mechanism used to calculate the md5 hash, but rather to
+    //              verify that in a situation where the calculated hash does
+    //              not match the expected value, such an event is made known
+    //              to us in the records of failed tasks supplied to us by the
+    //              assignment when we ask for it at its completion.
+    //
+    // Expected:    TaskStatus for all tasks in the assignment should appear
+    //              as Failed("Checksum").
+    #[test]
+    fn failed_checksum() {
+        let reason = "Checksum".to_string();
+        let (test_server, assignment) = unit_test_init("test/agent/areacodes");
+
+        // Scribble on the checksum information for the object.  This ensures
+        // that it will fail at the end, even though the agent calculates it
+        // correctly.
+        assignment.write().unwrap().tasks[0].md5sum = "abc".to_string();
+        let uuid = send_assignment(&test_server, assignment);
+        monitor_assignment(&test_server, &uuid, TaskStatus::Failed(reason));
     }
 }
