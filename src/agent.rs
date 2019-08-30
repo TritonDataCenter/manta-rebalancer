@@ -29,8 +29,7 @@ use hyper::{Body, Chunk, Method};
 use libmanta::moray::MantaObjectShark;
 use md5::{Digest, Md5};
 
-use crate::jobs::Task;
-use crate::jobs::TaskStatus;
+use crate::jobs::{AssignmentPayload, Task, TaskStatus};
 
 use reqwest::StatusCode;
 use rusqlite;
@@ -372,8 +371,15 @@ fn post(agent: Agent, mut state: State) -> Box<HandlerFuture> {
             Ok(valid_body) => {
                 // Ceremony for parsing the information needed to create an
                 // an assignent out of the message body.
-                let v = validate_assignment(&valid_body).unwrap();
-                let uuid = Uuid::new_v4().to_hyphenated().to_string();
+                let (uuid, v) = match validate_assignment(&valid_body) {
+                    Ok(uv) => uv,
+                    Err(_e) => {
+                        let res = create_empty_response(&state,
+                            StatusCode::BAD_REQUEST);
+                        return future::ok((state, res));
+                    },
+                };
+
                 let assignment =
                     Arc::new(RwLock::new(Assignment::new(v, &uuid)));
 
@@ -478,16 +484,23 @@ fn get_assignment(
     Box::new(future::ok((state, res)))
 }
 
-fn validate_assignment(body: &Chunk) -> Result<Vec<Task>, String> {
-    let data = String::from_utf8(body.to_vec()).unwrap();
-
-    let v = match serde_json::from_str(&data) {
-        Ok(v) => v,
-        Err(e) => return Err(format!("Failed to deserialize: {}", e)),
+// This function extracts the message body of a POST request.  The message body
+// is a serialized json object continaing two things: the uuid of the
+// assignment itself and a Vec<Task>.  These two items comprise the payload
+// and are required to process an assignment.  As soon as it has been
+// deserialized, this function will split it up in to the various pieces
+// needed by the agent to get the process started.  The pieces of the payload
+// go separate ways after this point, so they are separated out here in a tuple
+// to save the caller from the monotony of accessing each (private) member of
+// the structure by hand.
+fn validate_assignment(body: &Chunk) -> Result<(String, Vec<Task>), String> {
+    let payload: AssignmentPayload = match serde_json::from_slice(
+        &body.to_vec()) {
+        Ok(p) => p,
+        Err(e) => return Err(format!("Failed to deserialize payload: {}", e)),
     };
 
-    let assignment: Vec<Task> = serde_json::from_value(v).unwrap();
-    Ok(assignment)
+    Ok(<(String, Vec<Task>)>::from(payload))
 }
 
 impl Handler for Agent {
@@ -828,8 +841,16 @@ mod tests {
         assignment: Arc<RwLock<Assignment>>,
     ) -> String {
         let tasks = &assignment.read().unwrap().tasks;
+
+        // Generate a uuid to accompany the assignment that we are about to
+        // send to the agent.
+        let uuid = Uuid::new_v4().to_hyphenated().to_string();
+        let obj: (String, Vec<Task>) = (uuid.clone(), tasks.to_vec());
+
+        // Finally, serialize the entire HashMap before stuffing it in the
+        // message body.
         let body: Vec<u8> =
-            serde_json::to_vec(tasks).expect("Serialized assignment");
+            serde_json::to_vec(&obj).expect("Serialized payload");
 
         let response = test_server
             .client()
@@ -845,13 +866,17 @@ mod tests {
 
         let body = response.read_body().unwrap();
         let data = String::from_utf8(body.to_vec()).unwrap();
-        let uuid: String = match serde_json::from_str(&data) {
+        let resp_uuid: String = match serde_json::from_str(&data) {
             Ok(s) => s,
             Err(e) => panic!(format!("Error: {}", e)),
         };
 
-        println!("response: {:?}", uuid);
-        uuid.to_string()
+        println!("Response: {:?}", resp_uuid);
+
+        // Perhaps it is overkill, but check to ensure that the uuid given
+        // back to us matches what we actually sent.
+        assert_eq!(uuid, resp_uuid);
+        resp_uuid.to_string()
     }
 
     // Given a path of an assignment on disk, load it in to memory.  If for

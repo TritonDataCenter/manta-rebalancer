@@ -74,6 +74,19 @@ impl fmt::Debug for Job {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssignmentPayload {
+    id: String,
+    tasks: Vec<Task>
+}
+
+impl From<AssignmentPayload> for (String, Vec<Task>) {
+    fn from(p: AssignmentPayload) -> (String, Vec<Task>) {
+        let AssignmentPayload { id, tasks } = p;
+        (id, tasks)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 enum AssignmentState {
     Init,
