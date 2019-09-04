@@ -741,8 +741,13 @@ fn process_assignment(assignments: Arc<Mutex<Assignments>>, uuid: String) {
         tmp.tasks[i] = t;
     }
 
+    let failed = match failures.is_empty() {
+        true => None,
+        _ => Some(failures),
+    };
+
     assignment.write().unwrap().stats.state =
-        AgentAssignmentState::Complete(Some(failures));
+        AgentAssignmentState::Complete(failed);
     assignment_complete(assignments, uuid);
 }
 
