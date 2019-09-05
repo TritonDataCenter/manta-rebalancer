@@ -450,12 +450,12 @@ fn get_assignment_impl(
 fn get_assignment(
     agent: Agent,
     state: State,
-    path: PathExtractor,
+    id: &str,
 ) -> Box<HandlerFuture> {
     // If the uuid supplied by the client does not represent a valid UUID,
     // return a response indicating that they sent a bad request.
-    let uuid = match Uuid::parse_str(&path.parts[1]) {
-        Ok(_u) => &path.parts[1],
+    let uuid = match Uuid::parse_str(id) {
+        Ok(_u) => id,
         Err(e) => {
             let msg = format!("Invalid uuid: {}", e);
             let res = create_response(
@@ -514,17 +514,14 @@ impl Handler for Agent {
             "GET" => {
                 let path = PathExtractor::borrow_from(&state).clone();
 
-                // If we received a GET request, there must be at least one
-                // part of a path specified (which we match for below),
+                // If we received a GET request, there must only be one
+                // part of a path specified (i.e. the uuid of the assignment)
                 // otherwise, return a 404 to the client.
-                if path.parts.is_empty() {
+                if path.parts.len() != 1 {
                     return empty_response(state, StatusCode::NOT_FOUND);
                 }
 
-                match path.parts[0].as_str() {
-                    "assignment" => get_assignment(self, state, path),
-                    _ => empty_response(state, StatusCode::NOT_FOUND),
-                }
+                get_assignment(self, state, &path.parts[0])
             }
             _ => empty_response(state, StatusCode::METHOD_NOT_ALLOWED),
         }
@@ -782,7 +779,7 @@ fn router() -> Router {
         discover_saved_assignments(&agent);
 
         route
-            .get("/*")
+            .get("/assignments/*")
             .with_path_extractor::<PathExtractor>()
             .to_new_handler(agent.clone());
 
@@ -903,7 +900,7 @@ mod tests {
     // observed that the number of tasks completed is equal to the total number
     // of tasks in the assignment.
     fn get_progress(test_server: &TestServer, uuid: &str) -> Assignment {
-        let url = format!("http://localhost/assignment/{}", uuid);
+        let url = format!("http://localhost/assignments/{}", uuid);
         let response = test_server.client().get(url).perform().unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
