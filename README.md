@@ -66,3 +66,21 @@ cargo check
 cargo clippy
 cargo test
 ```
+
+## Testing
+
+There is a certain flavor of the rebalancer agent that allow for more convenient
+testing of the zone -- namely one that receives a (properly formed) assignment
+and blindly marks all tasks within it as "Complete" instead of actually doing
+the leg work of processing each task.  This is intended for scenarios where
+functional verification of the happy path in the rebalancer zone.  As this
+project evolves, other modes will likely be introduced.
+
+To build the version of the agent described above, a special flag must be
+passed to the compiled to enable the feature:
+
+```
+cargo build --features "always_pass"
+```
+
+Note: By default, this feature will never be enabled.

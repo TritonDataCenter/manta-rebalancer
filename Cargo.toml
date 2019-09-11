@@ -7,6 +7,14 @@ edition = "2018"
 [profile.dev]
 panic = "abort"
 
+[features]
+# No features by default
+default = []
+
+# Always mark a task as complete without attempting to even download the object
+# within it.  This is for TESTING PURPOSES ONLY!
+always_pass = []
+
 [dependencies]
 base64 = "0.10.1"
 uuid = { version = "0.7.4", features = ["v4"] }

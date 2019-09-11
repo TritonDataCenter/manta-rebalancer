@@ -620,6 +620,13 @@ fn download(
     }
 }
 
+#[cfg(feature = "always_pass")]
+fn process_task(task: &mut Task) {
+    task.set_status(TaskStatus::Complete);
+    return;
+}
+
+#[cfg(not(feature = "always_pass"))]
 fn process_task(task: &mut Task) {
     let file_path = manta_file_path(&task.owner, &task.object_id);
     let path = Path::new(&file_path);
@@ -953,7 +960,7 @@ mod tests {
             match opt {
                 None => {
                     if expected != TaskStatus::Complete {
-                        panic!("Missing expected list of failed tasks.");
+                        panic!("Assignment succeeded when it should not.");
                     }
                 }
                 Some(tasks) => {
