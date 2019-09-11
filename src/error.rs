@@ -17,6 +17,7 @@ pub enum Error {
     Hyper(hyper::Error),
     Diesel(diesel::result::Error),
     SerdeJson(serde_json::error::Error),
+    Reqwest(reqwest::Error),
 }
 
 impl std::error::Error for Error {
@@ -27,6 +28,7 @@ impl std::error::Error for Error {
             Error::Hyper(e) => e.description(),
             Error::Diesel(e) => e.description(),
             Error::SerdeJson(e) => e.description(),
+            Error::Reqwest(e) => e.description(),
         }
     }
 }
@@ -61,6 +63,12 @@ impl From<serde_json::error::Error> for Error {
     }
 }
 
+impl From<reqwest::Error> for Error {
+    fn from(error: reqwest::Error) -> Self {
+        Error::Reqwest(error)
+    }
+}
+
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
@@ -69,6 +77,7 @@ impl fmt::Display for Error {
             Error::Hyper(e) => write!(f, "{}", e),
             Error::Diesel(e) => write!(f, "{}", e),
             Error::SerdeJson(e) => write!(f, "{}", e),
+            Error::Reqwest(e) => write!(f, "{}", e),
         }
     }
 }
@@ -86,6 +95,7 @@ pub enum InternalErrorCode {
     Crossbeam,
     PickerError,
     AssignmentLookupError,
+    AssignmentGetError,
     LockError,
 }
 

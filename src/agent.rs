@@ -374,10 +374,12 @@ fn post(agent: Agent, mut state: State) -> Box<HandlerFuture> {
                 let (uuid, v) = match validate_assignment(&valid_body) {
                     Ok(uv) => uv,
                     Err(_e) => {
-                        let res = create_empty_response(&state,
-                            StatusCode::BAD_REQUEST);
+                        let res = create_empty_response(
+                            &state,
+                            StatusCode::BAD_REQUEST,
+                        );
                         return future::ok((state, res));
-                    },
+                    }
                 };
 
                 let assignment =
@@ -447,11 +449,7 @@ fn get_assignment_impl(
     None
 }
 
-fn get_assignment(
-    agent: Agent,
-    state: State,
-    id: &str,
-) -> Box<HandlerFuture> {
+fn get_assignment(agent: Agent, state: State, id: &str) -> Box<HandlerFuture> {
     // If the uuid supplied by the client does not represent a valid UUID,
     // return a response indicating that they sent a bad request.
     let uuid = match Uuid::parse_str(id) {
@@ -494,11 +492,13 @@ fn get_assignment(
 // to save the caller from the monotony of accessing each (private) member of
 // the structure by hand.
 fn validate_assignment(body: &Chunk) -> Result<(String, Vec<Task>), String> {
-    let payload: AssignmentPayload = match serde_json::from_slice(
-        &body.to_vec()) {
-        Ok(p) => p,
-        Err(e) => return Err(format!("Failed to deserialize payload: {}", e)),
-    };
+    let payload: AssignmentPayload =
+        match serde_json::from_slice(&body.to_vec()) {
+            Ok(p) => p,
+            Err(e) => {
+                return Err(format!("Failed to deserialize payload: {}", e))
+            }
+        };
 
     Ok(<(String, Vec<Task>)>::from(payload))
 }

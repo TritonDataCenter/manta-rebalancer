@@ -143,18 +143,14 @@ impl Picker {
     }
 }
 
+// TODO: MANTA-4519
 impl SharkSource for Picker {
     /// Choose the sharks based on the specified algorithm
     fn choose(&self, algo: &PickerAlgorithm) -> Option<Vec<StorageNode>> {
-        let mut sharks: Vec<StorageNode>;
-
-        if let Some(s) = self.get_sharks() {
-            sharks = s.clone();
-        } else {
-            return None;
+        match self.get_sharks() {
+            Some(s) => Some(algo.choose(&s)),
+            None => None,
         }
-
-        Some(algo.choose(&sharks))
     }
 }
 

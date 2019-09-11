@@ -12,6 +12,7 @@ pub mod evacuate;
 
 use crate::config::Config;
 use crate::error::Error;
+use crate::picker::StorageNode;
 
 use std::collections::HashMap;
 use std::fmt;
@@ -77,7 +78,7 @@ impl fmt::Debug for Job {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AssignmentPayload {
     id: String,
-    tasks: Vec<Task>
+    tasks: Vec<Task>,
 }
 
 impl From<AssignmentPayload> for (String, Vec<Task>) {
@@ -89,21 +90,37 @@ impl From<AssignmentPayload> for (String, Vec<Task>) {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 enum AssignmentState {
-    Init,
-    Assigned,
-    Rejected,
-    Complete,
-    PostProcessed,
+    Init,          // Assignment is in the process of being created.
+    Assigned,      // Assignment has been submitted to the Agent.
+    Rejected,      // Agent has rejected the Assignment.
+    AgentComplete, // Agent as completed its work, and the JobAction is now
+    // post processing the Assignment.
+    PostProcessed, // The Assignment has completed all necessary work.
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Assignment {
     id: String,
-    dest_shark: StorageId,
+    dest_shark: StorageNode,
     tasks: HashMap<ObjectId, Task>,
     max_size: u64,
     total_size: u64,
     state: AssignmentState,
+}
+
+impl Assignment {
+    fn new(dest_shark: StorageNode) -> Self {
+        let max_size = dest_shark.available_mb / 2;
+
+        Self {
+            id: Uuid::new_v4().to_string(),
+            dest_shark,
+            max_size,
+            total_size: 0,
+            tasks: HashMap::new(),
+            state: AssignmentState::Init,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
