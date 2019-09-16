@@ -158,7 +158,7 @@ do
     insert_task "$uuid" "$i"
 
     if [[ "$storage_id" -eq "localhost" ]]; then
-        mkdir "$object_dir"
+        mkdir -p "$object_dir"
         cp "$i" "$object_dir"
     else
         curl -X PUT -T $i "http://$storage_id/$account/$(basename $i)"
