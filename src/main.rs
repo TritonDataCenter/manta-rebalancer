@@ -23,7 +23,12 @@ fn main() -> Result<(), Error> {
         SubCommand::Server => Ok(()),
         SubCommand::DoJob(job) => job.run(),
         SubCommand::Agent => {
-            Agent::run("127.0.0.1:7878");
+            // We should only be using 0.0.0.0 (INADDR_ANY) temporarily.  In
+            // production we will be supply an ip address that is obtained from
+            // the config file that we process which will dictate the network
+            // on which to listen.  It is worth mentioning that this will likely
+            // also be the case for the agent port.
+            Agent::run("0.0.0.0:7878");
             Ok(())
         }
     }
