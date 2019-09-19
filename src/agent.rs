@@ -254,7 +254,10 @@ fn assignment_save(
 // files named after their uuid.  The format is an sqlite database.  We
 // construct a vector of tasks based on the contents of the only table
 // in the file called `tasks'.
-fn assignment_recall(path: String) -> Result<Arc<RwLock<Assignment>>, String> {
+fn assignment_recall<S: Into<String>>(
+    path: S
+) -> Result<Arc<RwLock<Assignment>>, String> {
+    let path = path.into();
     let file_path = Path::new(&path);
 
     if !file_path.exists() {
@@ -364,6 +367,15 @@ fn assignment_complete(assignments: Arc<Mutex<Assignments>>, uuid: String) {
     hm.remove(&uuid);
 }
 
+// Given an assignment uuid, check for its presence in both the "scheduled" and
+// "completed" directory.  If found in either, return true, otherwise, false.
+fn assignment_exists(uuid: &str) -> bool {
+    let scheduled = format!("{}/{}", REBALANCER_SCHEDULED_DIR, &uuid);
+    let finished = format!("{}/{}", REBALANCER_FINISHED_DIR, &uuid);
+
+    Path::new(&scheduled).exists() || Path::new(&finished).exists()
+}
+
 fn post(agent: Agent, mut state: State) -> Box<HandlerFuture> {
     let f = Body::take_from(&mut state)
         .concat2()
@@ -381,6 +393,17 @@ fn post(agent: Agent, mut state: State) -> Box<HandlerFuture> {
                         return future::ok((state, res));
                     }
                 };
+
+                // Ensure that an asignment with this uuid is not already
+                // currently in flight.  If there is one, do not allow this
+                // assignment to proceed.
+                if assignment_exists(&uuid) {
+                    let res = create_empty_response(
+                        &state,
+                        StatusCode::CONFLICT,
+                    );
+                    return future::ok((state, res));
+                }
 
                 let assignment =
                     Arc::new(RwLock::new(Assignment::new(v, &uuid)));
@@ -745,9 +768,10 @@ fn process_assignment(assignments: Arc<Mutex<Assignments>>, uuid: String) {
         tmp.tasks[i] = t;
     }
 
-    let failed = match failures.is_empty() {
-        true => None,
-        _ => Some(failures),
+    let failed = if failures.is_empty() {
+        None
+    } else {
+        Some(failures)
     };
 
     assignment.write().unwrap().stats.state =
@@ -842,18 +866,38 @@ mod tests {
         thread::spawn(move || gotham::start(addr, router));
     }
 
-    // Utility that actually forms the request, sends it off to the test
-    // server and verifies that it was received as intended.  Upon success,
-    // return the uuid of the assignment which we will use to monitor progress.
+    // This is a wrapper for `send_assignment_impl()'.  Under most circumstances
+    // this is the function that a test will call and in doing so, it is with
+    // the expectation that we will receive a status code of 200 (OK) from the
+    // server and also that we have no interest in setting the uuid of the
+    // assignment to anything specific.  For test cases that (for example) use
+    // the same assignment uuid more than once and/or expect various status
+    // codes other than 200 from the server, `send_assignment_impl()' can be
+    // called directly, allowing the caller to supply those expectations in the
+    // form of two additional arguments: the uuid of the assignment and the
+    // desired http status code returned from the server.
     fn send_assignment(
         test_server: &TestServer,
         assignment: Arc<RwLock<Assignment>>,
     ) -> String {
-        let tasks = &assignment.read().unwrap().tasks;
-
         // Generate a uuid to accompany the assignment that we are about to
         // send to the agent.
         let uuid = Uuid::new_v4().to_hyphenated().to_string();
+        send_assignment_impl(test_server, assignment, &uuid, StatusCode::OK);
+        uuid
+    }
+
+    // Utility that actually forms the request, sends it off to the test
+    // server and verifies that it was received as intended.  Upon success,
+    // return the uuid of the assignment which we will use to monitor progress.
+    fn send_assignment_impl(
+        test_server: &TestServer,
+        assignment: Arc<RwLock<Assignment>>,
+        id: &str,
+        status: StatusCode,
+    ) {
+        let tasks = &assignment.read().unwrap().tasks;
+        let uuid = id.to_string();
         let obj: (String, Vec<Task>) = (uuid.clone(), tasks.to_vec());
 
         // Finally, serialize the entire HashMap before stuffing it in the
@@ -871,7 +915,19 @@ mod tests {
             .perform()
             .unwrap();
 
-        assert_eq!(response.status(), StatusCode::OK);
+        // Fail immediately if the status code returned to us from the server
+        // is not what we expect.
+        assert_eq!(response.status(), status);
+
+        // If we are here, then we received the status code from the server
+        // that we expected.  That is, things are proceeding how we hoped they
+        // would.  If we are expecting a status code of anything other than
+        // StatusCode::OK, then the test ends here as a success.  There is no
+        // need to parse the message body or monitor progress later on as this
+        // assignment is not being processed by the agent.
+        if status != StatusCode::OK {
+            return;
+        }
 
         let body = response.read_body().unwrap();
         let data = String::from_utf8(body.to_vec()).unwrap();
@@ -885,13 +941,12 @@ mod tests {
         // Perhaps it is overkill, but check to ensure that the uuid given
         // back to us matches what we actually sent.
         assert_eq!(uuid, resp_uuid);
-        resp_uuid.to_string()
     }
 
     // Given a path of an assignment on disk, load it in to memory.  If for
     // some reason this does not succeed, panic, causing the test case that
     // invoked it to fail.
-    fn load_assignment(path: String) -> Arc<RwLock<Assignment>> {
+    fn load_assignment<S: Into<String>>(path: S) -> Arc<RwLock<Assignment>> {
         let assignment = match assignment_recall(path) {
             Ok(a) => a,
             Err(e) => panic!(format!("Unable to load assignment: {}", e)),
@@ -981,7 +1036,7 @@ mod tests {
     fn unit_test_init(path: &str) -> (TestServer, Arc<RwLock<Assignment>>) {
         simple_server();
         let test_server: TestServer = TestServer::new(router()).unwrap();
-        let assignment = load_assignment(path.to_string());
+        let assignment = load_assignment(path);
         (test_server, assignment)
     }
 
@@ -1009,13 +1064,16 @@ mod tests {
     fn replace_healthy() {
         // Download a file once.
         let (test_server, assignment) = unit_test_init("test/agent/areacodes");
-        let uuid = send_assignment(&test_server, assignment);
+        let uuid = send_assignment(&test_server, Arc::clone(&assignment));
         monitor_assignment(&test_server, &uuid, TaskStatus::Complete);
 
-        // Download it again, but this time use the uuid to the database in
-        // /manta/rebalancer/uuid to make sure that the task status is complete
-        // after the second run.
-        let assignment = load_assignment("test/agent/areacodes".to_string());
+        // Send the exact same assignment again.  Note: Even though the contents
+        // of this assignment are identical to the previous one, it will be
+        // assigned a different uuid so that the agent does not automatically
+        // reject it.  The utility function `send_assignment()' generates a
+        // new random uuid on the callers behalf each time that it is called,
+        // which is why we have assurance that there will not be a uuid
+        // collision, resulting in a rejection.
         let uuid = send_assignment(&test_server, assignment);
         monitor_assignment(&test_server, &uuid, TaskStatus::Complete);
     }
@@ -1047,7 +1105,6 @@ mod tests {
     //              not match the expected value, such an event is made known
     //              to us in the records of failed tasks supplied to us by the
     //              assignment when we ask for it at its completion.
-    //
     // Expected:    TaskStatus for all tasks in the assignment should appear
     //              as Failed("Checksum").
     #[test]
@@ -1061,5 +1118,28 @@ mod tests {
         assignment.write().unwrap().tasks[0].md5sum = "abc".to_string();
         let uuid = send_assignment(&test_server, assignment);
         monitor_assignment(&test_server, &uuid, TaskStatus::Failed(reason));
+    }
+
+    // Test name:   Duplicate assignment
+    // Description: First, successfully process an assignment.  Upon completion
+    //              reissue the exact same assignment (including the uuid) to
+    //              the agent.  Any time that an agent receives an assignment
+    //              uuid that it knows it has already received -- regardless of
+    //              the state of that assignment (i.e. complete or not) -- it
+    //              the request should be rejected.
+    // Expected:    When we send the assignment for the second time, the server
+    //              should return a response of 409 (CONFLICT).
+    #[test]
+    fn duplicate_assignment() {
+        // Download a file once.
+        let (test_server, assignment) = unit_test_init("test/agent/areacodes");
+        let uuid = send_assignment(&test_server, Arc::clone(&assignment));
+        monitor_assignment(&test_server, &uuid, TaskStatus::Complete);
+
+        // Send the exact same assignment again and send it, although this time,
+        // we will reuse our first uuid. We expect to receive a status code of
+        // StatusCode::CONFLICT (409) from the server this time.
+        send_assignment_impl(&test_server, assignment, &uuid,
+            StatusCode::CONFLICT);
     }
 }
