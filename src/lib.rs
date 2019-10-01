@@ -24,5 +24,6 @@ pub mod jobs;
 pub mod agent;
 pub mod config;
 pub mod error;
+pub(crate) mod moray_client;
 pub mod picker;
 pub mod util;

@@ -15,9 +15,10 @@ use crate::jobs::{
     Assignment, AssignmentId, AssignmentPayload, AssignmentState, ObjectId,
     StorageId, Task, TaskStatus,
 };
+use crate::moray_client;
 use crate::picker::{self as mod_picker, SharkSource, StorageNode};
-use crate::util;
 
+use std::collections::hash_map::Entry::{Occupied, Vacant};
 use std::collections::HashMap;
 use std::error::Error as _Error;
 use std::io::ErrorKind;
@@ -29,7 +30,7 @@ use crossbeam_channel as crossbeam;
 use crossbeam_channel::TryRecvError;
 use crossbeam_deque::{Injector, Steal};
 use libmanta::moray::{MantaObject, MantaObjectShark};
-use moray::objects::{Etag, MethodOptions};
+use moray::client::MorayClient;
 use reqwest;
 use slog::{o, Drain, Logger};
 use std::borrow::Borrow;
@@ -48,6 +49,7 @@ table! {
         assignment_id -> Text,
         object -> Text,
         shard -> Integer,
+        etag -> Text,
         status -> EvacuateObjectStatusMapping,
     }
 }
@@ -65,6 +67,7 @@ pub struct EvacuateObjectDB {
     pub assignment_id: AssignmentId,
     pub object: String,
     pub shard: i32,
+    pub etag: String,
     pub status: EvacuateObjectStatus,
 }
 
@@ -76,6 +79,7 @@ struct FiniMsg;
 pub struct SharkSpotterObject {
     pub shard: i32,
     pub object: MantaObject,
+    pub etag: String,
 }
 
 #[derive(Debug, Clone, PartialEq, DbEnum)]
@@ -105,6 +109,7 @@ pub struct EvacuateObject {
     pub id: ObjectId,        // MantaObject ObjectId
     pub object: MantaObject, // The MantaObject being rebalanced
     pub shard: i32,          // shard number of metadata object record
+    pub etag: String,
     pub status: EvacuateObjectStatus,
     // Status of the object in the evacuation job
 }
@@ -116,6 +121,7 @@ impl EvacuateObject {
             id: ssobj.object.object_id.to_owned(),
             object: ssobj.object,
             shard: ssobj.shard,
+            etag: ssobj.etag,
             ..Default::default()
         }
     }
@@ -129,6 +135,7 @@ impl EvacuateObject {
             id: self.id.clone(),
             object: serde_json::to_string(&self.object)?,
             shard: self.shard,
+            etag: self.etag.clone(),
             status: self.status.clone(),
         })
     }
@@ -167,6 +174,12 @@ pub struct EvacuateJob {
     /// SqliteConnection to local database.
     pub conn: Mutex<SqliteConnection>,
 
+    /// domain_name of manta deployment
+    pub domain_name: String,
+
+    /// Logger
+    pub log: Logger,
+
     /// Accumulator for total time spent on DB inserts. (test/dev)
     pub total_db_time: Mutex<u128>,
 }
@@ -174,13 +187,22 @@ pub struct EvacuateJob {
 impl EvacuateJob {
     /// Create a new EvacauteJob instance.
     /// As part of this initialization also create a new SqliteConnection.
-    pub fn new<S: Into<String>>(from_shark: S, db_url: &str) -> Self {
+    pub fn new<S: Into<String>>(
+        from_shark: S,
+        domain_name: &str,
+        db_url: &str,
+    ) -> Self {
         let manta_storage_id = from_shark.into();
+        let plain = slog_term::PlainSyncDecorator::new(std::io::stdout());
+        let log = Logger::root(
+            Mutex::new(slog_term::FullFormat::new(plain).build()).fuse(),
+            o!("build-id" => "0.1.0"),
+        );
         let conn = SqliteConnection::establish(db_url)
             .unwrap_or_else(|_| panic!("Error connecting to {}", db_url));
         Self {
             min_avail_mb: Some(1000),
-            max_tasks_per_assignment: Some(100),
+            max_tasks_per_assignment: Some(1000),
             dest_shark_list: RwLock::new(HashMap::new()),
             assignments: RwLock::new(HashMap::new()),
             from_shark: MantaObjectShark {
@@ -189,6 +211,8 @@ impl EvacuateJob {
             },
             conn: Mutex::new(conn),
             total_db_time: Mutex::new(0),
+            domain_name: domain_name.to_string(),
+            log,
         }
     }
 
@@ -211,6 +235,7 @@ impl EvacuateJob {
                     assignment_id TEXT,
                     object TEXT,
                     shard Integer,
+                    etag TEXT,
                     status TEXT CHECK(status IN ('unprocessed', 'assigned',
                     'skipped', 'post_processing', 'complete')) NOT NULL
                 );
@@ -283,6 +308,9 @@ impl EvacuateJob {
 
         // At this point the rebalance job is running and we are blocked at
         // the assignment_manager thread join.
+
+        // TODO: should we "expect()" all these joins?  If we expect and
+        // return Err() what does that mean for the other threads?
         assignment_manager
             .join()
             .expect("Assignment Manager")
@@ -295,7 +323,6 @@ impl EvacuateJob {
             .expect("Sharkspotter Thread")
             .unwrap_or_else(|e| {
                 error!("Error joining sharkspotter handle: {}\n", e);
-                std::process::exit(1);
             });
 
         generator_thread
@@ -429,11 +456,43 @@ impl EvacuateJob {
         Ok(ret)
     }
 
+    // There are other possible approaches here, and we should check to see which one performs the
+    // best.  MANTA-4578
+    fn mark_many_objects(
+        &self,
+        vec_obj_ids: Vec<String>,
+        to_status: EvacuateObjectStatus,
+    ) -> usize {
+        use self::evacuateobjects::dsl::*;
+
+        let locked_conn = self.conn.lock().expect("db conn lock");
+        let len = vec_obj_ids.len();
+
+        debug!("Marking {} objects as {:?}", len, to_status);
+        let now = std::time::Instant::now();
+        let ret = diesel::update(evacuateobjects)
+            .filter(id.eq_any(vec_obj_ids))
+            .set(status.eq(to_status))
+            .execute(&*locked_conn)
+            .unwrap_or_else(|e| {
+                let msg = format!("LocalDB: Error updating {}", e);
+                error!("{}", msg);
+                panic!(msg);
+            });
+        debug!(
+            "eq_any update of {} took {}ms",
+            len,
+            now.elapsed().as_millis()
+        );
+
+        ret
+    }
+
     /// Mark all objects with a given assignment ID with the specified
     /// EvacuateObjectStatus
     fn mark_assignment_objects(
         &self,
-        id: &AssignmentId,
+        id: &str,
         to_status: EvacuateObjectStatus,
     ) -> usize {
         use self::evacuateobjects::dsl::{
@@ -476,7 +535,7 @@ impl EvacuateJob {
 
     fn get_assignment_objects(
         &self,
-        id: &AssignmentId,
+        id: &str,
         status_filter: EvacuateObjectStatus,
     ) -> Vec<EvacuateObjectDB> {
         use self::evacuateobjects::dsl::{
@@ -609,19 +668,11 @@ impl UpdateMetadata for EvacuateJob {
         &self,
         mut object: MantaObject,
         new_shark: &StorageNode,
+        etag: String,
+        mclient: &mut MorayClient,
     ) -> Result<MantaObject, Error> {
         let old_shark = &self.from_shark;
-        let obj = serde_json::to_string(&object)?;
-        let etag = match util::crc_hex_str(&obj) {
-            Some(o) => o,
-            None => {
-                return Err(InternalError::new(
-                    None,
-                    "Error getting etag from Manta Object",
-                )
-                .into())
-            }
-        };
+        let log = self.log.clone();
 
         // Replace shark value
         let mut shark_found = false;
@@ -637,31 +688,8 @@ impl UpdateMetadata for EvacuateJob {
             }
         }
 
-        // Prepare metadata message.
-        let key = object.key.as_str();
-        let value =
-            serde_json::to_value(&object).expect("Serialize Manta Object");
-        let mut opts = MethodOptions::default();
+        moray_client::put_object(mclient, &object, &etag, log)?;
 
-        opts.etag = Etag::Specified(etag);
-
-        trace!(
-            "Updating metadata. Key: {}\nValue: {}\nopts: {:?}",
-            key,
-            value,
-            opts
-        );
-
-        // TODO: The EvacuateJob struct should implement a moray client hash
-        // and we can call a "get_moray_client()" method here that will
-        // get an existing client, or create a new client if need be.
-        /*
-        mclient.put_object("manta", key, value, &opts, |o| {
-                debug!("Updated object metadata: {}", &o);
-                Ok(())
-            },
-        ).expect("put_object");
-        */
         Ok(object)
     }
 }
@@ -793,19 +821,29 @@ fn start_sharkspotter(
         .name(String::from("sharkspotter"))
         .spawn(move || {
             let mut count = 0;
-            sharkspotter::run(config, log, move |object, shard| {
+            sharkspotter::run(config, log, move |object, shard, etag| {
+                trace!("Sharkspotter discovered object: {:#?}", &object);
                 // while testing, limit the number of objects processed for now
                 count += 1;
-                if count > 2000 {
+                if count > 2 {
                     return Err(std::io::Error::new(
                         ErrorKind::Other,
                         "Just stop already",
                     ));
                 }
 
+                if shard > std::i32::MAX as u32 {
+                    error!("Found shard number over int32 max");
+                    return Err(std::io::Error::new(
+                        ErrorKind::Other,
+                        "Exceeded max number of shards",
+                    ));
+                }
+
                 let ssobj = SharkSpotterObject {
                     shard: shard as i32,
                     object,
+                    etag,
                 };
                 obj_tx
                     .send(ssobj)
@@ -986,9 +1024,11 @@ fn start_assignment_generator(
                 let mut eobj_vec: Vec<EvacuateObject> = vec![];
 
                 debug!(
-                    "Filling up new assignment with max_tasks: {:#?}, \
+                    "Filling up new assignment for {} with max_tasks: {:#?}, \
                      and available_space: {}",
-                    &max_tasks, &available_space
+                    &assignment.dest_shark.manta_storage_id,
+                    &max_tasks,
+                    &available_space
                 );
 
                 // Start Task Loop
@@ -1022,14 +1062,10 @@ fn start_assignment_generator(
                     }
 
                     let obj = &eobj.object;
-                    let obj_on_dest = obj
-                        .sharks
-                        .iter()
-                        .find(|s| {
-                            s.manta_storage_id
-                                == assignment.dest_shark.manta_storage_id
-                        })
-                        .is_some();
+                    let obj_on_dest = obj.sharks.iter().any(|s| {
+                        s.manta_storage_id
+                            == assignment.dest_shark.manta_storage_id
+                    });
 
                     // We've found the object on the destination shark.  We will
                     // need to skip this object for now and find a destination
@@ -1188,6 +1224,8 @@ trait UpdateMetadata: Sync + Send {
         &self,
         object: MantaObject,
         new_shark: &StorageNode,
+        etag: String,
+        mclient: &mut MorayClient,
     ) -> Result<MantaObject, Error>;
 }
 
@@ -1282,6 +1320,7 @@ fn start_assignment_checker(
                     .clone();
 
                 debug!("Checking Assignments");
+
                 if !run
                     && assignments
                         .values()
@@ -1370,11 +1409,22 @@ fn start_assignment_checker(
         .map_err(Error::from)
 }
 
+// This worker continues to run as long as the queue has entries for it to
+// work on.  If, when the worker attempts to "steal" from the queue, the
+// queue is emtpy the worker exits.
 fn metadata_update_worker(
     job_action: Arc<EvacuateJob>,
     queue_front: Arc<Injector<Assignment>>,
 ) -> impl Fn() {
     move || {
+        // For each worker we create a hash of moray clients indexed by shard.
+        // If the worker exits then the clients and the associated
+        // connections are dropped.  This avoids having to place locks around
+        // the shard connections.  It also allows us to manage our max
+        // number of per-shard connections by simply tuning the number of
+        // metadata update worker threads.
+        let mut client_hash: HashMap<u32, MorayClient> = HashMap::new();
+
         loop {
             let assignment = match queue_front.steal() {
                 Steal::Success(a) => a,
@@ -1382,15 +1432,15 @@ fn metadata_update_worker(
                 Steal::Empty => break,
             };
 
+            let mut updated_objects = vec![];
             let dest_shark = &assignment.dest_shark;
-
             let objects = job_action.get_assignment_objects(
                 &assignment.id,
                 EvacuateObjectStatus::PostProcessing,
             );
 
-            let mut updated_objects = vec![];
             for obj in objects {
+                let etag = obj.etag;
                 let mut mobj: MantaObject =
                     match serde_json::from_str(&obj.object) {
                         Ok(o) => o,
@@ -1404,16 +1454,57 @@ fn metadata_update_worker(
                         }
                     };
 
+                // Unfortunately sqlite only accepts signed integers.  So we
+                // have to do the conversion here and cross our fingers that
+                // we don't have more than 2.1 billion shards.
+                // We do check this value coming in from sharkspotter as well.
+                if obj.shard < 0 {
+                    // TODO: persistent error (panic for now)
+                    panic!("Cannot have a negative shard");
+                }
+                let shard = obj.shard as u32;
+
+                // We can't use or_insert_with() here because in the event
+                // that client creation fails we want to handle that error.
+                let mclient = match client_hash.entry(shard) {
+                    Occupied(entry) => entry.into_mut(),
+                    Vacant(entry) => {
+                        let client = match moray_client::create_client(
+                            shard,
+                            &job_action.domain_name,
+                            &job_action.log,
+                        ) {
+                            Ok(client) => client,
+                            Err(e) => {
+                                // TODO: persistent error for EvacuateObject
+                                // in local DB
+                                error!(
+                                    "MD Update Worker: failed to get moray \
+                                     client for shard number {}. Cannot update \
+                                     metadata for {:#?}\n{}",
+                                    shard, mobj, e
+                                );
+
+                                continue;
+                            }
+                        };
+                        entry.insert(client)
+                    }
+                };
+
                 // This function updates the manta object with the new
                 // sharks in the Manta Metadata tier, and then returns the
                 // updated Manta metadata object.  It does not update the
                 // state of the associated EvacuateObject in the local database.
-                mobj = match job_action.update_object_shark(mobj, dest_shark) {
+                mobj = match job_action
+                    .update_object_shark(mobj, dest_shark, etag, mclient)
+                {
                     Ok(o) => o,
                     Err(e) => {
                         // TODO: log a persistent error for final job report.
                         error!(
-                            "Error updating {}, with dest_shark {:?}: {}",
+                            "MD Update worker: Error updating \n\n{:#?}, with \
+                             dest_shark {:?}\n\n{}",
                             &obj.object, dest_shark, e
                         );
                         continue;
@@ -1446,10 +1537,17 @@ fn metadata_update_worker(
                 }
             }
 
+            // https://stackoverflow
+            // .com/questions/47626047/execute-an-insert-or-update-using-diesel
             // TODO: batch update all objects in `updated_objects` with
             // EvacuateObjectStatus::Complete in the local DB meaning we are
             // completely done and this object has been rebalanced.
             // This is the finish line.
+
+            job_action.mark_many_objects(
+                updated_objects,
+                EvacuateObjectStatus::Complete,
+            );
         }
     }
 }
@@ -1594,8 +1692,11 @@ mod tests {
         let (empty_assignment_tx, _) = crossbeam::bounded(5);
         let (checker_fini_tx, _) = crossbeam::bounded(1);
 
+        // These tests are run locally and don't go out over the network so any properly formatted
+        // host/domain name is valid here.
         let job_action = EvacuateJob::new(
-            String::from("1.stor.joyent.us"),
+            String::from("1.stor.fakedomain.us"),
+            "fakedomain.us",
             "empty_picker_test.db",
         );
         let job_action = Arc::new(job_action);
@@ -1656,8 +1757,13 @@ mod tests {
         let (md_update_tx, md_update_rx) = crossbeam::bounded(5);
         let (checker_fini_tx, checker_fini_rx) = crossbeam::bounded(1);
 
-        let job_action =
-            EvacuateJob::new(String::from("1.stor.joyent.us"), "full_test.db");
+        // These tests are run locally and don't go out over the network so any properly formatted
+        // host/domain name is valid here.
+        let job_action = EvacuateJob::new(
+            String::from("1.stor.fakedomain.us"),
+            "region.fakedomain.us",
+            "full_test.db",
+        );
         let conn = job_action.conn.lock().expect("db connection lock");
         conn.execute(r#"DROP TABLE evacuateobjects"#)
             .unwrap_or_else(|e| {
@@ -1671,6 +1777,7 @@ mod tests {
                 assignment_id TEXT,
                 object TEXT,
                 shard Integer,
+                etag TEXT,
                 status TEXT CHECK(status IN ('unprocessed', 'assigned',
                 'skipped', 'post_processing', 'complete')) NOT NULL
             );"#,
@@ -1684,7 +1791,7 @@ mod tests {
         let mut test_objects = vec![];
 
         let mut g = StdThreadGen::new(10);
-        for _ in 0..1000 {
+        for _ in 0..2 {
             let mobj = MantaObject::arbitrary(&mut g);
             test_objects.push(mobj);
         }
@@ -1699,6 +1806,8 @@ mod tests {
                     let ssobj = SharkSpotterObject {
                         shard: 1,
                         object: o.clone(),
+                        // TODO
+                        etag: String::from("Fake_etag"),
                     };
                     match obj_tx.send(ssobj) {
                         Ok(()) => (),

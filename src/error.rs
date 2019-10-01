@@ -9,6 +9,7 @@
  */
 
 use std::fmt;
+use trust_dns_resolver::error::ResolveErrorKind;
 
 #[derive(Debug)]
 pub enum Error {
@@ -18,6 +19,7 @@ pub enum Error {
     Diesel(diesel::result::Error),
     SerdeJson(serde_json::error::Error),
     Reqwest(reqwest::Error),
+    Resolve(trust_dns_resolver::error::ResolveError),
 }
 
 impl std::error::Error for Error {
@@ -29,6 +31,19 @@ impl std::error::Error for Error {
             Error::Diesel(e) => e.description(),
             Error::SerdeJson(e) => e.description(),
             Error::Reqwest(e) => e.description(),
+            Error::Resolve(e) => {
+                let kind = e.kind();
+                match kind {
+                    ResolveErrorKind::Message(m) => m,
+                    ResolveErrorKind::Io => "IO Error",
+                    ResolveErrorKind::Msg(m) => m.as_str(),
+                    ResolveErrorKind::NoRecordsFound { .. } => {
+                        "No Records Found"
+                    }
+                    ResolveErrorKind::Proto => "Proto Error",
+                    ResolveErrorKind::Timeout => "Request Timed Out",
+                }
+            }
         }
     }
 }
@@ -69,6 +84,12 @@ impl From<reqwest::Error> for Error {
     }
 }
 
+impl From<trust_dns_resolver::error::ResolveError> for Error {
+    fn from(error: trust_dns_resolver::error::ResolveError) -> Self {
+        Error::Resolve(error)
+    }
+}
+
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
@@ -78,6 +99,7 @@ impl fmt::Display for Error {
             Error::Diesel(e) => write!(f, "{}", e),
             Error::SerdeJson(e) => write!(f, "{}", e),
             Error::Reqwest(e) => write!(f, "{}", e),
+            Error::Resolve(e) => write!(f, "{}", e),
         }
     }
 }
@@ -97,6 +119,7 @@ pub enum InternalErrorCode {
     AssignmentLookupError,
     AssignmentGetError,
     LockError,
+    HashNotFound,
 }
 
 impl fmt::Display for InternalError {

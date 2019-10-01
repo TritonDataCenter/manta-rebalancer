@@ -33,6 +33,7 @@ pub struct Config {
 }
 
 impl Config {
+    // TODO: there's a bug here that 1 will always be the min shard number
     pub fn min_shard_num(&self) -> u32 {
         self.shards.iter().fold(1, |res, elem| {
             let shard_num = util::shard_host2num(elem.host.as_str());
@@ -70,8 +71,8 @@ pub struct Command {
 }
 
 impl Command {
-    pub fn parse_config() -> Result<Config, Error> {
-        let file = File::open("./target/debug/config.json")?;
+    pub fn parse_config(config_path: &str) -> Result<Config, Error> {
+        let file = File::open(config_path)?;
         let reader = BufReader::new(file);
         let config: Config = serde_json::from_reader(reader)?;
 
@@ -79,9 +80,6 @@ impl Command {
     }
     pub fn new() -> Result<Command, Error> {
         let mut subcommand = SubCommand::Server;
-        let config = Command::parse_config()?;
-
-        let domain_name = String::from(config.domain_name.as_str());
 
         let matches: ArgMatches = App::new("remora")
             .version("0.1.0")
@@ -99,6 +97,15 @@ impl Command {
                     .short("a")
                     .long("agent")
                     .help("Run in agent mode"),
+            )
+            .arg(
+                Arg::with_name("config_file")
+                    .short("c")
+                    .long("config_file")
+                    .takes_value(true)
+                    .value_name("CONFIG_FILE")
+                    .required(true)
+                    .help("Specify the location of the config file")
             )
             .subcommand(
                 // TODO: server subcommand
@@ -154,14 +161,17 @@ impl Command {
                                             .value_name("DOMAIN_NAME")
                                             .help("Domain of Manta Deployment")
                                             .required(false)
-                                            .default_value(domain_name
-                                                .as_str())
                                     ),
 
                             ),
                     ),
             )
             .get_matches();
+
+        let config_file = matches
+            .value_of("config_file")
+            .expect("Missing config file name");
+        let config = Command::parse_config(config_file)?;
 
         if matches.is_present("server") {
             subcommand = SubCommand::Server;
@@ -191,7 +201,7 @@ impl Command {
 // TODO:
 // This should really be removed in favor of the following:
 // 1. Command::new() handling override of domain_name from config file
-// 2. Job::new() taking all args necssary to create new Job Action (e.g.
+// 2. Job::new() taking all args necessary to create new Job Action (e.g.
 // EvacuateJob)
 fn job_subcommand_handler(matches: &ArgMatches, config: Config) -> SubCommand {
     let shark_id = matches.value_of("from_shark").unwrap_or("").to_string();
@@ -202,8 +212,11 @@ fn job_subcommand_handler(matches: &ArgMatches, config: Config) -> SubCommand {
     // we plan to have a server mode that will generate multiple jobs in a
     // single process.
     let db_url = format!("{}.{}", &config.database_url, process::id());
-    let job_action =
-        JobAction::Evacuate(Box::new(EvacuateJob::new(from_shark, &db_url)));
+    let job_action = JobAction::Evacuate(Box::new(EvacuateJob::new(
+        from_shark,
+        domain_name,
+        &db_url,
+    )));
     let job = Job::new(job_action, config);
 
     SubCommand::DoJob(Box::new(job))

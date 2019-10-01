@@ -5,9 +5,6 @@
   "database_buffer_size": 100,
   "shards": [
       {
-        "host": "3.moray.staging.joyent.us"
-      },
-      {
         "host": "2.moray.staging.joyent.us",
         "last": true
       }

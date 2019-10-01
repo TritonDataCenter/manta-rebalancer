@@ -162,7 +162,7 @@ pub trait SharkSource: Sync + Send {
 // client in the future.
 fn fetch_sharks() -> Vec<StorageNode> {
     // TODO: should find picker in DNS
-    let mut ret = reqwest::get("http://10.77.77.24/poll").unwrap();
+    let mut ret = reqwest::get("http://10.77.77.43/poll").unwrap();
     let result = ret.json::<HashMap<String, Vec<StorageNode>>>().unwrap();
     let mut new_sharks = vec![];
 
