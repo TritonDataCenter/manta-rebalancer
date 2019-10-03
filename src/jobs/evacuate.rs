@@ -427,6 +427,18 @@ impl EvacuateJob {
         Ok(ret)
     }
 
+    fn skip_object(
+        &self,
+        eobj: &mut EvacuateObject,
+        reason: &str,
+    ) -> Result<(), Error> {
+        info!("Skipping object {}: {}.", &eobj.object.object_id, reason);
+
+        eobj.status = EvacuateObjectStatus::Skipped;
+        self.insert_into_db(&eobj)?;
+        Ok(())
+    }
+
     // Insert multiple EvacuateObjects into the database at once.
     fn insert_many_into_db<V>(&self, vec_objs: V) -> Result<usize, Error>
     where
@@ -993,6 +1005,30 @@ fn _continue_adding_tasks(
     max_tasks.map_or(true, |m| assignment.tasks.len() < m as usize)
 }
 
+fn validate_destination(
+    obj: &MantaObject,
+    from_shark: &MantaObjectShark,
+    to_shark: &StorageNode,
+) -> bool {
+    let obj_on_dest = obj.sharks.iter().any(|s| {
+        s.manta_storage_id == to_shark.manta_storage_id });
+
+    // We've found the object on the destination shark.  We will need to skip
+    // this object for now and find a destination for it later.  If we don't do
+    // this check it would reduce the durability level of the object.  That is,
+    // it would reduce the number of copies of the object in the region by one.
+    if obj_on_dest {
+        return false;
+    }
+
+    // It's ok to send an object to a storage node that is in the same
+    // data center as the one being evacuated.  We do not want to allow two
+    // copies of the same object to reside in the same datacenter for
+    // availability reasons though.
+    !((from_shark.datacenter != to_shark.datacenter) &&
+        obj.sharks.iter().any(|s| { s.datacenter == to_shark.datacenter }))
+}
+
 /// Assignment Generation:
 /// 1. Get snapshot from picker
 /// 2. Get initialized assignment from assignment manager thread.
@@ -1051,34 +1087,20 @@ fn start_assignment_generator(
 
                     let content_mb = eobj.object.content_length / (1024 * 1024);
                     if content_mb > available_space {
-                        eobj.status = EvacuateObjectStatus::Skipped;
-                        info!(
-                            "Skipping object, need: {}, available: {} | {:?}\n",
-                            content_mb, available_space, eobj
-                        );
-                        job_action.insert_into_db(&eobj)?;
+                      job_action.skip_object(&mut eobj,
+                          &format!("Need: {}, Available {}", content_mb,
+                          available_space))?;
 
                         break;
                     }
 
                     let obj = &eobj.object;
-                    let obj_on_dest = obj.sharks.iter().any(|s| {
-                        s.manta_storage_id
-                            == assignment.dest_shark.manta_storage_id
-                    });
 
-                    // We've found the object on the destination shark.  We will
-                    // need to skip this object for now and find a destination
-                    // for it later.  If we don't do this check it would
-                    // essentially reduce the durability level of the object.
-                    if obj_on_dest {
-                        info!(
-                            "Skipping object already on dest shark {}",
-                            &obj.object_id
-                        );
-                        // TODO sqlite: put skipped object in persistent store.
-                        eobj.status = EvacuateObjectStatus::Skipped;
-                        job_action.insert_into_db(&eobj)?;
+                    if !validate_destination(obj, &job_action.from_shark,
+                        &assignment.dest_shark)
+                    {
+                        job_action.skip_object(&mut eobj,
+                            "Currently unable to find suitable destination")?;
                         continue;
                     }
 
@@ -1090,8 +1112,8 @@ fn start_assignment_generator(
                     {
                         Some(src) => src,
                         None => {
-                            eobj.status = EvacuateObjectStatus::Skipped;
-                            job_action.insert_into_db(&eobj)?;
+                            job_action.skip_object(&mut eobj,
+                                "Currently unable to find suitable source")?;
                             continue;
                         }
                     };
@@ -1630,29 +1652,33 @@ mod tests {
     use quickcheck::{Arbitrary, StdThreadGen};
     use rand::Rng;
 
-    fn generate_sharks(num_sharks: u8, local_only: bool) -> Vec<StorageNode> {
-        let mut rng = rand::thread_rng();
-        let mut ret = vec![];
-
-        for _ in 0..num_sharks {
-            let percent_used: u8 = rng.gen_range(0, 101);
-            let timestamp: u64 = rng.gen();
+    fn generate_storage_node(local: bool) -> StorageNode {
+            let mut rng = rand::thread_rng();
             let available_mb: u64 = rng.gen();
+            let percent_used: u8 = rng.gen_range(0, 101);
             let filesystem: String = util::random_string(rng.gen_range(1, 20));
             let datacenter: String = util::random_string(rng.gen_range(1, 20));
-            let manta_storage_id = match local_only {
+            let manta_storage_id = match local {
                 true => String::from("localhost"),
                 false => format!("{}.stor.joyent.us", rng.gen_range(1, 100)),
             };
+            let timestamp: u64 = rng.gen();
 
-            ret.push(StorageNode {
+            StorageNode {
                 available_mb,
                 percent_used,
                 filesystem,
                 datacenter,
                 manta_storage_id,
                 timestamp,
-            });
+            }
+    }
+
+    fn generate_sharks(num_sharks: u8, local_only: bool) -> Vec<StorageNode> {
+        let mut ret = vec![];
+
+        for _ in 0..num_sharks {
+            ret.push(generate_storage_node(local_only));
         }
         ret
     }
@@ -1742,6 +1768,38 @@ mod tests {
     #[test]
     fn duplicate_object_id_test() {
         // TODO: add test that includes duplicate object IDs
+    }
+
+    #[test]
+    fn validate_destination_test() {
+        let mut g = StdThreadGen::new(10);
+        let obj = MantaObject::arbitrary(&mut g);
+
+        // Currently, the arbitrary implementation for a MantaObject
+        // automatically gives it 2 sharks by default.  If that ever changes
+        // in the future, this assertion will fail, letting us know that we
+        // need to revisit it.  Until then, it seems more count on 2 sharks.
+        assert_eq!(obj.sharks.len(), 2,
+            "Expected two sharks as part of the MantaObject.");
+
+        let from_shark = obj.sharks[0].clone();
+        let mut to_shark = generate_storage_node(true);
+
+        // Test evacuation to different shark in the same datacenter.
+        to_shark.datacenter = from_shark.datacenter.clone();
+        assert!(validate_destination(&obj, &from_shark, &to_shark),
+            "Failed to evacuate to another shark in the same data center.");
+
+        // Test compromising fault domain.
+        to_shark.datacenter = obj.sharks[1].datacenter.clone();
+        assert!(!validate_destination(&obj, &from_shark, &to_shark),
+            "Attempt to place more than one object in the same data center.");
+
+        // Test evacuating an object to the mako being evacuated.
+        to_shark.manta_storage_id = from_shark.manta_storage_id.clone();
+        assert!(!validate_destination(&obj, &from_shark, &to_shark),
+            "Attempt to evacuate an object back to its source.");
+
     }
 
     #[test]
