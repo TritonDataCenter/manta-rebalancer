@@ -21,7 +21,9 @@ use crate::picker::{self as mod_picker, SharkSource, StorageNode};
 use std::collections::hash_map::Entry::{Occupied, Vacant};
 use std::collections::HashMap;
 use std::error::Error as _Error;
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Write};
+use std::str::FromStr;
+use std::string::ToString;
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use std::time::Duration;
@@ -33,24 +35,30 @@ use libmanta::moray::{MantaObject, MantaObjectShark};
 use moray::client::MorayClient;
 use reqwest;
 use slog::{o, Drain, Logger};
-use std::borrow::Borrow;
 use threadpool::ThreadPool;
 
 // --- Diesel Stuff, TODO This should be refactored --- //
 
+use diesel::backend;
+use diesel::deserialize::{self, FromSql};
 use diesel::prelude::*;
+use diesel::serialize::{self, IsNull, Output, ToSql};
+use diesel::sql_types;
+use diesel::sqlite::Sqlite;
 
-// TODO: move database stuff somewhere.
+// Note: The ordering of the fields in this table must match the ordering of
+// the fields in 'struct EvacuateObject'
 table! {
-    use diesel::sql_types::{Text, Integer};
-    use super::EvacuateObjectStatusMapping;
+    use diesel::sql_types::{Text, Integer, Nullable};
     evacuateobjects (id) {
         id -> Text,
         assignment_id -> Text,
         object -> Text,
         shard -> Integer,
         etag -> Text,
-        status -> EvacuateObjectStatusMapping,
+        status -> Text,
+        skipped_reason -> Nullable<Text>,
+        error -> Nullable<Text>,
     }
 }
 
@@ -60,15 +68,133 @@ struct UpdateEvacuateObject<'a> {
     id: &'a str,
 }
 
-#[derive(Insertable, Queryable, Identifiable, AsChangeset, Debug, PartialEq)]
-#[table_name = "evacuateobjects"]
-pub struct EvacuateObjectDB {
-    pub id: String,
-    pub assignment_id: AssignmentId,
-    pub object: String,
-    pub shard: i32,
-    pub etag: String,
-    pub status: EvacuateObjectStatus,
+#[derive(
+    Display,
+    EnumString,
+    EnumVariantNames,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    FromSqlRow,
+    AsExpression,
+)]
+#[strum(serialize_all = "snake_case")]
+#[sql_type = "sql_types::Text"]
+pub enum EvacuateObjectStatus {
+    Unprocessed,    // Default state.
+    Assigned,       // Object has been included in an assignment.
+    Skipped,        // Could not find a shark to put this object in. Will retry.
+    Error,          // A persistent error has occurred.
+    PostProcessing, // Updating metadata and any other postprocessing steps.
+    Complete,       // Object has been fully rebalanced.
+}
+
+impl ToSql<sql_types::Text, Sqlite> for EvacuateObjectStatus {
+    fn to_sql<W: Write>(
+        &self,
+        out: &mut Output<W, Sqlite>,
+    ) -> serialize::Result {
+        let s = self.to_string();
+        out.write_all(s.as_bytes())?;
+        Ok(IsNull::No)
+    }
+}
+
+impl FromSql<sql_types::Text, Sqlite> for EvacuateObjectStatus {
+    fn from_sql(
+        bytes: Option<backend::RawValue<Sqlite>>,
+    ) -> deserialize::Result<Self> {
+        let t = not_none!(bytes).read_text();
+        Self::from_str(t).map_err(std::convert::Into::into)
+    }
+}
+
+#[derive(
+    Display,
+    EnumString,
+    EnumVariantNames,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    FromSqlRow,
+    AsExpression,
+)]
+#[strum(serialize_all = "snake_case")]
+#[sql_type = "sql_types::Text"]
+pub enum EvacuateObjectError {
+    MetadataUpdateFailed,
+}
+
+// Evacuate Object Error
+impl ToSql<sql_types::Text, Sqlite> for EvacuateObjectError {
+    fn to_sql<W: Write>(
+        &self,
+        out: &mut Output<W, Sqlite>,
+    ) -> serialize::Result {
+        let s = self.to_string();
+        out.write_all(s.as_bytes())?;
+        Ok(IsNull::No)
+    }
+}
+
+impl FromSql<sql_types::Text, Sqlite> for EvacuateObjectError {
+    fn from_sql(
+        bytes: Option<backend::RawValue<Sqlite>>,
+    ) -> deserialize::Result<Self> {
+        let t = not_none!(bytes).read_text();
+        Self::from_str(t).map_err(std::convert::Into::into)
+    }
+}
+
+#[derive(
+    Display,
+    EnumString,
+    EnumVariantNames,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    FromSqlRow,
+    AsExpression,
+)]
+#[strum(serialize_all = "snake_case")]
+#[sql_type = "sql_types::Text"]
+pub enum EvacuateObjectSkippedReason {
+    // Not enough space on destination SN
+    DestinationInsufficientSpace,
+
+    // The only source available is the shark that is being evacuated.
+    SourceIsEvacShark,
+
+    // The object is already on the proposed destination shark, using it as a
+    // destination for rebalance would reduce the durability by 1.
+    ObjectAlreadyOnDestShark,
+
+    // The object is already in the proposed destination datacenter, using it
+    // as a destination for rebalance would reduce the failure domain.
+    ObjectAlreadyInDatacenter,
+}
+
+impl ToSql<sql_types::Text, Sqlite> for EvacuateObjectSkippedReason {
+    fn to_sql<W: Write>(
+        &self,
+        out: &mut Output<W, Sqlite>,
+    ) -> serialize::Result {
+        let s = self.to_string();
+        out.write_all(s.as_bytes())?;
+        Ok(IsNull::No)
+    }
+}
+
+impl FromSql<sql_types::Text, Sqlite> for EvacuateObjectSkippedReason {
+    fn from_sql(
+        bytes: Option<backend::RawValue<Sqlite>>,
+    ) -> deserialize::Result<Self> {
+        let t = not_none!(bytes).read_text();
+        Self::from_str(t).map_err(std::convert::Into::into)
+    }
 }
 
 // --- END Diesel Stuff --- //
@@ -82,18 +208,6 @@ pub struct SharkSpotterObject {
     pub etag: String,
 }
 
-#[derive(Debug, Clone, PartialEq, DbEnum)]
-pub enum EvacuateObjectStatus {
-    Unprocessed,    // Default state
-    Assigned,       // Object has been included in an assignment
-    Skipped,        // Could not find a shark to put this object in. TODO: Why?
-    PostProcessing, // Object has been moved, metadata update in progress
-    Complete,       // Object moved, and metadata updated
-                    // TODO: Failed,   // Failed to Evacuate Object ???
-                    // TODO: Retrying, // Retrying a failed evacuate attempt
-                    // TODO: A Status for being part of a submitted assignment?
-}
-
 impl Default for EvacuateObjectStatus {
     fn default() -> Self {
         EvacuateObjectStatus::Unprocessed
@@ -102,16 +216,27 @@ impl Default for EvacuateObjectStatus {
 
 /// Wrap a given MantaObject in another structure so that we can track it's
 /// progress through the evacuation process.
-#[derive(Debug, Default, Clone)]
+#[derive(
+    Insertable,
+    Queryable,
+    Identifiable,
+    AsChangeset,
+    Debug,
+    Default,
+    Clone,
+    PartialEq,
+)]
+#[table_name = "evacuateobjects"]
 pub struct EvacuateObject {
+    pub id: ObjectId, // MantaObject ObjectId
     pub assignment_id: AssignmentId,
     // UUID of assignment this object was most recently part of.
-    pub id: ObjectId,        // MantaObject ObjectId
     pub object: MantaObject, // The MantaObject being rebalanced
     pub shard: i32,          // shard number of metadata object record
     pub etag: String,
     pub status: EvacuateObjectStatus,
-    // Status of the object in the evacuation job
+    pub skipped_reason: Option<EvacuateObjectSkippedReason>,
+    pub error: Option<EvacuateObjectError>,
 }
 
 impl EvacuateObject {
@@ -124,20 +249,6 @@ impl EvacuateObject {
             etag: ssobj.etag,
             ..Default::default()
         }
-    }
-}
-
-impl EvacuateObject {
-    // TODO: ToSql for EvacuateObject MANTA-4474
-    fn to_insertable(&self) -> Result<EvacuateObjectDB, Error> {
-        Ok(EvacuateObjectDB {
-            assignment_id: self.assignment_id.clone(),
-            id: self.id.clone(),
-            object: serde_json::to_string(&self.object)?,
-            shard: self.shard,
-            etag: self.etag.clone(),
-            status: self.status.clone(),
-        })
     }
 }
 
@@ -200,6 +311,7 @@ impl EvacuateJob {
         );
         let conn = SqliteConnection::establish(db_url)
             .unwrap_or_else(|_| panic!("Error connecting to {}", db_url));
+
         Self {
             min_avail_mb: Some(1000),
             max_tasks_per_assignment: Some(1000),
@@ -216,7 +328,15 @@ impl EvacuateJob {
         }
     }
 
-    pub fn run(self, config: &Config) -> Result<(), Error> {
+    fn create_table(&self) -> Result<usize, Error> {
+        let status_strings = EvacuateObjectStatus::variants();
+        let skipped_strings = EvacuateObjectSkippedReason::variants();
+        let error_strings = EvacuateObjectError::variants();
+
+        let status_check = format!("'{}'", status_strings.join("', '"));
+        let skipped_check = format!("'{}'", skipped_strings.join("', '"));
+        let error_check = format!("'{}'", error_strings.join("', '"));
+
         // TODO: check if table exists first and if so issue warning.  We may
         // need to handle this a bit more gracefully in the future for
         // restarting jobs...
@@ -228,21 +348,28 @@ impl EvacuateJob {
                 0
             });
 
-        conn.execute(
-            r#"
-                CREATE TABLE evacuateobjects(
-                    id TEXT PRIMARY KEY,
-                    assignment_id TEXT,
-                    object TEXT,
-                    shard Integer,
-                    etag TEXT,
-                    status TEXT CHECK(status IN ('unprocessed', 'assigned',
-                    'skipped', 'post_processing', 'complete')) NOT NULL
-                );
-            "#,
-        )?;
+        let create_query = format!(
+            "
+            CREATE TABLE evacuateobjects(
+                id TEXT PRIMARY KEY,
+                assignment_id TEXT,
+                object TEXT,
+                shard Integer,
+                etag TEXT,
+                status TEXT CHECK(status IN ({})) NOT NULL,
+                skipped_reason TEXT CHECK(skipped_reason IN ({})),
+                error TEXT CHECK(error IN ({}))
+            );",
+            status_check, skipped_check, error_check
+        );
+        conn.execute(&create_query).map_err(Error::from)
+    }
 
-        drop(conn);
+    pub fn run(self, config: &Config) -> Result<(), Error> {
+        // We could call this from within the EvacuateJob constructor, but we may
+        // want to enable job restarts.  So for now lets call it from here, and
+        // depending on how we implement job restarts we may want to move it out.
+        self.create_table()?;
 
         // job_action will be shared between threads so create an Arc for it.
         let job_action = Arc::new(self);
@@ -407,13 +534,12 @@ impl EvacuateJob {
     fn insert_into_db(&self, obj: &EvacuateObject) -> Result<usize, Error> {
         use self::evacuateobjects::dsl::*;
 
-        let insertable = obj.to_insertable()?;
         let locked_conn = self.conn.lock().expect("DB conn lock");
         let now = std::time::Instant::now();
 
         // TODO: Is panic the right thing to do here?
         let ret = diesel::insert_into(evacuateobjects)
-            .values(&insertable)
+            .values(obj)
             .execute(&*locked_conn)
             .unwrap_or_else(|e| {
                 let msg = format!("Error inserting object into DB: {}", e);
@@ -430,38 +556,37 @@ impl EvacuateJob {
     fn skip_object(
         &self,
         eobj: &mut EvacuateObject,
-        reason: &str,
+        reason: EvacuateObjectSkippedReason,
     ) -> Result<(), Error> {
         info!("Skipping object {}: {}.", &eobj.object.object_id, reason);
 
         eobj.status = EvacuateObjectStatus::Skipped;
+        eobj.skipped_reason = Some(reason);
         self.insert_into_db(&eobj)?;
         Ok(())
     }
 
     // Insert multiple EvacuateObjects into the database at once.
-    fn insert_many_into_db<V>(&self, vec_objs: V) -> Result<usize, Error>
-    where
-        V: Borrow<Vec<EvacuateObject>>,
-    {
+    fn insert_many_into_db(
+        &self,
+        vec_objs: &[EvacuateObject],
+    ) -> Result<usize, Error> {
         use self::evacuateobjects::dsl::*;
 
-        let objs = vec_objs.borrow();
-        let insertable_objs: Vec<EvacuateObjectDB> = objs
-            .iter()
-            .map(|o| o.to_insertable())
-            .collect::<Result<Vec<_>, _>>()?;
         let locked_conn = self.conn.lock().expect("db conn lock");
-
         let now = std::time::Instant::now();
         let ret = diesel::insert_into(evacuateobjects)
-            .values(insertable_objs)
+            .values(vec_objs)
             .execute(&*locked_conn)
             .unwrap_or_else(|e| {
                 let msg = format!("Error inserting object into DB: {}", e);
                 error!("{}", msg);
                 panic!(msg);
             });
+
+        // TODO: remove.  Leave this in here for now so that we can use the
+        // functionality quickly if we need to check something during
+        // development.
         let mut total_time = self.total_db_time.lock().expect("DB time lock");
         *total_time += now.elapsed().as_millis();
 
@@ -549,7 +674,7 @@ impl EvacuateJob {
         &self,
         id: &str,
         status_filter: EvacuateObjectStatus,
-    ) -> Vec<EvacuateObjectDB> {
+    ) -> Vec<EvacuateObject> {
         use self::evacuateobjects::dsl::{
             assignment_id, evacuateobjects, status,
         };
@@ -559,7 +684,7 @@ impl EvacuateJob {
         evacuateobjects
             .filter(assignment_id.eq(id))
             .filter(status.eq(status_filter))
-            .load::<EvacuateObjectDB>(&*locked_conn)
+            .load::<EvacuateObject>(&*locked_conn)
             .expect("getting filtered objects")
     }
 }
@@ -837,7 +962,7 @@ fn start_sharkspotter(
                 trace!("Sharkspotter discovered object: {:#?}", &object);
                 // while testing, limit the number of objects processed for now
                 count += 1;
-                if count > 2 {
+                if count > 20 {
                     return Err(std::io::Error::new(
                         ErrorKind::Other,
                         "Just stop already",
@@ -1007,26 +1132,38 @@ fn _continue_adding_tasks(
 
 fn validate_destination(
     obj: &MantaObject,
-    from_shark: &MantaObjectShark,
-    to_shark: &StorageNode,
-) -> bool {
-    let obj_on_dest = obj.sharks.iter().any(|s| {
-        s.manta_storage_id == to_shark.manta_storage_id });
+    evac_shark: &MantaObjectShark,
+    dest_shark: &StorageNode,
+) -> Option<EvacuateObjectSkippedReason> {
+    let obj_on_dest = obj
+        .sharks
+        .iter()
+        .any(|s| s.manta_storage_id == dest_shark.manta_storage_id);
 
     // We've found the object on the destination shark.  We will need to skip
     // this object for now and find a destination for it later.  If we don't do
     // this check it would reduce the durability level of the object.  That is,
     // it would reduce the number of copies of the object in the region by one.
     if obj_on_dest {
-        return false;
+        return Some(EvacuateObjectSkippedReason::ObjectAlreadyOnDestShark);
     }
 
     // It's ok to send an object to a storage node that is in the same
-    // data center as the one being evacuated.  We do not want to allow two
-    // copies of the same object to reside in the same datacenter for
-    // availability reasons though.
-    !((from_shark.datacenter != to_shark.datacenter) &&
-        obj.sharks.iter().any(|s| { s.datacenter == to_shark.datacenter }))
+    // data center as the one being evacuated.  However, in order to ensure
+    // we do not decrease the fault domain, we do not want to remove a copy from
+    // a data center and add an additional copy to another data center that
+    // already has a copy of this object.
+    // So if the destination is NOT in the same data center, and this object
+    // already has a copy in the destination data center, we must skip for now.
+    if evac_shark.datacenter != dest_shark.datacenter
+        && obj
+            .sharks
+            .iter()
+            .any(|s| s.datacenter == dest_shark.datacenter)
+    {
+        return Some(EvacuateObjectSkippedReason::ObjectAlreadyInDatacenter);
+    }
+    None
 }
 
 /// Assignment Generation:
@@ -1087,20 +1224,22 @@ fn start_assignment_generator(
 
                     let content_mb = eobj.object.content_length / (1024 * 1024);
                     if content_mb > available_space {
-                      job_action.skip_object(&mut eobj,
-                          &format!("Need: {}, Available {}", content_mb,
-                          available_space))?;
+                        job_action.skip_object(
+                            &mut eobj,
+                            EvacuateObjectSkippedReason::DestinationInsufficientSpace
+                        )?;
 
                         break;
                     }
 
                     let obj = &eobj.object;
 
-                    if !validate_destination(obj, &job_action.from_shark,
-                        &assignment.dest_shark)
-                    {
-                        job_action.skip_object(&mut eobj,
-                            "Currently unable to find suitable destination")?;
+                    if let Some(reason) = validate_destination(
+                        obj,
+                        &job_action.from_shark,
+                        &assignment.dest_shark,
+                    ) {
+                        job_action.skip_object(&mut eobj, reason)?;
                         continue;
                     }
 
@@ -1112,8 +1251,10 @@ fn start_assignment_generator(
                     {
                         Some(src) => src,
                         None => {
-                            job_action.skip_object(&mut eobj,
-                                "Currently unable to find suitable source")?;
+                            job_action.skip_object(
+                                &mut eobj,
+                                EvacuateObjectSkippedReason::SourceIsEvacShark,
+                            )?;
                             continue;
                         }
                     };
@@ -1343,15 +1484,14 @@ fn start_assignment_checker(
 
                 debug!("Checking Assignments");
 
-                if !run
-                    && assignments
-                        .values()
-                        .find(|a| {
-                            a.state == AssignmentState::Assigned
-                                || a.state == AssignmentState::Init
-                        })
-                        .is_none()
-                {
+                let outstanding_assignments = || {
+                    assignments.values().any(|a| {
+                        a.state == AssignmentState::Assigned
+                            || a.state == AssignmentState::Init
+                    })
+                };
+
+                if !run && !outstanding_assignments() {
                     info!(
                         "Assignment Checker: Shutdown received and there \
                          are no remaining assignments in the assigned state to \
@@ -1463,18 +1603,7 @@ fn metadata_update_worker(
 
             for obj in objects {
                 let etag = obj.etag;
-                let mut mobj: MantaObject =
-                    match serde_json::from_str(&obj.object) {
-                        Ok(o) => o,
-                        Err(e) => {
-                            // TODO: log a persistent error for final job report.
-                            error!(
-                                "Error decoding object {}: {}",
-                                &obj.object, e
-                            );
-                            continue;
-                        }
-                    };
+                let mut mobj: MantaObject = obj.object.clone();
 
                 // Unfortunately sqlite only accepts signed integers.  So we
                 // have to do the conversion here and cross our fingers that
@@ -1653,25 +1782,25 @@ mod tests {
     use rand::Rng;
 
     fn generate_storage_node(local: bool) -> StorageNode {
-            let mut rng = rand::thread_rng();
-            let available_mb: u64 = rng.gen();
-            let percent_used: u8 = rng.gen_range(0, 101);
-            let filesystem: String = util::random_string(rng.gen_range(1, 20));
-            let datacenter: String = util::random_string(rng.gen_range(1, 20));
-            let manta_storage_id = match local {
-                true => String::from("localhost"),
-                false => format!("{}.stor.joyent.us", rng.gen_range(1, 100)),
-            };
-            let timestamp: u64 = rng.gen();
+        let mut rng = rand::thread_rng();
+        let available_mb: u64 = rng.gen();
+        let percent_used: u8 = rng.gen_range(0, 101);
+        let filesystem: String = util::random_string(rng.gen_range(1, 20));
+        let datacenter: String = util::random_string(rng.gen_range(1, 20));
+        let manta_storage_id = match local {
+            true => String::from("localhost"),
+            false => format!("{}.stor.joyent.us", rng.gen_range(1, 100)),
+        };
+        let timestamp: u64 = rng.gen();
 
-            StorageNode {
-                available_mb,
-                percent_used,
-                filesystem,
-                datacenter,
-                manta_storage_id,
-                timestamp,
-            }
+        StorageNode {
+            available_mb,
+            percent_used,
+            filesystem,
+            datacenter,
+            manta_storage_id,
+            timestamp,
+        }
     }
 
     fn generate_sharks(num_sharks: u8, local_only: bool) -> Vec<StorageNode> {
@@ -1779,27 +1908,57 @@ mod tests {
         // automatically gives it 2 sharks by default.  If that ever changes
         // in the future, this assertion will fail, letting us know that we
         // need to revisit it.  Until then, it seems more count on 2 sharks.
-        assert_eq!(obj.sharks.len(), 2,
-            "Expected two sharks as part of the MantaObject.");
+        assert_eq!(
+            obj.sharks.len(),
+            2,
+            "Expected two sharks as part of the MantaObject."
+        );
 
         let from_shark = obj.sharks[0].clone();
         let mut to_shark = generate_storage_node(true);
 
+        // TODO: fix these up to match actual error codes.
+
         // Test evacuation to different shark in the same datacenter.
         to_shark.datacenter = from_shark.datacenter.clone();
-        assert!(validate_destination(&obj, &from_shark, &to_shark),
-            "Failed to evacuate to another shark in the same data center.");
+        assert!(
+            validate_destination(&obj, &from_shark, &to_shark).is_none(),
+            "Failed to evacuate to another shark in the same data center."
+        );
 
         // Test compromising fault domain.
         to_shark.datacenter = obj.sharks[1].datacenter.clone();
-        assert!(!validate_destination(&obj, &from_shark, &to_shark),
-            "Attempt to place more than one object in the same data center.");
+        assert_eq!(
+            validate_destination(&obj, &from_shark, &to_shark),
+            Some(EvacuateObjectSkippedReason::ObjectAlreadyInDatacenter),
+            "Attempt to place more than one object in the same data center."
+        );
 
         // Test evacuating an object to the mako being evacuated.
         to_shark.manta_storage_id = from_shark.manta_storage_id.clone();
-        assert!(!validate_destination(&obj, &from_shark, &to_shark),
-            "Attempt to evacuate an object back to its source.");
+        assert_eq!(
+            validate_destination(&obj, &from_shark, &to_shark),
+            Some(EvacuateObjectSkippedReason::ObjectAlreadyOnDestShark),
+            "Attempt to evacuate an object back to its source."
+        );
 
+        // Test evacuating an object to a shark it is already on.
+        to_shark.manta_storage_id = obj
+            .sharks
+            .iter()
+            .find(|s| s.manta_storage_id != from_shark.manta_storage_id)
+            .expect(
+                "Should be able to find a shark that this object is not \
+                 already on",
+            )
+            .manta_storage_id
+            .clone();
+
+        assert_eq!(
+            validate_destination(&obj, &from_shark, &to_shark),
+            Some(EvacuateObjectSkippedReason::ObjectAlreadyOnDestShark),
+            "Attempt to evacuate an object back to its source."
+        );
     }
 
     #[test]
@@ -1822,27 +1981,9 @@ mod tests {
             "region.fakedomain.us",
             "full_test.db",
         );
-        let conn = job_action.conn.lock().expect("db connection lock");
-        conn.execute(r#"DROP TABLE evacuateobjects"#)
-            .unwrap_or_else(|e| {
-                debug!("Table doesn't exist: {}", e);
-                0
-            });
 
-        conn.execute(
-            r#"CREATE TABLE evacuateobjects(
-                id TEXT PRIMARY KEY,
-                assignment_id TEXT,
-                object TEXT,
-                shard Integer,
-                etag TEXT,
-                status TEXT CHECK(status IN ('unprocessed', 'assigned',
-                'skipped', 'post_processing', 'complete')) NOT NULL
-            );"#,
-        )
-        .expect("create table");
-
-        drop(conn);
+        // Create the database table
+        assert!(job_action.create_table().is_ok());
 
         let job_action = Arc::new(job_action);
 

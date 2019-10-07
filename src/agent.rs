@@ -255,7 +255,7 @@ fn assignment_save(
 // construct a vector of tasks based on the contents of the only table
 // in the file called `tasks'.
 fn assignment_recall<S: Into<String>>(
-    path: S
+    path: S,
 ) -> Result<Arc<RwLock<Assignment>>, String> {
     let path = path.into();
     let file_path = Path::new(&path);
@@ -398,10 +398,8 @@ fn post(agent: Agent, mut state: State) -> Box<HandlerFuture> {
                 // currently in flight.  If there is one, do not allow this
                 // assignment to proceed.
                 if assignment_exists(&uuid) {
-                    let res = create_empty_response(
-                        &state,
-                        StatusCode::CONFLICT,
-                    );
+                    let res =
+                        create_empty_response(&state, StatusCode::CONFLICT);
                     return future::ok((state, res));
                 }
 
@@ -1139,7 +1137,11 @@ mod tests {
         // Send the exact same assignment again and send it, although this time,
         // we will reuse our first uuid. We expect to receive a status code of
         // StatusCode::CONFLICT (409) from the server this time.
-        send_assignment_impl(&test_server, assignment, &uuid,
-            StatusCode::CONFLICT);
+        send_assignment_impl(
+            &test_server,
+            assignment,
+            &uuid,
+            StatusCode::CONFLICT,
+        );
     }
 }
