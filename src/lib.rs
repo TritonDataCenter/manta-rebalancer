@@ -17,13 +17,12 @@ extern crate log;
 extern crate diesel;
 
 #[macro_use]
-extern crate diesel_derive_enum;
+extern crate strum_macros;
 
-pub mod jobs;
-//pub mod agent;
 pub mod agent;
 pub mod config;
 pub mod error;
+pub mod jobs;
 pub(crate) mod moray_client;
 pub mod picker;
 pub mod util;
