@@ -16,10 +16,21 @@ use crate::picker::StorageNode;
 
 use std::collections::HashMap;
 use std::fmt;
+use std::io::Write;
+use std::str::FromStr;
 
+use diesel::backend;
+use diesel::deserialize::{self, FromSql};
+use diesel::serialize::{self, IsNull, Output, ToSql};
+use diesel::sql_types;
+use diesel::sqlite::Sqlite;
 use evacuate::EvacuateJob;
 use libmanta::moray::MantaObjectShark;
+use md5::{Digest, Md5};
+use quickcheck::{Arbitrary, Gen};
+use quickcheck_helpers::random::string as random_string;
 use serde::{Deserialize, Serialize};
+use strum::IntoEnumIterator;
 use uuid::Uuid;
 
 pub type StorageId = String; // Hostname
@@ -90,10 +101,11 @@ impl From<AssignmentPayload> for (String, Vec<Task>) {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 enum AssignmentState {
-    Init,          // Assignment is in the process of being created.
-    Assigned,      // Assignment has been submitted to the Agent.
-    Rejected,      // Agent has rejected the Assignment.
-    AgentComplete, // Agent as completed its work, and the JobAction is now
+    Init,             // Assignment is in the process of being created.
+    Assigned,         // Assignment has been submitted to the Agent.
+    Rejected,         // Agent has rejected the Assignment.
+    AgentUnavailable, // Could not connect to agent.
+    AgentComplete,    // Agent as completed its work, and the JobAction is now
     // post processing the Assignment.
     PostProcessed, // The Assignment has completed all necessary work.
 }
@@ -140,17 +152,50 @@ impl Task {
     }
 }
 
+impl Arbitrary for Task {
+    fn arbitrary<G: Gen>(g: &mut G) -> Task {
+        let len: usize = (g.next_u32() % 20) as usize;
+        let mut hasher = Md5::new();
+        hasher.input(random_string(g, len).as_bytes());
+        let md5checksum = hasher.result();
+        let md5sum = base64::encode(&md5checksum);
+
+        Task {
+            object_id: Uuid::new_v4().to_string(),
+            owner: Uuid::new_v4().to_string(),
+            md5sum,
+            source: MantaObjectShark::arbitrary(g),
+            status: TaskStatus::arbitrary(g),
+        }
+    }
+}
+
+// Note: if you change or add any of the fields here be sure to update the
+// Arbitrary implementation.
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
 pub enum TaskStatus {
     Pending,
     Running,
     Complete,
-    Failed(String),
+    Failed(ObjectSkippedReason),
 }
 
 impl Default for TaskStatus {
     fn default() -> Self {
         TaskStatus::Pending
+    }
+}
+
+impl Arbitrary for TaskStatus {
+    fn arbitrary<G: Gen>(g: &mut G) -> TaskStatus {
+        let i = g.next_u32() % 4;
+        match i {
+            0 => TaskStatus::Pending,
+            1 => TaskStatus::Running,
+            2 => TaskStatus::Complete,
+            3 => TaskStatus::Failed(Arbitrary::arbitrary(g)),
+            _ => panic!(),
+        }
     }
 }
 
@@ -161,6 +206,290 @@ impl Default for Job {
             state: JobState::default(),
             id: Uuid::new_v4(),
             config: Config::default(),
+        }
+    }
+}
+
+//
+// There are many reasons why an object may fail on a rebalance job.  This
+// enum of reasons is meant to be shared between both the agent and the
+// zone, and also apply to all future job actions.  We could build out
+// reasons for each job and then build translators for each agent
+// error/reason to each job action reason, but it would be nice to avoid
+// having to do that.  The trade off is that some of these reasons may be unique
+// to a specific job action. It's a trade off and we may decide in the future to
+// split these off but for now it seems to make the most sense going forward to
+// put them all in the same spot.
+//
+#[derive(
+    AsExpression,
+    Clone,
+    Copy,
+    Debug,
+    Deserialize,
+    Display,
+    EnumString,
+    EnumVariantNames,
+    EnumIter,
+    Eq,
+    FromSqlRow,
+    Hash,
+    PartialEq,
+    Serialize,
+)]
+#[strum(serialize_all = "snake_case")]
+#[sql_type = "sql_types::Text"]
+pub enum ObjectSkippedReason {
+    // Agent encountered a local filesystem error
+    AgentFSError,
+
+    // The specified agent does not have that assignment
+    AgentAssignmentNoEnt,
+
+    // Internal Assignment Error
+    AssignmentError,
+
+    // A mismatch of assignment data between the agent and the zone
+    AssignmentMismatch,
+
+    // The assignment was rejected by the agent.
+    AssignmentRejected,
+
+    // Not enough space on destination SN
+    DestinationInsufficientSpace,
+
+    // Destination agent was not reachable
+    DestinationUnreachable,
+
+    // MD5 Mismatch between the file on disk and the metadata.
+    MD5Mismatch,
+
+    // Catchall for unspecified network errors.
+    NetworkError,
+
+    // The object is already on the proposed destination shark, using it as a
+    // destination for rebalance would reduce the durability by 1.
+    ObjectAlreadyOnDestShark,
+
+    // The object is already in the proposed destination datacenter, using it
+    // as a destination for rebalance would reduce the failure domain.
+    ObjectAlreadyInDatacenter,
+
+    // Encountered a client error (400-499) while attempting to contact
+    // the source of the object.
+    SourceClientError,
+
+    // Encountered a server error (500-599) while attempting to contact
+    // the source of the object.
+    SourceServerError,
+
+    // Encountered some other http error (not 400 or 500) while attempting to
+    // contact the source of the object.
+    SourceOtherError,
+
+    // The only source available is the shark that is being evacuated.
+    SourceIsEvacShark,
+
+    HTTPStatusCode(ObjectHttpStatusCode),
+}
+
+impl ObjectSkippedReason {
+    // The "Strum" crate already provides a "to_string()" method which we
+    // want to use here.  This is for handling the special case of variants
+    // with values/fields.
+    pub fn into_string(self) -> String {
+        match self {
+            ObjectSkippedReason::HTTPStatusCode(sc) => {
+                format!("{{{}:{}}}", self, sc)
+            }
+            _ => self.to_string(),
+        }
+    }
+}
+
+#[derive(
+    AsExpression,
+    Clone,
+    Copy,
+    Debug,
+    Deserialize,
+    Display,
+    EnumString,
+    EnumVariantNames,
+    EnumIter,
+    Eq,
+    FromSqlRow,
+    Hash,
+    PartialEq,
+    Serialize,
+)]
+pub enum ObjectHttpStatusCode {
+    Continue,
+    SwitchingProtocols,
+    Processing,
+    OK,
+    Created,
+    Accepted,
+    NonAuthoritativeInformation,
+    NoContent,
+    ResetContent,
+    PartialContent,
+    MultiStatus,
+    AlreadyReported,
+    IMUsed,
+    MultipleChoices,
+    MovedPermanently,
+    Found,
+    SeeOther,
+    NotModified,
+    UseProxy,
+    TemporaryRedirect,
+    PermanentRedirect,
+    BadRequest,
+    Unauthorized,
+    PaymentRequired,
+    Forbidden,
+    NotFound,
+    MethodNotAllowed,
+    NotAcceptable,
+    ProxyAuthenticationRequired,
+    RequestTimeout,
+    Conflict,
+    Gone,
+    LengthRequired,
+    PreconditionFailed,
+    PayloadTooLarge,
+    URITooLong,
+    UnsupportedMediaType,
+    RangeNotSatisfiable,
+    ExpectationFailed,
+    Imateapot,
+    MisdirectedRequest,
+    UnprocessableEntity,
+    Locked,
+    FailedDependency,
+    UpgradeRequired,
+    PreconditionRequired,
+    TooManyRequests,
+    RequestHeaderFieldsTooLarge,
+    UnavailableForLegalReasons,
+    InternalServerError,
+    NotImplemented,
+    BadGateway,
+    ServiceUnavailable,
+    GatewayTimeout,
+    HTTPVersionNotSupported,
+    VariantAlsoNegotiates,
+    InsufficientStorage,
+    LoopDetected,
+    NotExtended,
+    NetworkAuthenticationRequired,
+    Unknown,      // A response code not implemented by reqwest
+    CodeMismatch, // An internal error
+}
+
+impl Default for ObjectHttpStatusCode {
+    fn default() -> Self {
+        Self::NotFound
+    }
+}
+
+impl ObjectHttpStatusCode {
+    // The reqwest StatusCodes look like this:
+    //   "HTTP Version Not Supported"
+    //
+    // Our enum values look like this:
+    //   HTTPVersionNotSupported
+    //
+    // This function strips out the whitespace and uses the from_str() method
+    // we get from the strum crate to get the correct ObjectHttpStatusCode
+    // variant.
+    pub fn from_http_status_code(status_code: reqwest::StatusCode) -> Self {
+        let code_string = status_code.canonical_reason();
+        match code_string {
+            Some(sc) => {
+                let mut sc_str: String = sc.to_string();
+                sc_str = sc_str.replace('-', " ");
+                sc_str = sc_str.replace("'", "");
+                sc_str = sc_str.split_whitespace().collect();
+
+                dbg!(&sc_str);
+                Self::from_str(&sc_str).unwrap_or(Self::CodeMismatch)
+            }
+            None => Self::Unknown,
+        }
+    }
+}
+
+impl ToSql<sql_types::Text, Sqlite> for ObjectHttpStatusCode {
+    fn to_sql<W: Write>(
+        &self,
+        out: &mut Output<W, Sqlite>,
+    ) -> serialize::Result {
+        let s = self.to_string();
+        out.write_all(s.as_bytes())?;
+        Ok(IsNull::No)
+    }
+}
+
+impl FromSql<sql_types::Text, Sqlite> for ObjectHttpStatusCode {
+    fn from_sql(
+        bytes: Option<backend::RawValue<Sqlite>>,
+    ) -> deserialize::Result<Self> {
+        let t = not_none!(bytes).read_text();
+        Self::from_str(t).map_err(std::convert::Into::into)
+    }
+}
+
+impl Arbitrary for ObjectSkippedReason {
+    fn arbitrary<G: Gen>(g: &mut G) -> ObjectSkippedReason {
+        let i: usize = g.next_u32() as usize % Self::iter().count();
+        Self::iter().nth(i).unwrap()
+    }
+}
+
+impl ToSql<sql_types::Text, Sqlite> for ObjectSkippedReason {
+    fn to_sql<W: Write>(
+        &self,
+        out: &mut Output<W, Sqlite>,
+    ) -> serialize::Result {
+        let sr = self.into_string();
+        out.write_all(sr.as_bytes())?;
+
+        Ok(IsNull::No)
+    }
+}
+
+impl FromSql<sql_types::Text, Sqlite> for ObjectSkippedReason {
+    fn from_sql(
+        bytes: Option<backend::RawValue<Sqlite>>,
+    ) -> deserialize::Result<Self> {
+        let t = not_none!(bytes).read_text();
+        let ts: String = t.to_string();
+        if ts.starts_with('{') && ts.ends_with('}') {
+            // "{skipped_reason:status_code}"
+            let matches: &[_] = &['{', '}'];
+
+            // trim_matches: "skipped_reason:status_code"
+            // split().collect(): ["skipped_reason", "status_code"]
+            let sr_sc: Vec<&str> =
+                ts.trim_matches(matches).split(':').collect();
+            assert_eq!(sr_sc.len(), 2);
+
+            // ["skipped_reason", "status_code"]
+            let reason = ObjectSkippedReason::from_str(&sr_sc[0])?;
+            match reason {
+                ObjectSkippedReason::HTTPStatusCode(_) => {
+                    Ok(ObjectSkippedReason::HTTPStatusCode(
+                        ObjectHttpStatusCode::from_str(&sr_sc[1])?,
+                    ))
+                }
+                _ => {
+                    panic!("variant with value not found");
+                }
+            }
+        } else {
+            Self::from_str(t).map_err(std::convert::Into::into)
         }
     }
 }
@@ -194,5 +523,53 @@ impl Default for JobAction {
 impl Default for JobState {
     fn default() -> Self {
         JobState::Init
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn object_http_status_codes() {
+        // Because there is no way to iter over request::StatusCode, we
+        // iterate over every possible number and `try_from()` is Err() we
+        // continue to the next one.
+        for i in 100..600 {
+            let c = reqwest::StatusCode::from_u16(i).unwrap();
+            dbg!(&c);
+            let ohsc = ObjectHttpStatusCode::from_http_status_code(c);
+            assert_ne!(
+                ohsc,
+                ObjectHttpStatusCode::CodeMismatch,
+                "found unknown for {}",
+                c
+            );
+        }
+
+        // Try some of our more common HTTP status codes
+        let code = reqwest::StatusCode::OK;
+        assert_eq!(
+            ObjectHttpStatusCode::from_http_status_code(code),
+            ObjectHttpStatusCode::OK
+        );
+
+        let code = reqwest::StatusCode::NOT_FOUND;
+        assert_eq!(
+            ObjectHttpStatusCode::from_http_status_code(code),
+            ObjectHttpStatusCode::NotFound
+        );
+
+        let code = reqwest::StatusCode::REQUEST_TIMEOUT;
+        assert_eq!(
+            ObjectHttpStatusCode::from_http_status_code(code),
+            ObjectHttpStatusCode::RequestTimeout
+        );
+
+        let code = reqwest::StatusCode::INTERNAL_SERVER_ERROR;
+        assert_eq!(
+            ObjectHttpStatusCode::from_http_status_code(code),
+            ObjectHttpStatusCode::InternalServerError
+        );
     }
 }

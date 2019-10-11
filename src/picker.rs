@@ -9,6 +9,8 @@
  */
 
 use crate::error::Error;
+use quickcheck::{Arbitrary, Gen};
+use quickcheck_helpers::random::string as random_string;
 use reqwest;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -30,6 +32,25 @@ pub struct StorageNode {
     pub datacenter: String,
     pub manta_storage_id: String,
     pub timestamp: u64, // TODO: can this be deserialized as a datetime type?
+}
+
+impl Arbitrary for StorageNode {
+    fn arbitrary<G: Gen>(g: &mut G) -> StorageNode {
+        let len: usize = (g.next_u32() % 20) as usize;
+        StorageNode {
+            available_mb: g.next_u64(),
+            percent_used: (g.next_u32() % 100) as u8,
+            filesystem: random_string(g, len),
+            datacenter: random_string(g, len),
+            manta_storage_id: format!(
+                "{}.{}.{}",
+                random_string(g, len),
+                random_string(g, len),
+                random_string(g, len),
+            ),
+            timestamp: g.next_u64(),
+        }
+    }
 }
 
 #[derive(Default)]

@@ -43,10 +43,12 @@ log = "0.4.6"
 pretty_env_logger = "0.3.0"
 rand = "0.7.0"
 quickcheck = "0.8.5"
+quickcheck_helpers = { git = "https://github.com/joyent/rust-quickcheck-helpers.git", tag = "v0.1.0" }
 failure = "0.1.5"
 bytes = "0.4.12"
 strum = "0.16.0"
 strum_macros = "0.16.0"
+
 
 diesel = {version = "1.4.2", features = ["sqlite"]}
 

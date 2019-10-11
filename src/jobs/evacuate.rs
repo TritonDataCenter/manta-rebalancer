@@ -13,7 +13,7 @@ use crate::config::Config;
 use crate::error::{CrossbeamError, Error, InternalError, InternalErrorCode};
 use crate::jobs::{
     Assignment, AssignmentId, AssignmentPayload, AssignmentState, ObjectId,
-    StorageId, Task, TaskStatus,
+    ObjectSkippedReason, StorageId, Task, TaskStatus,
 };
 use crate::moray_client;
 use crate::picker::{self as mod_picker, SharkSource, StorageNode};
@@ -27,6 +27,8 @@ use std::string::ToString;
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use std::time::Duration;
+
+use strum::IntoEnumIterator;
 
 use crossbeam_channel as crossbeam;
 use crossbeam_channel::TryRecvError;
@@ -124,6 +126,10 @@ impl FromSql<sql_types::Text, Sqlite> for EvacuateObjectStatus {
 #[strum(serialize_all = "snake_case")]
 #[sql_type = "sql_types::Text"]
 pub enum EvacuateObjectError {
+    BadMorayClient,
+    BadShardNumber,
+    DuplicateShark,
+    InternalError,
     MetadataUpdateFailed,
 }
 
@@ -140,55 +146,6 @@ impl ToSql<sql_types::Text, Sqlite> for EvacuateObjectError {
 }
 
 impl FromSql<sql_types::Text, Sqlite> for EvacuateObjectError {
-    fn from_sql(
-        bytes: Option<backend::RawValue<Sqlite>>,
-    ) -> deserialize::Result<Self> {
-        let t = not_none!(bytes).read_text();
-        Self::from_str(t).map_err(std::convert::Into::into)
-    }
-}
-
-#[derive(
-    Display,
-    EnumString,
-    EnumVariantNames,
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    FromSqlRow,
-    AsExpression,
-)]
-#[strum(serialize_all = "snake_case")]
-#[sql_type = "sql_types::Text"]
-pub enum EvacuateObjectSkippedReason {
-    // Not enough space on destination SN
-    DestinationInsufficientSpace,
-
-    // The only source available is the shark that is being evacuated.
-    SourceIsEvacShark,
-
-    // The object is already on the proposed destination shark, using it as a
-    // destination for rebalance would reduce the durability by 1.
-    ObjectAlreadyOnDestShark,
-
-    // The object is already in the proposed destination datacenter, using it
-    // as a destination for rebalance would reduce the failure domain.
-    ObjectAlreadyInDatacenter,
-}
-
-impl ToSql<sql_types::Text, Sqlite> for EvacuateObjectSkippedReason {
-    fn to_sql<W: Write>(
-        &self,
-        out: &mut Output<W, Sqlite>,
-    ) -> serialize::Result {
-        let s = self.to_string();
-        out.write_all(s.as_bytes())?;
-        Ok(IsNull::No)
-    }
-}
-
-impl FromSql<sql_types::Text, Sqlite> for EvacuateObjectSkippedReason {
     fn from_sql(
         bytes: Option<backend::RawValue<Sqlite>>,
     ) -> deserialize::Result<Self> {
@@ -227,16 +184,27 @@ impl Default for EvacuateObjectStatus {
     PartialEq,
 )]
 #[table_name = "evacuateobjects"]
+#[changeset_options(treat_none_as_null = "true")]
 pub struct EvacuateObject {
     pub id: ObjectId, // MantaObject ObjectId
-    pub assignment_id: AssignmentId,
+
     // UUID of assignment this object was most recently part of.
+    pub assignment_id: AssignmentId,
+
     pub object: MantaObject, // The MantaObject being rebalanced
     pub shard: i32,          // shard number of metadata object record
     pub etag: String,
     pub status: EvacuateObjectStatus,
-    pub skipped_reason: Option<EvacuateObjectSkippedReason>,
+    pub skipped_reason: Option<ObjectSkippedReason>,
     pub error: Option<EvacuateObjectError>,
+    // TODO: Consider adding a free form status message.
+    // We would/could do this as part of the skipped_reason or error enums,
+    // but enum variants with fields doesn't work well with databases.
+    // Perhaps a field here (message: String) that would contain data that
+    // relates to either the skipped reason or the error (which ever is not
+    // None).
+    // Alternatively we could simply expand the skipped_reasons or errors to
+    // be more specific.
 }
 
 impl EvacuateObject {
@@ -330,12 +298,14 @@ impl EvacuateJob {
 
     fn create_table(&self) -> Result<usize, Error> {
         let status_strings = EvacuateObjectStatus::variants();
-        let skipped_strings = EvacuateObjectSkippedReason::variants();
         let error_strings = EvacuateObjectError::variants();
+        let skipped_strings: Vec<String> = ObjectSkippedReason::iter()
+            .map(|sr| sr.into_string())
+            .collect();
 
         let status_check = format!("'{}'", status_strings.join("', '"));
-        let skipped_check = format!("'{}'", skipped_strings.join("', '"));
         let error_check = format!("'{}'", error_strings.join("', '"));
+        let skipped_check = format!("'{}'", skipped_strings.join("', '"));
 
         // TODO: check if table exists first and if so issue warning.  We may
         // need to handle this a bit more gracefully in the future for
@@ -362,6 +332,7 @@ impl EvacuateJob {
             );",
             status_check, skipped_check, error_check
         );
+        dbg!(&create_query);
         conn.execute(&create_query).map_err(Error::from)
     }
 
@@ -475,6 +446,53 @@ impl EvacuateJob {
         Ok(())
     }
 
+    fn set_assignment_state(
+        &self,
+        assignment_id: &str,
+        state: AssignmentState,
+    ) -> Result<(), Error> {
+        match self
+            .assignments
+            .write()
+            .expect("assignment write lock")
+            .get_mut(assignment_id)
+        {
+            Some(a) => {
+                a.state = state;
+                info!("Done processing assignment {}", &a.id);
+            }
+            None => {
+                let msg = format!(
+                    "Error updating assignment state for: {}",
+                    &assignment_id
+                );
+                error!("{}", &msg);
+
+                return Err(InternalError::new(
+                    Some(InternalErrorCode::AssignmentLookupError),
+                    msg,
+                )
+                .into());
+            }
+        }
+        Ok(())
+    }
+
+    fn skip_assignment(
+        &self,
+        assign_id: &AssignmentId,
+        skip_reason: ObjectSkippedReason,
+        assignment_state: AssignmentState,
+    ) {
+        self.mark_assignment_skipped(assign_id, skip_reason);
+
+        self.set_assignment_state(assign_id, assignment_state)
+            .unwrap_or_else(|e| {
+                // TODO: should we panic? if so just replace with expect()
+                panic!("{}", e);
+            });
+    }
+
     /// If a shark is in the Assigned state then it is busy.
     fn shark_busy(&self, shark: &StorageNode) -> bool {
         self.dest_shark_list
@@ -488,6 +506,19 @@ impl EvacuateJob {
                 );
                 eds.status == DestSharkStatus::Assigned
             })
+    }
+
+    fn skip_object(
+        &self,
+        eobj: &mut EvacuateObject,
+        reason: ObjectSkippedReason,
+    ) -> Result<(), Error> {
+        info!("Skipping object {}: {}.", &eobj.object.object_id, reason);
+
+        eobj.status = EvacuateObjectStatus::Skipped;
+        eobj.skipped_reason = Some(reason);
+        self.insert_into_db(&eobj)?;
+        Ok(())
     }
 
     /// Iterate over a new set of storage nodes and update our destination
@@ -538,6 +569,7 @@ impl EvacuateJob {
         let now = std::time::Instant::now();
 
         // TODO: Is panic the right thing to do here?
+        // TODO: consider checking record count to ensure insert success
         let ret = diesel::insert_into(evacuateobjects)
             .values(obj)
             .execute(&*locked_conn)
@@ -553,19 +585,6 @@ impl EvacuateJob {
         Ok(ret)
     }
 
-    fn skip_object(
-        &self,
-        eobj: &mut EvacuateObject,
-        reason: EvacuateObjectSkippedReason,
-    ) -> Result<(), Error> {
-        info!("Skipping object {}: {}.", &eobj.object.object_id, reason);
-
-        eobj.status = EvacuateObjectStatus::Skipped;
-        eobj.skipped_reason = Some(reason);
-        self.insert_into_db(&eobj)?;
-        Ok(())
-    }
-
     // Insert multiple EvacuateObjects into the database at once.
     fn insert_many_into_db(
         &self,
@@ -575,6 +594,7 @@ impl EvacuateJob {
 
         let locked_conn = self.conn.lock().expect("db conn lock");
         let now = std::time::Instant::now();
+        // TODO: consider checking record count to ensure update success
         let ret = diesel::insert_into(evacuateobjects)
             .values(vec_objs)
             .execute(&*locked_conn)
@@ -584,9 +604,9 @@ impl EvacuateJob {
                 panic!(msg);
             });
 
-        // TODO: remove.  Leave this in here for now so that we can use the
-        // functionality quickly if we need to check something during
-        // development.
+        // TODO: remove.
+        // Leave this in here for now so that we can use the functionality
+        // quickly if we need to check something during development.
         let mut total_time = self.total_db_time.lock().expect("DB time lock");
         *total_time += now.elapsed().as_millis();
 
@@ -607,6 +627,7 @@ impl EvacuateJob {
 
         debug!("Marking {} objects as {:?}", len, to_status);
         let now = std::time::Instant::now();
+        // TODO: consider checking record count to ensure update success
         let ret = diesel::update(evacuateobjects)
             .filter(id.eq_any(vec_obj_ids))
             .set(status.eq(to_status))
@@ -625,23 +646,173 @@ impl EvacuateJob {
         ret
     }
 
+    // TODO: MANTA-4585
+    fn mark_assignment_skipped(
+        &self,
+        assignment_uuid: &str,
+        reason: ObjectSkippedReason,
+    ) -> usize {
+        use self::evacuateobjects::dsl::{
+            assignment_id, error, evacuateobjects, skipped_reason, status,
+        };
+        let locked_conn = self.conn.lock().expect("DB conn lock");
+
+        debug!(
+            "Marking objects in assignment ({}) as skipped:{:?}",
+            assignment_uuid, reason
+        );
+        // TODO: consider checking record count to ensure update success
+        diesel::update(evacuateobjects)
+            .filter(assignment_id.eq(assignment_uuid))
+            .set((
+                status.eq(EvacuateObjectStatus::Skipped),
+                skipped_reason.eq(Some(reason)),
+                error.eq::<Option<EvacuateObjectError>>(None),
+            ))
+            .execute(&*locked_conn)
+            .unwrap_or_else(|e| {
+                let msg = format!(
+                    "Error updating assignment: {} ({})",
+                    assignment_uuid, e
+                );
+                error!("{}", msg);
+                panic!(msg);
+            })
+    }
+
+    // TODO: MANTA-4585
+    fn mark_assignment_error(
+        &self,
+        assignment_uuid: &str,
+        err: EvacuateObjectError,
+    ) -> usize {
+        use self::evacuateobjects::dsl::{
+            assignment_id, error, evacuateobjects, skipped_reason, status,
+        };
+        let locked_conn = self.conn.lock().expect("DB conn lock");
+
+        debug!(
+            "Marking objects in assignment ({}) as error:{:?}",
+            assignment_uuid, err
+        );
+        // TODO: consider checking record count to ensure update success
+        diesel::update(evacuateobjects)
+            .filter(assignment_id.eq(assignment_uuid))
+            .set((
+                status.eq(EvacuateObjectStatus::Error),
+                skipped_reason.eq::<Option<ObjectSkippedReason>>(None),
+                error.eq(Some(err)),
+            ))
+            .execute(&*locked_conn)
+            .unwrap_or_else(|e| {
+                let msg = format!(
+                    "Error updating assignment: {} ({})",
+                    assignment_uuid, e
+                );
+                error!("{}", msg);
+                panic!(msg);
+            })
+    }
+
+    // Given a vector of Tasks that need to be marked as skipped do the
+    // following:
+    // 1. Generate a hash of <ObjectSkippedReason, Vec<ObjectId>>
+    // 2. For each "reason" do a bulk update of the associated objects.
+    // The assumption here is that all Objects should be skipped and are not
+    // errors.
+    fn mark_many_task_objects_skipped(&self, task_vec: Vec<Task>) {
+        use self::evacuateobjects::dsl::{
+            evacuateobjects, id, skipped_reason, status,
+        };
+
+        let mut updates: HashMap<ObjectSkippedReason, Vec<String>> =
+            HashMap::new();
+
+        for t in task_vec {
+            if let TaskStatus::Failed(reason) = t.status {
+                let entry = updates.entry(reason).or_insert_with(|| vec![]);
+                entry.push(t.object_id);
+            } else {
+                warn!("Attempt to skip object with status {:?}", t.status);
+                continue;
+            }
+        }
+
+        let locked_conn = self.conn.lock().expect("db conn lock");
+
+        for (reason, vec_obj_ids) in updates {
+            // TODO: consider checking record count to ensure update success
+            diesel::update(evacuateobjects)
+                .filter(id.eq_any(vec_obj_ids))
+                .set((
+                    status.eq(EvacuateObjectStatus::Skipped),
+                    skipped_reason.eq(reason),
+                ))
+                .execute(&*locked_conn)
+                .unwrap_or_else(|e| {
+                    let msg = format!("LocalDB: Error updating {}", e);
+                    error!("{}", msg);
+                    panic!(msg);
+                });
+        }
+    }
+
+    fn mark_object_error(
+        &self,
+        object_id: &str, // ObjectId
+        err: EvacuateObjectError,
+    ) -> usize {
+        use self::evacuateobjects::dsl::{
+            error, evacuateobjects, id, skipped_reason, status,
+        };
+
+        let locked_conn = self.conn.lock().expect("db conn lock");
+
+        // TODO: consider asserting that record count equals 1 here because
+        // callers make the assumption that the update was successful.  If
+        // the object is not updated then there was some error that needs to
+        // be tracked, or possibly panic.
+        diesel::update(evacuateobjects)
+            .filter(id.eq(object_id))
+            .set((
+                status.eq(EvacuateObjectStatus::Error),
+                error.eq(Some(err)),
+                skipped_reason.eq::<Option<ObjectSkippedReason>>(None),
+            ))
+            .execute(&*locked_conn)
+            .unwrap_or_else(|e| {
+                let msg =
+                    format!("Error updating assignment: {} ({})", object_id, e);
+                error!("{}", msg);
+                panic!(msg);
+            })
+    }
+
     /// Mark all objects with a given assignment ID with the specified
-    /// EvacuateObjectStatus
+    /// EvacuateObjectStatus.  This should not be used for statuses of
+    /// Skipped or Error as those require reasons.  See asserts below.
     fn mark_assignment_objects(
         &self,
         id: &str,
         to_status: EvacuateObjectStatus,
     ) -> usize {
         use self::evacuateobjects::dsl::{
-            assignment_id, evacuateobjects, status,
+            assignment_id, error, evacuateobjects, skipped_reason, status,
         };
+
+        assert_ne!(to_status, EvacuateObjectStatus::Skipped);
+        assert_ne!(to_status, EvacuateObjectStatus::Error);
 
         let locked_conn = self.conn.lock().expect("DB conn lock");
 
         debug!("Marking objects in assignment ({}) as {:?}", id, to_status);
         diesel::update(evacuateobjects)
             .filter(assignment_id.eq(id))
-            .set(status.eq(to_status))
+            .set((
+                status.eq(to_status),
+                error.eq::<Option<EvacuateObjectError>>(None),
+                skipped_reason.eq::<Option<ObjectSkippedReason>>(None),
+            ))
             .execute(&*locked_conn)
             .unwrap_or_else(|e| {
                 let msg = format!("Error updating assignment: {} ({})", id, e);
@@ -670,7 +841,7 @@ impl EvacuateJob {
         }
     }
 
-    fn get_assignment_objects(
+    fn load_assignment_objects(
         &self,
         id: &str,
         status_filter: EvacuateObjectStatus,
@@ -696,7 +867,7 @@ impl EvacuateJob {
 fn assignment_post_success(
     job_action: &EvacuateJob,
     mut assignment: Assignment,
-) -> Result<(), Error> {
+) {
     match job_action
         .dest_shark_list
         .write()
@@ -738,8 +909,6 @@ fn assignment_post_success(
         .expect("Assignments hash write lock");
 
     assignments.insert(assignment.id.clone(), assignment);
-
-    Ok(())
 }
 
 impl PostAssignment for EvacuateJob {
@@ -756,15 +925,33 @@ impl PostAssignment for EvacuateJob {
         );
 
         trace!("Sending {:#?} to {}", payload, agent_uri);
-        let res = client.post(&agent_uri).json(&payload).send()?;
+        let res = match client.post(&agent_uri).json(&payload).send() {
+            Ok(r) => r,
+            Err(e) => {
+                // TODO: Should we blacklist this destination shark?
+                self.skip_assignment(
+                    &assignment.id,
+                    ObjectSkippedReason::DestinationUnreachable,
+                    AssignmentState::AgentUnavailable,
+                );
+
+                return Err(e.into());
+            }
+        };
 
         if !res.status().is_success() {
-            // TODO: how to handle errors?  Need to pick different agent?
+            // TODO: Should we blacklist this destination shark?
             error!(
                 "Error posting assignment {} to {} ({})",
                 payload.id,
                 assignment.dest_shark.manta_storage_id,
                 res.status()
+            );
+
+            self.skip_assignment(
+                &assignment.id,
+                ObjectSkippedReason::AssignmentRejected,
+                AssignmentState::Rejected,
             );
 
             return Err(
@@ -773,7 +960,8 @@ impl PostAssignment for EvacuateJob {
         }
 
         debug!("Post of {} was successful", payload.id);
-        Ok(assignment_post_success(self, assignment).map(|_| ())?)
+        assignment_post_success(self, assignment);
+        Ok(())
     }
 }
 
@@ -785,22 +973,45 @@ impl GetAssignment for EvacuateJob {
         );
 
         debug!("Getting Assignment: {:?}", uri);
-        let mut resp = reqwest::get(&uri)?;
-        if !resp.status().is_success() {
-            let msg =
-                format!("Could not get assignment from Agent: {:#?}", resp);
-            return Err(InternalError::new(
-                Some(InternalErrorCode::AssignmentGetError),
-                msg,
-            )
-            .into());
+        match reqwest::get(&uri) {
+            Ok(mut resp) => {
+                if !resp.status().is_success() {
+                    self.skip_assignment(
+                        &assignment.id,
+                        ObjectSkippedReason::AgentAssignmentNoEnt,
+                        AssignmentState::AgentUnavailable,
+                    );
+
+                    let msg = format!(
+                        "Could not get assignment from Agent: {:#?}",
+                        resp
+                    );
+                    return Err(InternalError::new(
+                        Some(InternalErrorCode::AssignmentGetError),
+                        msg,
+                    )
+                    .into());
+                }
+                debug!("RET: {:#?}", resp);
+                resp.json::<AgentAssignment>().map_err(Error::from)
+            }
+            Err(e) => {
+                self.skip_assignment(
+                    &assignment.id,
+                    ObjectSkippedReason::NetworkError,
+                    AssignmentState::AgentUnavailable,
+                );
+
+                Err(e.into())
+            }
         }
-        debug!("RET: {:#?}", resp);
-        resp.json::<AgentAssignment>().map_err(Error::from)
     }
 }
 
 impl UpdateMetadata for EvacuateJob {
+    /// This function only updates the local database in the event that an
+    /// error is encountered.  This allows the caller to easily batch database
+    /// updates for successful objects.
     fn update_object_shark(
         &self,
         mut object: MantaObject,
@@ -820,12 +1031,32 @@ impl UpdateMetadata for EvacuateJob {
                 if !shark_found {
                     shark_found = true;
                 } else {
-                    error!("Found duplicate shark");
+                    let msg =
+                        format!("Found duplicate shark while attempting \
+                        to update metadata. Manta Object: {:?}, New Shark: \
+                        {:?}",
+                         object, new_shark);
+                    error!("{}", &msg);
+                    self.mark_object_error(
+                        &object.object_id,
+                        EvacuateObjectError::DuplicateShark,
+                    );
+                    return Err(InternalError::new(
+                        Some(InternalErrorCode::DuplicateShark),
+                        msg,
+                    )
+                    .into());
                 }
             }
         }
 
-        moray_client::put_object(mclient, &object, &etag, log)?;
+        if let Err(e) = moray_client::put_object(mclient, &object, &etag, log) {
+            self.mark_object_error(
+                &object.object_id,
+                EvacuateObjectError::MetadataUpdateFailed,
+            );
+            return Err(e);
+        }
 
         Ok(object)
     }
@@ -850,6 +1081,14 @@ impl ProcessAssignment for EvacuateJob {
 
                 error!("{}", &msg);
 
+                // Note that we don't set the assignment state here because
+                // we JUST tried looking it up and that failed.  The best we
+                // can do is update the associated objects in the local DB
+                // with this function call below.
+                self.mark_assignment_skipped(
+                    &agent_assignment.uuid,
+                    ObjectSkippedReason::AssignmentMismatch,
+                );
                 return Err(InternalError::new(
                     Some(InternalErrorCode::AssignmentLookupError),
                     msg,
@@ -892,33 +1131,37 @@ impl ProcessAssignment for EvacuateJob {
             AgentAssignmentState::Complete(None) => {
                 // mark all EvacuateObjects with this assignment id as
                 // successful
-                assignment.state = AssignmentState::AgentComplete;
                 self.mark_assignment_objects(
                     &assignment.id,
                     EvacuateObjectStatus::PostProcessing,
                 );
-
-                // Couple options here.  We could:
-                // - mark all tasks in as Complete (waiting for md
-                // update) and then pass the entire assignment to the
-                // metadata update broker
-                // - pass the assignment uuid to the metadata update
-                // broker and have it do a DB lookup for all objects
-                // matching this Assignment Uuid.
-                // - Build a new structure for metadata updates that
-                // looks like:
-                //  struct AssignmentMetadataUpdate {
-                //      dest_shark: <StorageId>,
-                //      Objects: <MantaObject>, // this could be updated
-                // with the dest_shark above
-                //  }
+                assignment.state = AssignmentState::AgentComplete;
             }
             AgentAssignmentState::Complete(Some(failed_tasks)) => {
                 dbg!(&failed_tasks);
-                // TODO
-                // 1. mark all EvacuateObjects from failed tasks as needs retry
-                // 2. mark all other EvacuateObjects with this assignment_id
-                // as successful
+
+                // failed_tasks: Vec<Task>
+                // assignment.tasks: HashMap<ObjectId, Vec<Task>>
+                //
+                // So we iterate over the keys of assignment.tasks (which
+                // are object ids), and filter out those that are in the
+                // failed_tasks Vec.
+                let successful_tasks: Vec<ObjectId> = assignment
+                    .tasks
+                    .keys()
+                    .filter(|obj_id| {
+                        !failed_tasks.iter().any(|ft| &ft.object_id == *obj_id)
+                    })
+                    .cloned()
+                    .collect();
+
+                self.mark_many_task_objects_skipped(failed_tasks);
+                self.mark_many_objects(
+                    successful_tasks,
+                    EvacuateObjectStatus::PostProcessing,
+                );
+
+                assignment.state = AssignmentState::AgentComplete;
             }
         }
 
@@ -969,8 +1212,26 @@ fn start_sharkspotter(
                     ));
                 }
 
+                // TODO: build a test for this
                 if shard > std::i32::MAX as u32 {
-                    error!("Found shard number over int32 max");
+                    error!(
+                        "Found shard number over int32 max for: {}",
+                        object.object_id
+                    );
+
+                    let eobj = EvacuateObject {
+                        id: object.object_id.clone(),
+                        object: object.clone(),
+                        status: EvacuateObjectStatus::Error,
+                        error: Some(EvacuateObjectError::BadShardNumber),
+                        etag,
+                        ..Default::default()
+                    };
+
+                    job_action
+                        .insert_into_db(&eobj)
+                        .expect("Error inserting bad EvacuateObject into DB");
+
                     return Err(std::io::Error::new(
                         ErrorKind::Other,
                         "Exceeded max number of shards",
@@ -979,14 +1240,19 @@ fn start_sharkspotter(
 
                 let ssobj = SharkSpotterObject {
                     shard: shard as i32,
-                    object,
+                    object: object.clone(),
                     etag,
                 };
+
                 obj_tx
                     .send(ssobj)
                     .map_err(CrossbeamError::from)
                     .map_err(|e| {
                         error!("Sharkspotter: Error sending object: {}", e);
+                        job_action.mark_object_error(
+                            &object.object_id,
+                            EvacuateObjectError::InternalError,
+                        );
                         std::io::Error::new(ErrorKind::Other, e.description())
                     })
             })
@@ -1134,7 +1400,7 @@ fn validate_destination(
     obj: &MantaObject,
     evac_shark: &MantaObjectShark,
     dest_shark: &StorageNode,
-) -> Option<EvacuateObjectSkippedReason> {
+) -> Option<ObjectSkippedReason> {
     let obj_on_dest = obj
         .sharks
         .iter()
@@ -1145,7 +1411,7 @@ fn validate_destination(
     // this check it would reduce the durability level of the object.  That is,
     // it would reduce the number of copies of the object in the region by one.
     if obj_on_dest {
-        return Some(EvacuateObjectSkippedReason::ObjectAlreadyOnDestShark);
+        return Some(ObjectSkippedReason::ObjectAlreadyOnDestShark);
     }
 
     // It's ok to send an object to a storage node that is in the same
@@ -1161,7 +1427,7 @@ fn validate_destination(
             .iter()
             .any(|s| s.datacenter == dest_shark.datacenter)
     {
-        return Some(EvacuateObjectSkippedReason::ObjectAlreadyInDatacenter);
+        return Some(ObjectSkippedReason::ObjectAlreadyInDatacenter);
     }
     None
 }
@@ -1226,7 +1492,7 @@ fn start_assignment_generator(
                     if content_mb > available_space {
                         job_action.skip_object(
                             &mut eobj,
-                            EvacuateObjectSkippedReason::DestinationInsufficientSpace
+                            ObjectSkippedReason::DestinationInsufficientSpace,
                         )?;
 
                         break;
@@ -1253,7 +1519,7 @@ fn start_assignment_generator(
                         None => {
                             job_action.skip_object(
                                 &mut eobj,
-                                EvacuateObjectSkippedReason::SourceIsEvacShark,
+                                ObjectSkippedReason::SourceIsEvacShark,
                             )?;
                             continue;
                         }
@@ -1304,9 +1570,14 @@ fn start_assignment_generator(
                         .expect("assignments write lock")
                         .insert(assignment.id.clone(), assignment.clone());
 
+                    let assignment_uuid = assignment.id.clone();
                     full_assignment_tx.send(assignment).map_err(|e| {
                         error!("Error sending assignment to be posted: {}", e);
 
+                        job_action.mark_assignment_error(
+                            &assignment_uuid,
+                            EvacuateObjectError::InternalError,
+                        );
                         InternalError::new(
                             Some(InternalErrorCode::Crossbeam),
                             CrossbeamError::from(e).description(),
@@ -1339,8 +1610,8 @@ where
                     match job_action.post(assignment) {
                         Ok(()) => (),
                         Err(e) => {
-                            // TODO: persistent error / retry.  Here or in
-                            // post()?
+                            // Just log here.  Marking the errors in the local
+                            // DB is handled by the post() function.
                             error!("Error posting assignment: {}", e);
                             continue;
                         }
@@ -1461,8 +1732,8 @@ fn start_assignment_checker(
                     };
                 }
 
-                // We'd rather not hold the lock here while we run
-                // through all the HTTP GETs and while each completed
+                // We'd rather not hold the assignment hash lock here while we
+                // run through all the HTTP GETs and while each completed
                 // assignment is processed.  Furthermore, there's really no need
                 // to hold the read lock here.  If another thread is created at
                 // some point to query other assignments then we simply make an
@@ -1474,8 +1745,8 @@ fn start_assignment_checker(
                 // in the future, no harm, no foul.  One alternative would be
                 // to take the write lock for the duration of this loop and
                 // process all the assignments right here, but the number of
-                // assignments could grow significantly and have a
-                // significantly negative impact on performance.
+                // assignments could grow significantly and that approach
+                // would have a significantly negative impact on performance.
                 let assignments = job_action
                     .assignments
                     .read()
@@ -1521,7 +1792,10 @@ fn start_assignment_checker(
                     ) {
                         Ok(a) => a,
                         Err(e) => {
-                            // TODO: Log persistent error
+                            // Assignment and its associated objects are
+                            // marked as skipped in the get() function.
+                            // TODO: Should the assignment marking happen
+                            // here instead?
                             error!("{}", e);
                             continue;
                         }
@@ -1533,7 +1807,15 @@ fn start_assignment_checker(
                     // to next assignment.
                     match ag_assignment.stats.state {
                         AgentAssignmentState::Complete(_) => {
-                            job_action.process(ag_assignment)?
+                            // We don't want to shut this thread down simply
+                            // because we have issues handling one assignment.
+                            // The process() function should mark the
+                            // associated objects appropriately.
+                            job_action.process(ag_assignment).unwrap_or_else(
+                                |e| {
+                                    error!("Error Processing Assignment {}", e);
+                                },
+                            );
                         }
                         _ => continue,
                     }
@@ -1553,12 +1835,24 @@ fn start_assignment_checker(
                     match md_update_tx.send(assignment.to_owned()) {
                         Ok(()) => (),
                         Err(e) => {
+                            // here rui  Do you need to set the assignment
+                            // state in the hash?  no because we are exiting,
+                            // right?
+                            job_action.mark_assignment_error(
+                                &assignment.id,
+                                EvacuateObjectError::InternalError,
+                            );
                             error!(
                                 "Assignment Checker: Error sending \
                                  assignment to the metadata \
                                  broker {}",
                                 e
                             );
+                            return Err(InternalError::new(
+                                Some(InternalErrorCode::Crossbeam),
+                                CrossbeamError::from(e).description(),
+                            )
+                            .into());
                         }
                     }
                 }
@@ -1596,13 +1890,13 @@ fn metadata_update_worker(
 
             let mut updated_objects = vec![];
             let dest_shark = &assignment.dest_shark;
-            let objects = job_action.get_assignment_objects(
+            let objects = job_action.load_assignment_objects(
                 &assignment.id,
                 EvacuateObjectStatus::PostProcessing,
             );
 
             for obj in objects {
-                let etag = obj.etag;
+                let etag = obj.etag.clone();
                 let mut mobj: MantaObject = obj.object.clone();
 
                 // Unfortunately sqlite only accepts signed integers.  So we
@@ -1610,8 +1904,14 @@ fn metadata_update_worker(
                 // we don't have more than 2.1 billion shards.
                 // We do check this value coming in from sharkspotter as well.
                 if obj.shard < 0 {
-                    // TODO: persistent error (panic for now)
-                    panic!("Cannot have a negative shard");
+                    job_action.mark_object_error(
+                        &obj.object.object_id,
+                        EvacuateObjectError::BadShardNumber,
+                    );
+
+                    // TODO: panic for now, but for release we should
+                    // continue to next object.
+                    panic!("Cannot have a negative shard {:#?}", obj);
                 }
                 let shard = obj.shard as u32;
 
@@ -1627,9 +1927,11 @@ fn metadata_update_worker(
                         ) {
                             Ok(client) => client,
                             Err(e) => {
-                                // TODO: persistent error for EvacuateObject
-                                // in local DB
-                                error!(
+                                job_action.mark_object_error(
+                                    &obj.id,
+                                    EvacuateObjectError::BadMorayClient,
+                                );
+                                format!(
                                     "MD Update Worker: failed to get moray \
                                      client for shard number {}. Cannot update \
                                      metadata for {:#?}\n{}",
@@ -1645,14 +1947,15 @@ fn metadata_update_worker(
 
                 // This function updates the manta object with the new
                 // sharks in the Manta Metadata tier, and then returns the
-                // updated Manta metadata object.  It does not update the
-                // state of the associated EvacuateObject in the local database.
+                // updated Manta metadata object.  It only updates the state of
+                // the associated EvacuateObject in the local database if an
+                // error is encountered.  It is done this way in order to
+                // batch database updates in the happy path.
                 mobj = match job_action
                     .update_object_shark(mobj, dest_shark, etag, mclient)
                 {
                     Ok(o) => o,
                     Err(e) => {
-                        // TODO: log a persistent error for final job report.
                         error!(
                             "MD Update worker: Error updating \n\n{:#?}, with \
                              dest_shark {:?}\n\n{}",
@@ -1670,22 +1973,12 @@ fn metadata_update_worker(
             // TODO: Should the assignment be removed from the hash of
             // assignments or entered into some DB somewhere for a persistent
             // log?
-            match job_action
-                .assignments
-                .write()
-                .expect("assignment write lock")
-                .get_mut(&assignment.id)
-            {
-                Some(a) => {
-                    a.state = AssignmentState::PostProcessed;
-                    info!("Done processing assignment {}", &a.id);
-                }
-                None => {
-                    error!(
-                        "Error updating assignment state for: {}",
-                        &assignment.id
-                    );
-                }
+            match job_action.set_assignment_state(
+                &assignment.id,
+                AssignmentState::PostProcessed,
+            ) {
+                Ok(()) => (),
+                Err(e) => panic!("{}", e),
             }
 
             // https://stackoverflow
@@ -1695,6 +1988,7 @@ fn metadata_update_worker(
             // completely done and this object has been rebalanced.
             // This is the finish line.
 
+            // TODO: check for DB insert error
             job_action.mark_many_objects(
                 updated_objects,
                 EvacuateObjectStatus::Complete,
@@ -1776,9 +2070,11 @@ fn start_metadata_update_broker(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::AgentAssignmentStats;
     use crate::picker::PickerAlgorithm;
     use crate::util;
     use quickcheck::{Arbitrary, StdThreadGen};
+    use quickcheck_helpers::random::string as random_string;
     use rand::Rng;
 
     fn generate_storage_node(local: bool) -> StorageNode {
@@ -1839,6 +2135,124 @@ mod tests {
         fn choose(&self, _algo: &PickerAlgorithm) -> Option<Vec<StorageNode>> {
             None
         }
+    }
+
+    #[test]
+    fn assignment_processing_test() {
+        let mut g = StdThreadGen::new(10);
+        let job_action = EvacuateJob::new(
+            String::from("1.stor.fakedomain.us"),
+            "fakedomain.us",
+            "assignment_processing_test.db",
+        );
+
+        // Create the database table
+        assert!(job_action.create_table().is_ok());
+
+        // Create a vector to hold the evacuate objects and a new assignment.
+        let mut eobjs = vec![];
+        let mut assignment = Assignment::new(StorageNode::arbitrary(&mut g));
+
+        // We will use this uuid throughout the test.
+        let uuid = assignment.id.clone();
+
+        // Create some EvacuateObjects
+        for _ in 0..100 {
+            let mobj = MantaObject::arbitrary(&mut g);
+            let ssobj = SharkSpotterObject {
+                shard: 1,
+                object: mobj,
+                etag: random_string(&mut g, 10),
+            };
+
+            let mut eobj = EvacuateObject::new(ssobj);
+            eobj.assignment_id = uuid.clone();
+            eobjs.push(eobj);
+        }
+
+        // Put the EvacuateObject's into the DB so that the process function
+        // can look them up later.
+        job_action
+            .insert_many_into_db(&eobjs)
+            .expect("process test: insert many");
+
+        let mut tasks = HashMap::new();
+        let mut failed_tasks = vec![];
+
+        // We create a hash of the counts of each arbitrarily generated
+        // status.  This way we can test to ensure that we end up with exactly
+        // the right amount of EvacuateObject's each with the correct status in
+        // the DB.
+        let mut status_hash = HashMap::new();
+
+        for i in 0..eobjs.len() {
+            let mut task = Task::arbitrary(&mut g);
+            task.object_id = eobjs[i].object.object_id.clone();
+
+            if i % 2 != 0 {
+                let stat = ObjectSkippedReason::arbitrary(&mut g);
+                let entry_count = status_hash.entry(stat).or_insert(0);
+
+                *entry_count += 1;
+                task.status = TaskStatus::Failed(stat);
+                failed_tasks.push(task.clone());
+            } else {
+                task.status = TaskStatus::Complete;
+            }
+            tasks.insert(task.object_id.clone(), task);
+        }
+
+        // Add the tasks, and pretend as though this assignment has been
+        // assigned.
+        assignment.tasks = tasks.clone();
+        assignment.state = AssignmentState::Assigned;
+
+        let mut assignments =
+            job_action.assignments.write().expect("write lock");
+        assignments.insert(uuid.clone(), assignment);
+
+        drop(assignments);
+
+        let mut agent_assignment_stats = AgentAssignmentStats::new(10);
+        agent_assignment_stats.state =
+            AgentAssignmentState::Complete(Some(failed_tasks));
+
+        let agent_assignment = AgentAssignment {
+            uuid: uuid.clone(),
+            stats: agent_assignment_stats,
+            tasks: vec![],
+        };
+
+        job_action
+            .process(agent_assignment)
+            .expect("Process assignment");
+
+        use super::evacuateobjects::dsl::{
+            assignment_id, evacuateobjects, skipped_reason, status,
+        };
+
+        let locked_conn = job_action.conn.lock().expect("DB conn");
+
+        let records: Vec<EvacuateObject> = evacuateobjects
+            .filter(assignment_id.eq(&uuid))
+            .filter(status.eq(EvacuateObjectStatus::Skipped))
+            .load::<EvacuateObject>(&*locked_conn)
+            .expect("getting filtered objects");
+
+        dbg!(&records);
+        assert_eq!(records.len(), eobjs.len() / 2);
+
+        status_hash.iter().for_each(|(reason, count)| {
+            println!("Checking {:#?}, count of {}", reason, count);
+            let skipped_reason_records = evacuateobjects
+                .filter(assignment_id.eq(&uuid))
+                .filter(status.eq(EvacuateObjectStatus::Skipped))
+                .filter(skipped_reason.eq(reason))
+                .load::<EvacuateObject>(&*locked_conn)
+                .expect("getting filtered objects");
+
+            assert_eq!(skipped_reason_records.len(), *count as usize);
+        });
     }
 
     #[test]
@@ -1917,8 +2331,6 @@ mod tests {
         let from_shark = obj.sharks[0].clone();
         let mut to_shark = generate_storage_node(true);
 
-        // TODO: fix these up to match actual error codes.
-
         // Test evacuation to different shark in the same datacenter.
         to_shark.datacenter = from_shark.datacenter.clone();
         assert!(
@@ -1930,7 +2342,7 @@ mod tests {
         to_shark.datacenter = obj.sharks[1].datacenter.clone();
         assert_eq!(
             validate_destination(&obj, &from_shark, &to_shark),
-            Some(EvacuateObjectSkippedReason::ObjectAlreadyInDatacenter),
+            Some(ObjectSkippedReason::ObjectAlreadyInDatacenter),
             "Attempt to place more than one object in the same data center."
         );
 
@@ -1938,7 +2350,7 @@ mod tests {
         to_shark.manta_storage_id = from_shark.manta_storage_id.clone();
         assert_eq!(
             validate_destination(&obj, &from_shark, &to_shark),
-            Some(EvacuateObjectSkippedReason::ObjectAlreadyOnDestShark),
+            Some(ObjectSkippedReason::ObjectAlreadyOnDestShark),
             "Attempt to evacuate an object back to its source."
         );
 
@@ -1956,7 +2368,7 @@ mod tests {
 
         assert_eq!(
             validate_destination(&obj, &from_shark, &to_shark),
-            Some(EvacuateObjectSkippedReason::ObjectAlreadyOnDestShark),
+            Some(ObjectSkippedReason::ObjectAlreadyOnDestShark),
             "Attempt to evacuate an object back to its source."
         );
     }
