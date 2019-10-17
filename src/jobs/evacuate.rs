@@ -17,6 +17,7 @@ use crate::jobs::{
 };
 use crate::moray_client;
 use crate::picker::{self as mod_picker, SharkSource, StorageNode};
+use crate::util;
 
 use std::collections::hash_map::Entry::{Occupied, Vacant};
 use std::collections::HashMap;
@@ -34,7 +35,7 @@ use crossbeam_deque::{Injector, Steal};
 use libmanta::moray::{MantaObject, MantaObjectShark};
 use moray::client::MorayClient;
 use reqwest;
-use slog::{o, Drain, Logger};
+use slog::{Level, Logger};
 use threadpool::ThreadPool;
 
 // --- Diesel Stuff, TODO This should be refactored --- //
@@ -304,11 +305,7 @@ impl EvacuateJob {
         db_url: &str,
     ) -> Self {
         let manta_storage_id = from_shark.into();
-        let plain = slog_term::PlainSyncDecorator::new(std::io::stdout());
-        let log = Logger::root(
-            Mutex::new(slog_term::FullFormat::new(plain).build()).fuse(),
-            o!("build-id" => "0.1.0"),
-        );
+        let log = util::create_bunyan_logger(std::io::stdout());
         let conn = SqliteConnection::establish(db_url)
             .unwrap_or_else(|_| panic!("Error connecting to {}", db_url));
 
@@ -344,7 +341,7 @@ impl EvacuateJob {
         let conn = self.conn.lock().expect("DB conn lock");
         conn.execute(r#"DROP TABLE evacuateobjects"#)
             .unwrap_or_else(|e| {
-                debug!("Table doesn't exist: {}", e);
+                log!(Level::Debug, "Table doesn't exist: {}", e);
                 0
             });
 
@@ -449,7 +446,8 @@ impl EvacuateJob {
             .join()
             .expect("Sharkspotter Thread")
             .unwrap_or_else(|e| {
-                error!("Error joining sharkspotter handle: {}\n", e);
+                log!(Level::Error, "Error joining sharkspotter handle: {}\n",
+                    e);
             });
 
         generator_thread
@@ -482,7 +480,7 @@ impl EvacuateJob {
             .expect("dest_shark_list read lock")
             .get(shark.manta_storage_id.as_str())
             .map_or(false, |eds| {
-                debug!(
+                log!(Level::Debug,
                     "shark '{}' status: {:?}",
                     shark.manta_storage_id, eds.status
                 );
@@ -511,7 +509,8 @@ impl EvacuateJob {
                     shark: sn.to_owned(),
                     status: DestSharkStatus::Init,
                 };
-                debug!("Adding new destination shark {:?} ", new_shark);
+                log!(Level::Debug, "Adding new destination shark {:?} ",
+                    new_shark);
                 dest_shark_list.insert(sn.manta_storage_id.clone(), new_shark);
             }
         }
@@ -543,7 +542,7 @@ impl EvacuateJob {
             .execute(&*locked_conn)
             .unwrap_or_else(|e| {
                 let msg = format!("Error inserting object into DB: {}", e);
-                error!("{}", msg);
+                log!(Level::Error, "{}", msg);
                 panic!(msg);
             });
 
@@ -558,7 +557,8 @@ impl EvacuateJob {
         eobj: &mut EvacuateObject,
         reason: EvacuateObjectSkippedReason,
     ) -> Result<(), Error> {
-        info!("Skipping object {}: {}.", &eobj.object.object_id, reason);
+        log!(Level::Info, "Skipping object {}: {}.", &eobj.object.object_id,
+            reason);
 
         eobj.status = EvacuateObjectStatus::Skipped;
         eobj.skipped_reason = Some(reason);
@@ -580,7 +580,7 @@ impl EvacuateJob {
             .execute(&*locked_conn)
             .unwrap_or_else(|e| {
                 let msg = format!("Error inserting object into DB: {}", e);
-                error!("{}", msg);
+                log!(Level::Error, "{}", msg);
                 panic!(msg);
             });
 
@@ -605,7 +605,7 @@ impl EvacuateJob {
         let locked_conn = self.conn.lock().expect("db conn lock");
         let len = vec_obj_ids.len();
 
-        debug!("Marking {} objects as {:?}", len, to_status);
+        log!(Level::Debug, "Marking {} objects as {:?}", len, to_status);
         let now = std::time::Instant::now();
         let ret = diesel::update(evacuateobjects)
             .filter(id.eq_any(vec_obj_ids))
@@ -613,10 +613,10 @@ impl EvacuateJob {
             .execute(&*locked_conn)
             .unwrap_or_else(|e| {
                 let msg = format!("LocalDB: Error updating {}", e);
-                error!("{}", msg);
+                log!(Level::Error, "{}", msg);
                 panic!(msg);
             });
-        debug!(
+        log!(Level::Debug,
             "eq_any update of {} took {}ms",
             len,
             now.elapsed().as_millis()
@@ -638,14 +638,15 @@ impl EvacuateJob {
 
         let locked_conn = self.conn.lock().expect("DB conn lock");
 
-        debug!("Marking objects in assignment ({}) as {:?}", id, to_status);
+        log!(Level::Debug, "Marking objects in assignment ({}) as {:?}",
+            id, to_status);
         diesel::update(evacuateobjects)
             .filter(assignment_id.eq(id))
             .set(status.eq(to_status))
             .execute(&*locked_conn)
             .unwrap_or_else(|e| {
                 let msg = format!("Error updating assignment: {} ({})", id, e);
-                error!("{}", msg);
+                log!(Level::Error, "{}", msg);
                 panic!(msg);
             })
     }
@@ -657,13 +658,13 @@ impl EvacuateJob {
             .expect("dest_shark_list write")
             .get_mut(dest_shark.manta_storage_id.as_str())
         {
-            debug!(
+            log!(Level::Debug,
                 "Updating shark '{}' to Ready state",
                 dest_shark.manta_storage_id.as_str()
             );
             shark.status = DestSharkStatus::Ready;
         } else {
-            warn!(
+            log!(Level::Warning,
                 "Could not find shark: '{}'",
                 dest_shark.manta_storage_id.as_str()
             );
@@ -705,7 +706,7 @@ fn assignment_post_success(
     {
         Some(evac_dest_shark) => {
             if assignment.total_size > evac_dest_shark.shark.available_mb {
-                warn!(
+                log!(Level::Warning,
                     "Attempting to set available space on destination shark \
                      to a negative value.  Setting to 0 instead."
                 );
@@ -721,7 +722,7 @@ fn assignment_post_success(
             // result removed this one from it's active hash.  Regardless the
             // assignment has been posted and is actively running on the
             // shark's rebalancer agent at this point.
-            warn!(
+            log!(Level::Warning,
                 "Could not find destination shark ({}) to update available \
                  MB.",
                 &assignment.dest_shark.manta_storage_id
@@ -755,12 +756,12 @@ impl PostAssignment for EvacuateJob {
             assignment.dest_shark.manta_storage_id
         );
 
-        trace!("Sending {:#?} to {}", payload, agent_uri);
+        log!(Level::Trace, "Sending {:#?} to {}", payload, agent_uri);
         let res = client.post(&agent_uri).json(&payload).send()?;
 
         if !res.status().is_success() {
             // TODO: how to handle errors?  Need to pick different agent?
-            error!(
+            log!(Level::Error,
                 "Error posting assignment {} to {} ({})",
                 payload.id,
                 assignment.dest_shark.manta_storage_id,
@@ -772,7 +773,7 @@ impl PostAssignment for EvacuateJob {
             );
         }
 
-        debug!("Post of {} was successful", payload.id);
+        log!(Level::Debug, "Post of {} was successful", payload.id);
         Ok(assignment_post_success(self, assignment).map(|_| ())?)
     }
 }
@@ -784,7 +785,7 @@ impl GetAssignment for EvacuateJob {
             assignment.dest_shark.manta_storage_id, assignment.id
         );
 
-        debug!("Getting Assignment: {:?}", uri);
+        log!(Level::Debug, "Getting Assignment: {:?}", uri);
         let mut resp = reqwest::get(&uri)?;
         if !resp.status().is_success() {
             let msg =
@@ -795,7 +796,7 @@ impl GetAssignment for EvacuateJob {
             )
             .into());
         }
-        debug!("RET: {:#?}", resp);
+        log!(Level::Debug, "RET: {:#?}", resp);
         resp.json::<AgentAssignment>().map_err(Error::from)
     }
 }
@@ -820,7 +821,7 @@ impl UpdateMetadata for EvacuateJob {
                 if !shark_found {
                     shark_found = true;
                 } else {
-                    error!("Found duplicate shark");
+                    log!(Level::Error, "Found duplicate shark");
                 }
             }
         }
@@ -848,7 +849,7 @@ impl ProcessAssignment for EvacuateJob {
                     assignments.len()
                 );
 
-                error!("{}", &msg);
+                log!(Level::Error, "{}", &msg);
 
                 return Err(InternalError::new(
                     Some(InternalErrorCode::AssignmentLookupError),
@@ -863,7 +864,7 @@ impl ProcessAssignment for EvacuateJob {
         match assignment.state {
             AssignmentState::Assigned => (),
             _ => {
-                warn!(
+                log!(Level::Warning,
                     "Assignment in unexpected state '{:?}', skipping",
                     assignment.state
                 );
@@ -874,14 +875,14 @@ impl ProcessAssignment for EvacuateJob {
             }
         }
 
-        debug!(
+        log!(Level::Debug,
             "Checking agent assignment state: {:#?}",
             &agent_assignment.stats.state
         );
 
         match agent_assignment.stats.state {
             AgentAssignmentState::Scheduled | AgentAssignmentState::Running => {
-                warn!(
+                log!(Level::Warning,
                     "Trying to process an assignment that is Scheduled or \
                      Running: {}",
                     &uuid
@@ -946,20 +947,17 @@ fn start_sharkspotter(
         ..Default::default()
     };
 
-    debug!("Starting sharkspotter thread: {:?}", &config);
+    log!(Level::Debug, "Starting sharkspotter thread: {:?}", &config);
 
-    let plain = slog_term::PlainSyncDecorator::new(std::io::stdout());
-    let log = Logger::root(
-        Mutex::new(slog_term::FullFormat::new(plain).build()).fuse(),
-        o!("build-id" => "0.1.0"),
-    );
+    let log = util::create_bunyan_logger(std::io::stdout());
 
     thread::Builder::new()
         .name(String::from("sharkspotter"))
         .spawn(move || {
             let mut count = 0;
-            sharkspotter::run(config, log, move |object, shard, etag| {
-                trace!("Sharkspotter discovered object: {:#?}", &object);
+            sharkspotter::run(config, log.clone(), move |object, shard, etag| {
+                log!(Level::Trace,
+                    "Sharkspotter discovered object: {:#?}", &object);
                 // while testing, limit the number of objects processed for now
                 count += 1;
                 if count > 20 {
@@ -970,7 +968,8 @@ fn start_sharkspotter(
                 }
 
                 if shard > std::i32::MAX as u32 {
-                    error!("Found shard number over int32 max");
+                    log!(Level::Error, "Found shard number over int32 max");
+
                     return Err(std::io::Error::new(
                         ErrorKind::Other,
                         "Exceeded max number of shards",
@@ -986,7 +985,8 @@ fn start_sharkspotter(
                     .send(ssobj)
                     .map_err(CrossbeamError::from)
                     .map_err(|e| {
-                        error!("Sharkspotter: Error sending object: {}", e);
+                        log!(Level::Error,
+                            "Sharkspotter: Error sending object: {}", e);
                         std::io::Error::new(ErrorKind::Other, e.description())
                     })
             })
@@ -1037,7 +1037,7 @@ where
 
             loop {
                 // TODO: allow for premature cancellation
-                trace!("shark index: {}", shark_index);
+                log!(Level::Trace, "shark index: {}", shark_index);
                 if valid_sharks.is_empty()
                     || shark_index
                         >= job_action
@@ -1095,8 +1095,7 @@ where
                 shark_index += 1;
 
                 if job_action.shark_busy(cur_shark) {
-                    info!(
-                        "Shark '{}' is busy, trying next shark.",
+                    log!(Level::Info, "Shark '{}' is busy, trying next shark.",
                         cur_shark.manta_storage_id
                     );
                     continue;
@@ -1104,7 +1103,7 @@ where
 
                 let assignment = Assignment::new(cur_shark.clone());
                 if let Err(e) = empty_assignment_tx.send(assignment) {
-                    error!(
+                    log!(Level::Error,
                         "Manager: Error sending assignment to generator \
                          thread: {}",
                         CrossbeamError::from(e)
@@ -1113,7 +1112,8 @@ where
                 }
             }
             // TODO: MANTA-4527
-            info!("Manager: Shutting down assignment checker");
+            log!(Level::Info, "Manager: Shutting down assignment checker");
+
             checker_fini_tx.send(FiniMsg).expect("Fini Msg");
             Ok(())
         })
@@ -1196,7 +1196,7 @@ fn start_assignment_generator(
                 let mut available_space = assignment.max_size;
                 let mut eobj_vec: Vec<EvacuateObject> = vec![];
 
-                debug!(
+                log!(Level::Debug,
                     "Filling up new assignment for {} with max_tasks: {:#?}, \
                      and available_space: {}",
                     &assignment.dest_shark.manta_storage_id,
@@ -1208,15 +1208,16 @@ fn start_assignment_generator(
                 while _continue_adding_tasks(max_tasks, &assignment) {
                     eobj = match obj_rx.recv() {
                         Ok(obj) => {
-                            trace!("Received object {:#?}", &obj);
+                            log!(Level::Trace, "Received object {:#?}", &obj);
                             EvacuateObject::new(obj)
                         }
                         Err(e) => {
-                            warn!("Generator: Didn't receive object. {}\n", e);
-                            info!(
+                            log!(Level::Warning,
+                                "Generator: Didn't receive object. {}\n", e);
+
+                            log!(Level::Info,
                                 "Generator: Sending last assignment: {}\n",
-                                &assignment.id
-                            );
+                                &assignment.id);
                             done = true;
                             break;
                         }
@@ -1273,7 +1274,7 @@ fn start_assignment_generator(
                     assignment.total_size += content_mb;
                     available_space -= content_mb;
 
-                    trace!(
+                    log!(Level::Trace,
                         "Available space: {} | Tasks: {}",
                         &available_space,
                         &assignment.tasks.len()
@@ -1284,7 +1285,8 @@ fn start_assignment_generator(
                     eobj_vec.push(eobj.clone());
                 } // End Task Loop
 
-                info!("sending assignment to post thread: {:?}", &assignment);
+                log!(Level::Info, "sending assignment to post thread: {:#?}",
+                    &assignment);
 
                 job_action.insert_many_into_db(&eobj_vec)?;
 
@@ -1305,7 +1307,8 @@ fn start_assignment_generator(
                         .insert(assignment.id.clone(), assignment.clone());
 
                     full_assignment_tx.send(assignment).map_err(|e| {
-                        error!("Error sending assignment to be posted: {}", e);
+                        log!(Level::Error,
+                            "Error sending assignment to be posted: {}", e);
 
                         InternalError::new(
                             Some(InternalErrorCode::Crossbeam),
@@ -1331,9 +1334,9 @@ where
         match assign_rx.recv() {
             Ok(assignment) => {
                 {
-                    info!(
-                        "Posting Assignment: {}\n",
-                        serde_json::to_string(&assignment)?
+                    log!(Level::Info,
+                        "Posting Assignment: {:#?}\n",
+                        &assignment
                     );
 
                     match job_action.post(assignment) {
@@ -1341,7 +1344,8 @@ where
                         Err(e) => {
                             // TODO: persistent error / retry.  Here or in
                             // post()?
-                            error!("Error posting assignment: {}", e);
+                            log!(Level::Error, "Error posting assignment: {}",
+                                e);
                             continue;
                         }
                     }
@@ -1353,7 +1357,7 @@ where
                 }
             }
             Err(_) => {
-                info!("Post Thread: Channel closed, exiting.");
+                log!(Level::Info, "Post Thread: Channel closed, exiting.");
                 break;
             }
         }
@@ -1435,7 +1439,7 @@ fn start_assignment_checker(
                 if run {
                     run = match checker_fini_rx.try_recv() {
                         Ok(_) => {
-                            info!(
+                            log!(Level::Info,
                                 "Assignment Checker thread received \
                                  shutdown message."
                             );
@@ -1443,7 +1447,7 @@ fn start_assignment_checker(
                         }
                         Err(e) => match e {
                             TryRecvError::Disconnected => {
-                                warn!(
+                                log!(Level::Warning,
                                     "checker fini channel disconnected \
                                      before sending message.  Shutting \
                                      down."
@@ -1451,7 +1455,7 @@ fn start_assignment_checker(
                                 false
                             }
                             TryRecvError::Empty => {
-                                trace!(
+                                log!(Level::Trace,
                                     "No shutdown message, keep Checker \
                                      running"
                                 );
@@ -1482,7 +1486,7 @@ fn start_assignment_checker(
                     .expect("assignments read lock")
                     .clone();
 
-                debug!("Checking Assignments");
+                log!(Level::Debug, "Checking Assignments");
 
                 let outstanding_assignments = || {
                     assignments.values().any(|a| {
@@ -1492,7 +1496,7 @@ fn start_assignment_checker(
                 };
 
                 if !run && !outstanding_assignments() {
-                    info!(
+                    log!(Level::Info,
                         "Assignment Checker: Shutdown received and there \
                          are no remaining assignments in the assigned state to \
                          check on.  Exiting."
@@ -1502,14 +1506,14 @@ fn start_assignment_checker(
 
                 for assignment in assignments.values() {
                     if assignment.state != AssignmentState::Assigned {
-                        trace!(
-                            "Skipping unassigned assignment {:?}",
+                        log!(Level::Trace,
+                            "Skipping unassigned assignment {:#?}",
                             assignment
                         );
                         continue;
                     }
 
-                    debug!(
+                    log!(Level::Debug,
                         "Assignment Checker, checking: {} | {:?}",
                         assignment.id, assignment.state
                     );
@@ -1522,12 +1526,12 @@ fn start_assignment_checker(
                         Ok(a) => a,
                         Err(e) => {
                             // TODO: Log persistent error
-                            error!("{}", e);
+                            log!(Level::Error, "{}", e);
                             continue;
                         }
                     };
 
-                    debug!("Got Assignment: {:?}", ag_assignment);
+                    log!(Level::Debug, "Got Assignment: {:?}", ag_assignment);
                     // If agent assignment is complete, process it and pass
                     // it to the metadata update broker.  Otherwise, continue
                     // to next assignment.
@@ -1553,7 +1557,7 @@ fn start_assignment_checker(
                     match md_update_tx.send(assignment.to_owned()) {
                         Ok(()) => (),
                         Err(e) => {
-                            error!(
+                            log!(Level::Error,
                                 "Assignment Checker: Error sending \
                                  assignment to the metadata \
                                  broker {}",
@@ -1629,7 +1633,7 @@ fn metadata_update_worker(
                             Err(e) => {
                                 // TODO: persistent error for EvacuateObject
                                 // in local DB
-                                error!(
+                                log!(Level::Error,
                                     "MD Update Worker: failed to get moray \
                                      client for shard number {}. Cannot update \
                                      metadata for {:#?}\n{}",
@@ -1653,7 +1657,7 @@ fn metadata_update_worker(
                     Ok(o) => o,
                     Err(e) => {
                         // TODO: log a persistent error for final job report.
-                        error!(
+                        log!(Level::Error,
                             "MD Update worker: Error updating \n\n{:#?}, with \
                              dest_shark {:?}\n\n{}",
                             &obj.object, dest_shark, e
@@ -1665,7 +1669,7 @@ fn metadata_update_worker(
                 updated_objects.push(mobj.object_id.clone());
             }
 
-            debug!("Updated Objects: {:?}", updated_objects);
+            log!(Level::Debug, "Updated Objects: {:?}", updated_objects);
 
             // TODO: Should the assignment be removed from the hash of
             // assignments or entered into some DB somewhere for a persistent
@@ -1678,10 +1682,10 @@ fn metadata_update_worker(
             {
                 Some(a) => {
                     a.state = AssignmentState::PostProcessed;
-                    info!("Done processing assignment {}", &a.id);
+                    log!(Level::Info, "Done processing assignment {}", &a.id);
                 }
                 None => {
-                    error!(
+                    log!(Level::Error,
                         "Error updating assignment state for: {}",
                         &assignment.id
                     );
@@ -1748,7 +1752,7 @@ fn start_metadata_update_broker(
                 let assignment = match md_update_rx.recv() {
                     Ok(assignment) => assignment,
                     Err(e) => {
-                        error!(
+                        log!(Level::Error,
                             "MD Update: Error receiving metadata from \
                              assignment checker thread: {}",
                             e
@@ -1963,7 +1967,7 @@ mod tests {
 
     #[test]
     fn full_test() {
-        pretty_env_logger::init();
+        let _guard = util::init_global_logger();
         let now = std::time::Instant::now();
         let picker = MockPicker::new();
         let picker = Arc::new(picker);
@@ -2011,7 +2015,7 @@ mod tests {
                     match obj_tx.send(ssobj) {
                         Ok(()) => (),
                         Err(e) => {
-                            error!(
+                            log!(Level::Error,
                                 "Could not send object.  Assignment \
                                  generator must have shutdown {}.",
                                 e
@@ -2064,7 +2068,7 @@ mod tests {
             Err(e) => {
                 if let Error::Internal(err) = e {
                     if err.code == InternalErrorCode::PickerError {
-                        error!(
+                        log!(Level::Error,
                             "Enountered empty picker on startup, exiting \
                              safely"
                         );
@@ -2097,8 +2101,8 @@ mod tests {
             .expect("joining assignment post thread")
             .expect("internal assignment post thread");
 
-        debug!("TOTAL TIME: {}ms", now.elapsed().as_millis());
-        debug!(
+        log!(Level::Debug, "TOTAL TIME: {}ms", now.elapsed().as_millis());
+        log!(Level::Debug,
             "TOTAL INSERT DB TIME: {}ms",
             job_action.total_db_time.lock().expect("db time lock")
         );

@@ -7,6 +7,8 @@
 /*
  * Copyright 2019, Joyent, Inc.
  */
+use slog_scope;
+use slog::Level;
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fs;
@@ -75,7 +77,7 @@ struct PathExtractor {
     parts: Vec<String>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Agent {
     assignments: Arc<Mutex<Assignments>>,
     tx: Arc<Mutex<mpsc::Sender<String>>>,
@@ -88,7 +90,6 @@ impl Agent {
     }
 
     pub fn run(addr: &'static str) {
-        println!("Listening for requests at {}", addr);
         gotham::start(addr, router());
     }
 }
@@ -161,7 +162,8 @@ fn discover_saved_assignments(agent: &Agent) {
         .filter_map(|e| e.ok())
     {
         let uuid = entry.file_name().to_string_lossy();
-        println!("{}/{}", REBALANCER_SCHEDULED_DIR, uuid);
+        log!(Level::Debug, "Discovered saved assignment: {}.",
+            &uuid);
         assignment_signal(&agent, &uuid);
     }
 }
@@ -414,6 +416,9 @@ fn post(agent: Agent, mut state: State) -> Box<HandlerFuture> {
                     assignment.clone(),
                 );
 
+                log!(Level::Info,"Received assignment {}.", &uuid);
+                log!(Level::Debug, "Received assignment: {:#?}", &assignment);
+
                 // Create a response containing our newly initialized stats.
                 // This serves as confirmation to the client that we recieved
                 // their request correctly and are working on it.
@@ -589,7 +594,7 @@ fn verify_file_md5(file_path: &str, csum: &str) -> bool {
     match std::io::copy(&mut file, &mut hasher) {
         Ok(_) => (),
         Err(e) => {
-            println!("Error hashing {}", e);
+            log!(Level::Error, "Error hashing {}", e);
             return false;
         }
     };
@@ -610,7 +615,7 @@ fn download(
     let mut response = match reqwest::get(uri) {
         Ok(resp) => resp,
         Err(e) => {
-            println!("request failed!");
+            log!(Level::Error, "Request failed: {}", e);
             return Err(format!("Network: {}", e));
         }
     };
@@ -629,7 +634,8 @@ fn download(
     match std::io::copy(&mut response, &mut file) {
         Ok(_) => (),
         Err(e) => {
-            println!("Failed to complete object download: {}:{}", uri, e);
+            log!(Level::Error, "Failed to complete object download: {}:{}",
+                uri, e);
             return Err(format!("Streaming: {}", e));
         }
     };
@@ -658,7 +664,8 @@ fn process_task(task: &mut Task) {
     // complete and move on.
     if path.exists() && verify_file_md5(&file_path, &task.md5sum) {
         task.set_status(TaskStatus::Complete);
-        println!("Checksum passed -- no need to download.");
+        log!(Level::Info, "Checksum passed -- no need to download {}/{}.",
+            &task.owner, &task.object_id);
         return;
     }
 
@@ -674,7 +681,11 @@ fn process_task(task: &mut Task) {
     let status =
         match download(&url, &task.owner, &task.object_id, &task.md5sum) {
             Ok(_) => TaskStatus::Complete,
-            Err(e) => TaskStatus::Failed(e),
+            Err(e) => {
+                log!(Level::Error, "Download failed for {}/{}: {}.",
+                    &task.owner, &task.object_id, &e);
+                TaskStatus::Failed(e)
+            },
         };
 
     task.set_status(status);
@@ -716,7 +727,8 @@ fn process_assignment(assignments: Arc<Mutex<Assignments>>, uuid: String) {
     // If we are unsuccessful in loading the assignment from disk, there is
     // nothing left to do here, other than return.
     if let Err(e) = load_saved_assignment(&assignments, &uuid) {
-        error!("Unable to load assignment {} from disk: {}", &uuid, e);
+        log!(Level::Error, "Unable to load assignment {} from disk: {}",
+            &uuid, e);
         return;
     }
 
@@ -725,6 +737,8 @@ fn process_assignment(assignments: Arc<Mutex<Assignments>>, uuid: String) {
     let mut failures = Vec::new();
 
     assignment.write().unwrap().stats.state = AgentAssignmentState::Running;
+
+    log!(Level::Info, "Begin processing assignment {}.", &uuid);
 
     for i in 0..len {
         let assn = assignment.clone();
@@ -774,6 +788,8 @@ fn process_assignment(assignments: Arc<Mutex<Assignments>>, uuid: String) {
 
     assignment.write().unwrap().stats.state =
         AgentAssignmentState::Complete(failed);
+
+    log!(Level::Info, "Finished processing assignment {}.", &uuid);
     assignment_complete(assignments, uuid);
 }
 
@@ -793,11 +809,12 @@ fn router() -> Router {
         for _ in 0..1 {
             let rx = Arc::clone(&rx);
             let assignments = Arc::clone(&agent.assignments);
+
             pool.execute(move || loop {
                 let uuid = match rx.lock().unwrap().recv() {
                     Ok(r) => r,
                     Err(e) => {
-                        println!("Channel read error: {}", e);
+                        log!(Level::Error, "Channel read error: {}.", &e);
                         return;
                     }
                 };
@@ -813,6 +830,8 @@ fn router() -> Router {
             .to_new_handler(agent.clone());
 
         route.post("assignments").to_new_handler(agent.clone());
+
+        log!(Level::Info, "Rebalancer agent now listening for requests.");
     })
 }
 
@@ -831,6 +850,7 @@ mod tests {
     };
     use gotham::test::TestServer;
     use std::{mem, thread, time};
+    use crate::util;
 
     static MANTA_SRC_DIR: &str = "/var/tmp/rebalancer/src";
 
@@ -1046,6 +1066,7 @@ mod tests {
     //               should appear as "Complete".
     #[test]
     fn download() {
+        let _guard = util::init_global_logger();
         let (test_server, assignment) = unit_test_init("test/agent/areacodes");
         let uuid = send_assignment(&test_server, assignment);
         monitor_assignment(&test_server, &uuid, TaskStatus::Complete);
@@ -1060,6 +1081,7 @@ mod tests {
     //               as "Complete".
     #[test]
     fn replace_healthy() {
+        let _guard = util::init_global_logger();
         // Download a file once.
         let (test_server, assignment) = unit_test_init("test/agent/areacodes");
         let uuid = send_assignment(&test_server, Arc::clone(&assignment));
@@ -1083,6 +1105,7 @@ mod tests {
     //              as "Failed("Failed request with status: 404 Not Found")".
     #[test]
     fn object_not_found() {
+        let _guard = util::init_global_logger();
         let reason = "Failed request with status: 404 Not Found".to_string();
         let (test_server, assignment) = unit_test_init("test/agent/areacodes");
 
@@ -1107,6 +1130,7 @@ mod tests {
     //              as Failed("Checksum").
     #[test]
     fn failed_checksum() {
+        let _guard = util::init_global_logger();
         let reason = "Checksum".to_string();
         let (test_server, assignment) = unit_test_init("test/agent/areacodes");
 
@@ -1129,6 +1153,7 @@ mod tests {
     //              should return a response of 409 (CONFLICT).
     #[test]
     fn duplicate_assignment() {
+        let _guard = util::init_global_logger();
         // Download a file once.
         let (test_server, assignment) = unit_test_init("test/agent/areacodes");
         let uuid = send_assignment(&test_server, Arc::clone(&assignment));
