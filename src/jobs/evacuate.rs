@@ -1748,6 +1748,19 @@ fn start_metadata_update_broker(
                 let assignment = match md_update_rx.recv() {
                     Ok(assignment) => assignment,
                     Err(e) => {
+                        // If the queue is empty and there are no active or
+                        // queued threads, kick one off to drain the queue.
+                        if !queue_back.is_empty()
+                            && pool.active_count() == 0
+                            && pool.queued_count() == 0
+                        {
+                            let worker = metadata_update_worker(
+                                Arc::clone(&job_action),
+                                Arc::clone(&queue),
+                            );
+
+                            pool.execute(worker);
+                        }
                         error!(
                             "MD Update: Error receiving metadata from \
                              assignment checker thread: {}",
@@ -1759,15 +1772,22 @@ fn start_metadata_update_broker(
 
                 queue_back.push(assignment);
 
-                // XXX: async/await candidate?
-                let worker_job_action = Arc::clone(&job_action);
-                let queue_front = Arc::clone(&queue);
+                // If all the pools threads are devoted to workers there's
+                // really no reason to queue up a new worker.
+                let total_jobs = pool.active_count() + pool.queued_count();
+                if total_jobs >= pool.max_count() {
+                    continue;
+                }
 
-                let worker =
-                    metadata_update_worker(worker_job_action, queue_front);
+                // XXX: async/await candidate?
+                let worker = metadata_update_worker(
+                    Arc::clone(&job_action),
+                    Arc::clone(&queue),
+                );
 
                 pool.execute(worker);
             }
+            pool.join();
             Ok(())
         })
         .map_err(Error::from)
