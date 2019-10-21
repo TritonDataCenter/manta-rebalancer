@@ -19,10 +19,12 @@ extern crate diesel;
 #[macro_use]
 extern crate strum_macros;
 
+#[macro_use]
+pub mod util;
+
 pub mod agent;
 pub mod config;
 pub mod error;
 pub mod jobs;
 pub(crate) mod moray_client;
 pub mod picker;
-pub mod util;

@@ -21,7 +21,7 @@ fn lookup_ip(host: &str) -> Result<IpAddr, Error> {
 pub fn create_client(
     shard: u32,
     domain: &str,
-    log: &Logger,
+    log: Logger,
 ) -> Result<MorayClient, Error> {
     let domain_name = format!("{}.moray.{}", shard, domain);
 
