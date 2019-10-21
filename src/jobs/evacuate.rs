@@ -1606,7 +1606,7 @@ fn metadata_update_worker(
                         let client = match moray_client::create_client(
                             shard,
                             &job_action.domain_name,
-                            slog_scope::logger().clone(),
+                            slog_scope::logger(),
                         ) {
                             Ok(client) => client,
                             Err(e) => {
