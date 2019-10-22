@@ -276,14 +276,6 @@ pub enum ObjectSkippedReason {
     // as a destination for rebalance would reduce the failure domain.
     ObjectAlreadyInDatacenter,
 
-    // Encountered a client error (400-499) while attempting to contact
-    // the source of the object.
-    SourceClientError,
-
-    // Encountered a server error (500-599) while attempting to contact
-    // the source of the object.
-    SourceServerError,
-
     // Encountered some other http error (not 400 or 500) while attempting to
     // contact the source of the object.
     SourceOtherError,
