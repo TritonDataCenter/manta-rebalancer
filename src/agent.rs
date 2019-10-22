@@ -612,7 +612,7 @@ fn download(
     let mut response = match reqwest::get(uri) {
         Ok(resp) => resp,
         Err(e) => {
-            error!("Rrequest failed: {}", &e);
+            error!("Request failed: {}", &e);
             return Err(format!("Network: {}", e));
         }
     };
@@ -660,7 +660,8 @@ fn process_task(task: &mut Task) {
     // complete and move on.
     if path.exists() && verify_file_md5(&file_path, &task.md5sum) {
         task.set_status(TaskStatus::Complete);
-        info!("Checksum passed -- no need to download.");
+        info!("Checksum passed -- no need to download: {}/{}",
+            &task.owner, &task.object_id);
         return;
     }
 
