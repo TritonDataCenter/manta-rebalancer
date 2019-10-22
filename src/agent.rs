@@ -29,10 +29,7 @@ use hyper::{Body, Chunk, Method};
 use libmanta::moray::MantaObjectShark;
 use md5::{Digest, Md5};
 
-use crate::jobs::{
-    AssignmentPayload, ObjectHttpStatusCode, ObjectSkippedReason, Task,
-    TaskStatus,
-};
+use crate::jobs::{AssignmentPayload, ObjectSkippedReason, Task, TaskStatus};
 
 use reqwest::StatusCode;
 use rusqlite;
@@ -601,16 +598,6 @@ fn verify_file_md5(file_path: &str, csum: &str) -> bool {
     result_ascii == csum
 }
 
-fn _skip_download_error(
-    message: &str,
-    reason: reqwest::StatusCode,
-) -> Result<(), ObjectSkippedReason> {
-    error!("{}", message);
-    Err(ObjectSkippedReason::HTTPStatusCode(
-        ObjectHttpStatusCode::from_http_status_code(reason),
-    ))
-}
-
 // TODO: Make this return an actual result.
 fn download(
     uri: &str,
@@ -630,8 +617,9 @@ fn download(
 
     let status = response.status();
     let msg = format!("Download response for {} is {}", uri, status);
-    if response.status() != reqwest::StatusCode::OK {
-        return _skip_download_error(&msg, status);
+    if status != reqwest::StatusCode::OK {
+        error!("{}", msg);
+        return Err(ObjectSkippedReason::HTTPStatusCode(status.into()));
     }
 
     trace!("{}", msg);
@@ -1105,7 +1093,7 @@ mod tests {
             &test_server,
             &uuid,
             TaskStatus::Failed(ObjectSkippedReason::HTTPStatusCode(
-                ObjectHttpStatusCode::NotFound,
+                reqwest::StatusCode::NOT_FOUND.into(),
             )),
         );
     }

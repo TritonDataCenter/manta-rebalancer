@@ -36,6 +36,7 @@ use uuid::Uuid;
 pub type StorageId = String; // Hostname
 pub type AssignmentId = String; // UUID
 pub type ObjectId = String; // UUID
+pub type HttpStatusCode = u16;
 
 pub struct Job {
     id: Uuid,
@@ -290,7 +291,7 @@ pub enum ObjectSkippedReason {
     // The only source available is the shark that is being evacuated.
     SourceIsEvacShark,
 
-    HTTPStatusCode(ObjectHttpStatusCode),
+    HTTPStatusCode(HttpStatusCode),
 }
 
 impl ObjectSkippedReason {
@@ -307,144 +308,20 @@ impl ObjectSkippedReason {
     }
 }
 
-#[derive(
-    AsExpression,
-    Clone,
-    Copy,
-    Debug,
-    Deserialize,
-    Display,
-    EnumString,
-    EnumVariantNames,
-    EnumIter,
-    Eq,
-    FromSqlRow,
-    Hash,
-    PartialEq,
-    Serialize,
-)]
-pub enum ObjectHttpStatusCode {
-    Continue,
-    SwitchingProtocols,
-    Processing,
-    OK,
-    Created,
-    Accepted,
-    NonAuthoritativeInformation,
-    NoContent,
-    ResetContent,
-    PartialContent,
-    MultiStatus,
-    AlreadyReported,
-    IMUsed,
-    MultipleChoices,
-    MovedPermanently,
-    Found,
-    SeeOther,
-    NotModified,
-    UseProxy,
-    TemporaryRedirect,
-    PermanentRedirect,
-    BadRequest,
-    Unauthorized,
-    PaymentRequired,
-    Forbidden,
-    NotFound,
-    MethodNotAllowed,
-    NotAcceptable,
-    ProxyAuthenticationRequired,
-    RequestTimeout,
-    Conflict,
-    Gone,
-    LengthRequired,
-    PreconditionFailed,
-    PayloadTooLarge,
-    URITooLong,
-    UnsupportedMediaType,
-    RangeNotSatisfiable,
-    ExpectationFailed,
-    Imateapot,
-    MisdirectedRequest,
-    UnprocessableEntity,
-    Locked,
-    FailedDependency,
-    UpgradeRequired,
-    PreconditionRequired,
-    TooManyRequests,
-    RequestHeaderFieldsTooLarge,
-    UnavailableForLegalReasons,
-    InternalServerError,
-    NotImplemented,
-    BadGateway,
-    ServiceUnavailable,
-    GatewayTimeout,
-    HTTPVersionNotSupported,
-    VariantAlsoNegotiates,
-    InsufficientStorage,
-    LoopDetected,
-    NotExtended,
-    NetworkAuthenticationRequired,
-    Unknown,      // A response code not implemented by reqwest
-    CodeMismatch, // An internal error
-}
-
-impl Default for ObjectHttpStatusCode {
-    fn default() -> Self {
-        Self::NotFound
-    }
-}
-
-impl ObjectHttpStatusCode {
-    // The reqwest StatusCodes look like this:
-    //   "HTTP Version Not Supported"
-    //
-    // Our enum values look like this:
-    //   HTTPVersionNotSupported
-    //
-    // This function strips out the whitespace and uses the from_str() method
-    // we get from the strum crate to get the correct ObjectHttpStatusCode
-    // variant.
-    pub fn from_http_status_code(status_code: reqwest::StatusCode) -> Self {
-        let code_string = status_code.canonical_reason();
-        match code_string {
-            Some(sc) => {
-                let mut sc_str: String = sc.to_string();
-                sc_str = sc_str.replace('-', " ");
-                sc_str = sc_str.replace("'", "");
-                sc_str = sc_str.split_whitespace().collect();
-
-                dbg!(&sc_str);
-                Self::from_str(&sc_str).unwrap_or(Self::CodeMismatch)
-            }
-            None => Self::Unknown,
-        }
-    }
-}
-
-impl ToSql<sql_types::Text, Sqlite> for ObjectHttpStatusCode {
-    fn to_sql<W: Write>(
-        &self,
-        out: &mut Output<W, Sqlite>,
-    ) -> serialize::Result {
-        let s = self.to_string();
-        out.write_all(s.as_bytes())?;
-        Ok(IsNull::No)
-    }
-}
-
-impl FromSql<sql_types::Text, Sqlite> for ObjectHttpStatusCode {
-    fn from_sql(
-        bytes: Option<backend::RawValue<Sqlite>>,
-    ) -> deserialize::Result<Self> {
-        let t = not_none!(bytes).read_text();
-        Self::from_str(t).map_err(std::convert::Into::into)
-    }
-}
-
 impl Arbitrary for ObjectSkippedReason {
     fn arbitrary<G: Gen>(g: &mut G) -> ObjectSkippedReason {
         let i: usize = g.next_u32() as usize % Self::iter().count();
-        Self::iter().nth(i).unwrap()
+        // XXX
+        // This is down right absurd.  Need to figure out why I cant use
+        // gen_range() even though I have the rand::Rng trait in scope.
+        let status_code: u16 = (g.next_u32() as u16 % 500) + 100;
+        let reason = Self::iter().nth(i).unwrap();
+        match reason {
+            ObjectSkippedReason::HTTPStatusCode(_) => {
+                ObjectSkippedReason::HTTPStatusCode(status_code)
+            }
+            _ => reason,
+        }
     }
 }
 
@@ -480,9 +357,7 @@ impl FromSql<sql_types::Text, Sqlite> for ObjectSkippedReason {
             let reason = ObjectSkippedReason::from_str(&sr_sc[0])?;
             match reason {
                 ObjectSkippedReason::HTTPStatusCode(_) => {
-                    Ok(ObjectSkippedReason::HTTPStatusCode(
-                        ObjectHttpStatusCode::from_str(&sr_sc[1])?,
-                    ))
+                    Ok(ObjectSkippedReason::HTTPStatusCode(sr_sc[1].parse()?))
                 }
                 _ => {
                     panic!("variant with value not found");
@@ -523,53 +398,5 @@ impl Default for JobAction {
 impl Default for JobState {
     fn default() -> Self {
         JobState::Init
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn object_http_status_codes() {
-        // Because there is no way to iter over request::StatusCode, we
-        // iterate over every possible number and `try_from()` is Err() we
-        // continue to the next one.
-        for i in 100..600 {
-            let c = reqwest::StatusCode::from_u16(i).unwrap();
-            dbg!(&c);
-            let ohsc = ObjectHttpStatusCode::from_http_status_code(c);
-            assert_ne!(
-                ohsc,
-                ObjectHttpStatusCode::CodeMismatch,
-                "found unknown for {}",
-                c
-            );
-        }
-
-        // Try some of our more common HTTP status codes
-        let code = reqwest::StatusCode::OK;
-        assert_eq!(
-            ObjectHttpStatusCode::from_http_status_code(code),
-            ObjectHttpStatusCode::OK
-        );
-
-        let code = reqwest::StatusCode::NOT_FOUND;
-        assert_eq!(
-            ObjectHttpStatusCode::from_http_status_code(code),
-            ObjectHttpStatusCode::NotFound
-        );
-
-        let code = reqwest::StatusCode::REQUEST_TIMEOUT;
-        assert_eq!(
-            ObjectHttpStatusCode::from_http_status_code(code),
-            ObjectHttpStatusCode::RequestTimeout
-        );
-
-        let code = reqwest::StatusCode::INTERNAL_SERVER_ERROR;
-        assert_eq!(
-            ObjectHttpStatusCode::from_http_status_code(code),
-            ObjectHttpStatusCode::InternalServerError
-        );
     }
 }

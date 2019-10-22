@@ -299,9 +299,28 @@ impl EvacuateJob {
     fn create_table(&self) -> Result<usize, Error> {
         let status_strings = EvacuateObjectStatus::variants();
         let error_strings = EvacuateObjectError::variants();
-        let skipped_strings: Vec<String> = ObjectSkippedReason::iter()
-            .map(|sr| sr.into_string())
-            .collect();
+        let mut skipped_strings: Vec<String> = vec![];
+
+        for reason in ObjectSkippedReason::iter() {
+            match reason {
+                ObjectSkippedReason::HTTPStatusCode(_) => continue,
+                _ => {
+                    skipped_strings.push(reason.to_string());
+                }
+            }
+        }
+
+        for code in 100..600 {
+            let reason = format!(
+                "{{{}:{}}}",
+                // This value doesn't matter.  The to_string() method only
+                // returns the variant name.
+                ObjectSkippedReason::HTTPStatusCode(0).to_string(),
+                code
+            );
+
+            skipped_strings.push(reason);
+        }
 
         let status_check = format!("'{}'", status_strings.join("', '"));
         let error_check = format!("'{}'", error_strings.join("', '"));
