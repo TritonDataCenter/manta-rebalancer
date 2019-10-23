@@ -77,14 +77,12 @@ macro_rules! warn(
     };
 );
 
-/*
 #[macro_export]
 macro_rules! trace(
     ($($args:tt)*) => {
         log_impl!(slog::Level::Trace, $($args)*)
     };
 );
-*/
 
 #[macro_export]
 macro_rules! debug(

@@ -4,7 +4,7 @@ use moray::{
     client::MorayClient,
     objects::{Etag, MethodOptions as ObjectMethodOptions},
 };
-use slog::{trace, Logger};
+use slog_scope;
 use std::net::IpAddr;
 use trust_dns_resolver::Resolver;
 
@@ -21,7 +21,6 @@ fn lookup_ip(host: &str) -> Result<IpAddr, Error> {
 pub fn create_client(
     shard: u32,
     domain: &str,
-    log: Logger,
 ) -> Result<MorayClient, Error> {
     let domain_name = format!("{}.moray.{}", shard, domain);
 
@@ -31,14 +30,14 @@ pub fn create_client(
     // Waiting on trust-dns-resolver issue:
     // https://github.com/bluejekyll/trust-dns/issues/872
     let ip = lookup_ip(&domain_name)?;
-    MorayClient::from_parts(ip, 2021, log.clone(), None).map_err(Error::from)
+    MorayClient::from_parts(ip, 2021, slog_scope::logger(), None)
+        .map_err(Error::from)
 }
 
 pub fn put_object(
     mclient: &mut MorayClient,
     object: &MantaObject,
     etag: &str,
-    log: Logger,
 ) -> Result<(), Error> {
     let mut opts = ObjectMethodOptions::default();
     let key = object.key.as_str();
@@ -47,7 +46,6 @@ pub fn put_object(
     opts.etag = Etag::Specified(etag.to_string());
 
     trace!(
-        log,
         "Updating metadata. Key: {}\nValue: {:#?}\nopts: {:?}",
         key,
         value,
@@ -56,7 +54,7 @@ pub fn put_object(
 
     mclient
         .put_object(MANTA_BUCKET, key, value, &opts, |o| {
-            trace!(log, "Object Updated: {}", o);
+            trace!("Object Updated: {}", o);
             Ok(())
         })
         .map_err(Error::from)

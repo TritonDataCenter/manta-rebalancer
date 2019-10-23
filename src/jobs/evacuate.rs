@@ -799,7 +799,6 @@ impl UpdateMetadata for EvacuateJob {
         mclient: &mut MorayClient,
     ) -> Result<MantaObject, Error> {
         let old_shark = &self.from_shark;
-        let log = slog_scope::logger();
 
         // Replace shark value
         let mut shark_found = false;
@@ -815,7 +814,7 @@ impl UpdateMetadata for EvacuateJob {
             }
         }
 
-        moray_client::put_object(mclient, &object, &etag, log)?;
+        moray_client::put_object(mclient, &object, &etag)?;
 
         Ok(object)
     }
@@ -1606,7 +1605,6 @@ fn metadata_update_worker(
                         let client = match moray_client::create_client(
                             shard,
                             &job_action.domain_name,
-                            slog_scope::logger(),
                         ) {
                             Ok(client) => client,
                             Err(e) => {
@@ -1826,6 +1824,7 @@ mod tests {
 
     #[test]
     fn empty_picker_test() {
+        let _guard = util::init_global_logger();
         let picker = Arc::new(EmptyPicker {});
         let (empty_assignment_tx, _) = crossbeam::bounded(5);
         let (checker_fini_tx, _) = crossbeam::bounded(1);
@@ -1875,15 +1874,18 @@ mod tests {
     #[test]
     fn skip_object_test() {
         // TODO: add test that includes skipped objects
+        let _guard = util::init_global_logger();
     }
 
     #[test]
     fn duplicate_object_id_test() {
         // TODO: add test that includes duplicate object IDs
+        let _guard = util::init_global_logger();
     }
 
     #[test]
     fn validate_destination_test() {
+        let _guard = util::init_global_logger();
         let mut g = StdThreadGen::new(10);
         let obj = MantaObject::arbitrary(&mut g);
 
