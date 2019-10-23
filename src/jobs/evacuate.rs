@@ -2159,7 +2159,6 @@ mod tests {
 
     #[test]
     fn assignment_processing_test() {
-//        pretty_env_logger::init();
         let mut g = StdThreadGen::new(10);
         let job_action = EvacuateJob::new(
             String::from("1.stor.fakedomain.us"),
