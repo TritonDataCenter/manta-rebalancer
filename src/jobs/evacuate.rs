@@ -351,7 +351,6 @@ impl EvacuateJob {
             );",
             status_check, skipped_check, error_check
         );
-        dbg!(&create_query);
         conn.execute(&create_query).map_err(Error::from)
     }
 
@@ -1157,7 +1156,9 @@ impl ProcessAssignment for EvacuateJob {
                 assignment.state = AssignmentState::AgentComplete;
             }
             AgentAssignmentState::Complete(Some(failed_tasks)) => {
-                dbg!(&failed_tasks);
+                info!("Assignment {} resulted in {} failed tasks.",
+                      &assignment.id, failed_tasks.len());
+                trace!("{:#?}", &failed_tasks);
 
                 // failed_tasks: Vec<Task>
                 // assignment.tasks: HashMap<ObjectId, Vec<Task>>
@@ -2158,6 +2159,7 @@ mod tests {
 
     #[test]
     fn assignment_processing_test() {
+//        pretty_env_logger::init();
         let mut g = StdThreadGen::new(10);
         let job_action = EvacuateJob::new(
             String::from("1.stor.fakedomain.us"),
@@ -2258,11 +2260,11 @@ mod tests {
             .load::<EvacuateObject>(&*locked_conn)
             .expect("getting filtered objects");
 
-        dbg!(&records);
+        debug!("records: {:#?}", &records);
         assert_eq!(records.len(), eobjs.len() / 2);
 
         status_hash.iter().for_each(|(reason, count)| {
-            println!("Checking {:#?}, count of {}", reason, count);
+            debug!("Checking {:#?}, count of {}", reason, count);
             let skipped_reason_records = evacuateobjects
                 .filter(assignment_id.eq(&uuid))
                 .filter(status.eq(EvacuateObjectStatus::Skipped))
