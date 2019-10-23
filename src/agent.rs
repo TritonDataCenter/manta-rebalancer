@@ -29,7 +29,7 @@ use hyper::{Body, Chunk, Method};
 use libmanta::moray::MantaObjectShark;
 use md5::{Digest, Md5};
 
-use crate::jobs::{AssignmentPayload, Task, TaskStatus};
+use crate::jobs::{AssignmentPayload, ObjectSkippedReason, Task, TaskStatus};
 
 use reqwest::StatusCode;
 use rusqlite;
@@ -604,25 +604,25 @@ fn download(
     owner: &str,
     object: &str,
     csum: &str,
-) -> Result<(), String> {
+) -> Result<(), ObjectSkippedReason> {
     let file_path = manta_file_path(owner, object);
 
     let mut response = match reqwest::get(uri) {
         Ok(resp) => resp,
         Err(e) => {
             println!("request failed!");
-            return Err(format!("Network: {}", e));
+            return Err(ObjectSkippedReason::NetworkError);
         }
     };
 
-    // If the response status code is anything other than 200 (Ok), flag
-    // failure and return.
-    if response.status() != reqwest::StatusCode::OK {
-        return Err(format!(
-            "Failed request with status: {}",
-            response.status()
-        ));
+    let status = response.status();
+    let msg = format!("Download response for {} is {}", uri, status);
+    if status != reqwest::StatusCode::OK {
+        error!("{}", msg);
+        return Err(ObjectSkippedReason::HTTPStatusCode(status.into()));
     }
+
+    trace!("{}", msg);
 
     let mut file = file_create(owner, object);
 
@@ -630,14 +630,14 @@ fn download(
         Ok(_) => (),
         Err(e) => {
             println!("Failed to complete object download: {}:{}", uri, e);
-            return Err(format!("Streaming: {}", e));
+            return Err(ObjectSkippedReason::AgentFSError);
         }
     };
 
     if verify_file_md5(&file_path, csum) {
         Ok(())
     } else {
-        Err("Checksum".to_string())
+        Err(ObjectSkippedReason::MD5Mismatch)
     }
 }
 
@@ -1076,21 +1076,26 @@ mod tests {
         monitor_assignment(&test_server, &uuid, TaskStatus::Complete);
     }
 
-    // Test name:   Object not found.
+    // Test name:   Client Error.
     // Description: Attempt to download an object from a storage node where
-    //              the object does not reside.
+    //              the object does not reside will cause a client error.
     // Expected:    TaskStatus for all tasks in the assignment should appear
-    //              as "Failed("Failed request with status: 404 Not Found")".
+    //              as "Failed(HTTPStatusCode(NotFound))".
     #[test]
     fn object_not_found() {
-        let reason = "Failed request with status: 404 Not Found".to_string();
         let (test_server, assignment) = unit_test_init("test/agent/areacodes");
 
         // Rename the object id to something that we know is not on the storage
         // server.  In this case, a file by the name of "abc".
         assignment.write().unwrap().tasks[0].object_id = "abc".to_string();
         let uuid = send_assignment(&test_server, assignment);
-        monitor_assignment(&test_server, &uuid, TaskStatus::Failed(reason));
+        monitor_assignment(
+            &test_server,
+            &uuid,
+            TaskStatus::Failed(ObjectSkippedReason::HTTPStatusCode(
+                reqwest::StatusCode::NOT_FOUND.into(),
+            )),
+        );
     }
 
     // Test name:   Fail to repair a damaged file due to checksum failure.
@@ -1104,10 +1109,9 @@ mod tests {
     //              to us in the records of failed tasks supplied to us by the
     //              assignment when we ask for it at its completion.
     // Expected:    TaskStatus for all tasks in the assignment should appear
-    //              as Failed("Checksum").
+    //              as Failed("MD5Mismatch").
     #[test]
     fn failed_checksum() {
-        let reason = "Checksum".to_string();
         let (test_server, assignment) = unit_test_init("test/agent/areacodes");
 
         // Scribble on the checksum information for the object.  This ensures
@@ -1115,7 +1119,11 @@ mod tests {
         // correctly.
         assignment.write().unwrap().tasks[0].md5sum = "abc".to_string();
         let uuid = send_assignment(&test_server, assignment);
-        monitor_assignment(&test_server, &uuid, TaskStatus::Failed(reason));
+        monitor_assignment(
+            &test_server,
+            &uuid,
+            TaskStatus::Failed(ObjectSkippedReason::MD5Mismatch),
+        );
     }
 
     // Test name:   Duplicate assignment
