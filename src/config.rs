@@ -161,6 +161,17 @@ impl Command {
                                             .value_name("DOMAIN_NAME")
                                             .help("Domain of Manta Deployment")
                                             .required(false)
+                                    )
+                                    .arg(
+                                        Arg::with_name("max_objects")
+                                            .short("X")
+                                            .takes_value(true)
+                                            .value_name("MAX_OBJECTS")
+                                            .help("Limit the number of \
+                                            objects evacuated.  0 for \
+                                            unlimited.  Default: 10.  TESTING \
+                                            ONLY.")
+                                            .required(false)
                                     ),
 
                             ),
@@ -206,6 +217,13 @@ impl Command {
 fn job_subcommand_handler(matches: &ArgMatches, config: Config) -> SubCommand {
     let shark_id = matches.value_of("from_shark").unwrap_or("").to_string();
     let domain_name = matches.value_of("domain").unwrap_or(&config.domain_name);
+    let max: u32 = matches
+        .value_of("max_objects")
+        .unwrap_or("10")
+        .parse()
+        .unwrap();
+
+    let max_objects = if max == 0 { None } else { Some(max) };
 
     let from_shark = format!("{}.{}", shark_id, domain_name);
     // TODO: This should probably be based on the Job UUID and not the pid as
@@ -216,6 +234,7 @@ fn job_subcommand_handler(matches: &ArgMatches, config: Config) -> SubCommand {
         from_shark,
         domain_name,
         &db_url,
+        max_objects,
     )));
     let job = Job::new(job_action, config);
 

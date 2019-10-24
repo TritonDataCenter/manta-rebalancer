@@ -257,6 +257,9 @@ pub struct EvacuateJob {
 
     /// Accumulator for total time spent on DB inserts. (test/dev)
     pub total_db_time: Mutex<u128>,
+
+    /// TESTING ONLY
+    pub max_objects: Option<u32>,
 }
 
 impl EvacuateJob {
@@ -266,6 +269,7 @@ impl EvacuateJob {
         from_shark_id: S,
         domain_name: &str,
         db_url: &str,
+        max_objects: Option<u32>,
     ) -> Self {
         let manta_storage_id = from_shark_id.into();
         let conn = SqliteConnection::establish(db_url)
@@ -287,6 +291,7 @@ impl EvacuateJob {
             conn: Mutex::new(conn),
             total_db_time: Mutex::new(0),
             domain_name: domain_name.to_string(),
+            max_objects,
         }
     }
 
@@ -1196,6 +1201,7 @@ fn start_sharkspotter(
     min_shard: u32,
     max_shard: u32,
 ) -> Result<thread::JoinHandle<Result<(), Error>>, Error> {
+    let max_objects = job_action.max_objects;
     let shark = &job_action.from_shark.manta_storage_id;
     let config = sharkspotter::config::Config {
         domain: String::from(domain),
@@ -1215,13 +1221,15 @@ fn start_sharkspotter(
             let mut count = 0;
             sharkspotter::run(config, log, move |object, shard, etag| {
                 trace!("Sharkspotter discovered object: {:#?}", &object);
-                // while testing, limit the number of objects processed for now
                 count += 1;
-                if count > 20 {
-                    return Err(std::io::Error::new(
-                        ErrorKind::Other,
-                        "Just stop already",
-                    ));
+                // while testing, limit the number of objects processed for now
+                if let Some(max) = max_objects {
+                    if count >= max {
+                        return Err(std::io::Error::new(
+                            ErrorKind::Other,
+                            "Just stop already",
+                        ));
+                    }
                 }
 
                 // TODO: build a test for this
@@ -1302,8 +1310,6 @@ where
     thread::Builder::new()
         .name(String::from("assignment_manager"))
         .spawn(move || {
-            let from_shark_datacenter =
-                job_action.from_shark.datacenter.to_owned();
             let mut shark_index = 0;
             let algo = mod_picker::DefaultPickerAlgorithm {
                 min_avail_mb: job_action.min_avail_mb,
@@ -2173,6 +2179,7 @@ mod tests {
             String::from("1.stor.fakedomain.us"),
             "fakedomain.us",
             "assignment_processing_test.db",
+            None,
         );
 
         // Create the database table
@@ -2297,6 +2304,7 @@ mod tests {
             String::from("1.stor.fakedomain.us"),
             "fakedomain.us",
             "empty_picker_test.db",
+            None,
         );
         let job_action = Arc::new(job_action);
 
@@ -2425,6 +2433,7 @@ mod tests {
             String::from("1.stor.fakedomain.us"),
             "region.fakedomain.us",
             "full_test.db",
+            None,
         );
 
         // Create the database table
