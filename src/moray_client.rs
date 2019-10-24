@@ -20,10 +20,7 @@ fn lookup_ip(host: &str) -> Result<IpAddr, Error> {
     Ok(ip[0])
 }
 
-pub fn create_client(
-    shard: u32,
-    domain: &str,
-) -> Result<MorayClient, Error> {
+pub fn create_client(shard: u32, domain: &str) -> Result<MorayClient, Error> {
     let domain_name = format!("{}.moray.{}", shard, domain);
 
     info!("Creating moray client for: {}", domain_name);
@@ -39,9 +36,8 @@ pub fn create_client(
 pub fn get_manta_object_shark(
     storage_id: &str,
     domain: &str,
-    log: &Logger,
 ) -> Result<MantaObjectShark, Error> {
-    let mut mclient = create_client(1, domain, log).unwrap();
+    let mut mclient = create_client(1, domain).unwrap();
     let filter = format!("{}={}", MANTA_STORAGE_ID, storage_id);
     let opts = ObjectMethodOptions::default();
     let mut ret = MantaObjectShark::default();

@@ -660,8 +660,10 @@ fn process_task(task: &mut Task) {
     // complete and move on.
     if path.exists() && verify_file_md5(&file_path, &task.md5sum) {
         task.set_status(TaskStatus::Complete);
-        info!("Checksum passed -- no need to download: {}/{}",
-            &task.owner, &task.object_id);
+        info!(
+            "Checksum passed -- no need to download: {}/{}",
+            &task.owner, &task.object_id
+        );
         return;
     }
 
@@ -832,13 +834,13 @@ fn create_dir(dirname: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::util;
     use gotham::handler::assets::FileOptions;
     use gotham::router::builder::{
         build_simple_router, DefineSingleRoute, DrawRoutes,
     };
     use gotham::test::TestServer;
     use std::{mem, thread, time};
-    use crate::util;
 
     static MANTA_SRC_DIR: &str = "/var/tmp/rebalancer/src";
 

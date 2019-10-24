@@ -274,7 +274,6 @@ impl EvacuateJob {
         let from_shark = moray_client::get_manta_object_shark(
             &manta_storage_id,
             domain_name,
-            &log,
         )
         .expect("Error finding shark datacenter");
 
