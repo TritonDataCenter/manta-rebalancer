@@ -11,9 +11,10 @@
 use remora::agent::Agent;
 use remora::config::{Command, SubCommand};
 use remora::error::Error;
+use remora::util;
 
 fn main() -> Result<(), Error> {
-    pretty_env_logger::init();
+    let _guard = util::init_global_logger();
     let command = Command::new().unwrap_or_else(|e| {
         eprintln!("Error parsing args: {}", e);
         std::process::exit(1);

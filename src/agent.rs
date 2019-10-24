@@ -88,7 +88,7 @@ impl Agent {
     }
 
     pub fn run(addr: &'static str) {
-        println!("Listening for requests at {}", addr);
+        info!("Listening for requests at {}", addr);
         gotham::start(addr, router());
     }
 }
@@ -161,7 +161,7 @@ fn discover_saved_assignments(agent: &Agent) {
         .filter_map(|e| e.ok())
     {
         let uuid = entry.file_name().to_string_lossy();
-        println!("{}/{}", REBALANCER_SCHEDULED_DIR, uuid);
+        debug!("Discovered unfinished assignment: {}", uuid);
         assignment_signal(&agent, &uuid);
     }
 }
@@ -406,6 +406,8 @@ fn post(agent: Agent, mut state: State) -> Box<HandlerFuture> {
                 let assignment =
                     Arc::new(RwLock::new(Assignment::new(v, &uuid)));
 
+                info!("Received assignment {}.", &uuid);
+                debug!("Received assignment: {:#?}", &assignment);
                 // Before we even process the assignment, save it to persistent
                 // storage.
                 assignment_save(
@@ -589,7 +591,7 @@ fn verify_file_md5(file_path: &str, csum: &str) -> bool {
     match std::io::copy(&mut file, &mut hasher) {
         Ok(_) => (),
         Err(e) => {
-            println!("Error hashing {}", e);
+            error!("Error hashing {}", e);
             return false;
         }
     };
@@ -610,7 +612,7 @@ fn download(
     let mut response = match reqwest::get(uri) {
         Ok(resp) => resp,
         Err(e) => {
-            println!("request failed!");
+            error!("Request failed: {}", &e);
             return Err(ObjectSkippedReason::NetworkError);
         }
     };
@@ -629,7 +631,7 @@ fn download(
     match std::io::copy(&mut response, &mut file) {
         Ok(_) => (),
         Err(e) => {
-            println!("Failed to complete object download: {}:{}", uri, e);
+            error!("Failed to complete object download: {}:{}", uri, e);
             return Err(ObjectSkippedReason::AgentFSError);
         }
     };
@@ -658,7 +660,8 @@ fn process_task(task: &mut Task) {
     // complete and move on.
     if path.exists() && verify_file_md5(&file_path, &task.md5sum) {
         task.set_status(TaskStatus::Complete);
-        println!("Checksum passed -- no need to download.");
+        info!("Checksum passed -- no need to download: {}/{}",
+            &task.owner, &task.object_id);
         return;
     }
 
@@ -726,6 +729,8 @@ fn process_assignment(assignments: Arc<Mutex<Assignments>>, uuid: String) {
 
     assignment.write().unwrap().stats.state = AgentAssignmentState::Running;
 
+    info!("Begin processing assignment {}.", &uuid);
+
     for i in 0..len {
         let assn = assignment.clone();
 
@@ -774,6 +779,8 @@ fn process_assignment(assignments: Arc<Mutex<Assignments>>, uuid: String) {
 
     assignment.write().unwrap().stats.state =
         AgentAssignmentState::Complete(failed);
+
+    info!("Finished processing assignment {}.", &uuid);
     assignment_complete(assignments, uuid);
 }
 
@@ -797,7 +804,7 @@ fn router() -> Router {
                 let uuid = match rx.lock().unwrap().recv() {
                     Ok(r) => r,
                     Err(e) => {
-                        println!("Channel read error: {}", e);
+                        error!("Channel read error: {}", e);
                         return;
                     }
                 };
@@ -831,6 +838,7 @@ mod tests {
     };
     use gotham::test::TestServer;
     use std::{mem, thread, time};
+    use crate::util;
 
     static MANTA_SRC_DIR: &str = "/var/tmp/rebalancer/src";
 
@@ -934,7 +942,7 @@ mod tests {
             Err(e) => panic!(format!("Error: {}", e)),
         };
 
-        println!("Response: {:?}", resp_uuid);
+        info!("Response: {:?}", resp_uuid);
 
         // Perhaps it is overkill, but check to ensure that the uuid given
         // back to us matches what we actually sent.
@@ -1046,6 +1054,7 @@ mod tests {
     //               should appear as "Complete".
     #[test]
     fn download() {
+        let _guard = util::init_global_logger();
         let (test_server, assignment) = unit_test_init("test/agent/areacodes");
         let uuid = send_assignment(&test_server, assignment);
         monitor_assignment(&test_server, &uuid, TaskStatus::Complete);
@@ -1060,6 +1069,7 @@ mod tests {
     //               as "Complete".
     #[test]
     fn replace_healthy() {
+        let _guard = util::init_global_logger();
         // Download a file once.
         let (test_server, assignment) = unit_test_init("test/agent/areacodes");
         let uuid = send_assignment(&test_server, Arc::clone(&assignment));
@@ -1083,6 +1093,7 @@ mod tests {
     //              as "Failed(HTTPStatusCode(NotFound))".
     #[test]
     fn object_not_found() {
+        let _guard = util::init_global_logger();
         let (test_server, assignment) = unit_test_init("test/agent/areacodes");
 
         // Rename the object id to something that we know is not on the storage
@@ -1112,6 +1123,7 @@ mod tests {
     //              as Failed("MD5Mismatch").
     #[test]
     fn failed_checksum() {
+        let _guard = util::init_global_logger();
         let (test_server, assignment) = unit_test_init("test/agent/areacodes");
 
         // Scribble on the checksum information for the object.  This ensures
@@ -1137,6 +1149,7 @@ mod tests {
     //              should return a response of 409 (CONFLICT).
     #[test]
     fn duplicate_assignment() {
+        let _guard = util::init_global_logger();
         // Download a file once.
         let (test_server, assignment) = unit_test_init("test/agent/areacodes");
         let uuid = send_assignment(&test_server, Arc::clone(&assignment));

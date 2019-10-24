@@ -36,7 +36,6 @@ use crossbeam_deque::{Injector, Steal};
 use libmanta::moray::{MantaObject, MantaObjectShark};
 use moray::client::MorayClient;
 use reqwest;
-use slog::{o, Drain, Logger};
 use threadpool::ThreadPool;
 
 // --- Diesel Stuff, TODO This should be refactored --- //
@@ -256,9 +255,6 @@ pub struct EvacuateJob {
     /// domain_name of manta deployment
     pub domain_name: String,
 
-    /// Logger
-    pub log: Logger,
-
     /// Accumulator for total time spent on DB inserts. (test/dev)
     pub total_db_time: Mutex<u128>,
 }
@@ -272,11 +268,6 @@ impl EvacuateJob {
         db_url: &str,
     ) -> Self {
         let manta_storage_id = from_shark.into();
-        let plain = slog_term::PlainSyncDecorator::new(std::io::stdout());
-        let log = Logger::root(
-            Mutex::new(slog_term::FullFormat::new(plain).build()).fuse(),
-            o!("build-id" => "0.1.0"),
-        );
         let conn = SqliteConnection::establish(db_url)
             .unwrap_or_else(|_| panic!("Error connecting to {}", db_url));
 
@@ -292,7 +283,6 @@ impl EvacuateJob {
             conn: Mutex::new(conn),
             total_db_time: Mutex::new(0),
             domain_name: domain_name.to_string(),
-            log,
         }
     }
 
@@ -1038,7 +1028,6 @@ impl UpdateMetadata for EvacuateJob {
         mclient: &mut MorayClient,
     ) -> Result<MantaObject, Error> {
         let old_shark = &self.from_shark;
-        let log = self.log.clone();
 
         // Replace shark value
         let mut shark_found = false;
@@ -1068,7 +1057,7 @@ impl UpdateMetadata for EvacuateJob {
             }
         }
 
-        if let Err(e) = moray_client::put_object(mclient, &object, &etag, log) {
+        if let Err(e) = moray_client::put_object(mclient, &object, &etag) {
             self.mark_object_error(
                 &object.object_id,
                 EvacuateObjectError::MetadataUpdateFailed,
@@ -1211,11 +1200,7 @@ fn start_sharkspotter(
 
     debug!("Starting sharkspotter thread: {:?}", &config);
 
-    let plain = slog_term::PlainSyncDecorator::new(std::io::stdout());
-    let log = Logger::root(
-        Mutex::new(slog_term::FullFormat::new(plain).build()).fuse(),
-        o!("build-id" => "0.1.0"),
-    );
+    let log = slog_scope::logger();
 
     thread::Builder::new()
         .name(String::from("sharkspotter"))
@@ -1570,7 +1555,7 @@ fn start_assignment_generator(
                     eobj_vec.push(eobj.clone());
                 } // End Task Loop
 
-                info!("sending assignment to post thread: {:?}", &assignment);
+                info!("sending assignment to post thread: {:#?}", &assignment);
 
                 job_action.insert_many_into_db(&eobj_vec)?;
 
@@ -1622,10 +1607,7 @@ where
         match assign_rx.recv() {
             Ok(assignment) => {
                 {
-                    info!(
-                        "Posting Assignment: {}\n",
-                        serde_json::to_string(&assignment)?
-                    );
+                    info!("Posting Assignment: {:#?}", &assignment);
 
                     match job_action.post(assignment) {
                         Ok(()) => (),
@@ -1943,7 +1925,6 @@ fn metadata_update_worker(
                         let client = match moray_client::create_client(
                             shard,
                             &job_action.domain_name,
-                            &job_action.log,
                         ) {
                             Ok(client) => client,
                             Err(e) => {
@@ -2179,6 +2160,7 @@ mod tests {
 
     #[test]
     fn assignment_processing_test() {
+        let _guard = util::init_global_logger();
         let mut g = StdThreadGen::new(10);
         let job_action = EvacuateJob::new(
             String::from("1.stor.fakedomain.us"),
@@ -2297,6 +2279,7 @@ mod tests {
 
     #[test]
     fn empty_picker_test() {
+        let _guard = util::init_global_logger();
         let picker = Arc::new(EmptyPicker {});
         let (empty_assignment_tx, _) = crossbeam::bounded(5);
         let (checker_fini_tx, _) = crossbeam::bounded(1);
@@ -2346,15 +2329,18 @@ mod tests {
     #[test]
     fn skip_object_test() {
         // TODO: add test that includes skipped objects
+        let _guard = util::init_global_logger();
     }
 
     #[test]
     fn duplicate_object_id_test() {
         // TODO: add test that includes duplicate object IDs
+        let _guard = util::init_global_logger();
     }
 
     #[test]
     fn validate_destination_test() {
+        let _guard = util::init_global_logger();
         let mut g = StdThreadGen::new(10);
         let obj = MantaObject::arbitrary(&mut g);
 
@@ -2415,7 +2401,7 @@ mod tests {
 
     #[test]
     fn full_test() {
-        pretty_env_logger::init();
+        let _guard = util::init_global_logger();
         let now = std::time::Instant::now();
         let picker = MockPicker::new();
         let picker = Arc::new(picker);
