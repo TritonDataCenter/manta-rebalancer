@@ -263,23 +263,28 @@ impl EvacuateJob {
     /// Create a new EvacauteJob instance.
     /// As part of this initialization also create a new SqliteConnection.
     pub fn new<S: Into<String>>(
-        from_shark: S,
+        from_shark_id: S,
         domain_name: &str,
         db_url: &str,
     ) -> Self {
-        let manta_storage_id = from_shark.into();
+        let manta_storage_id = from_shark_id.into();
         let conn = SqliteConnection::establish(db_url)
             .unwrap_or_else(|_| panic!("Error connecting to {}", db_url));
 
+        let from_shark = moray_client::get_manta_object_shark(
+            &manta_storage_id,
+            domain_name,
+            &log,
+        )
+        .expect("Error finding shark datacenter");
+
+        dbg!(&from_shark);
         Self {
             min_avail_mb: Some(1000),
             max_tasks_per_assignment: Some(1000),
             dest_shark_list: RwLock::new(HashMap::new()),
             assignments: RwLock::new(HashMap::new()),
-            from_shark: MantaObjectShark {
-                manta_storage_id,
-                ..Default::default()
-            },
+            from_shark,
             conn: Mutex::new(conn),
             total_db_time: Mutex::new(0),
             domain_name: domain_name.to_string(),
