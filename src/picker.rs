@@ -53,7 +53,6 @@ impl Arbitrary for StorageNode {
     }
 }
 
-//#[derive(Default)]
 pub struct Picker {
     sharks: Arc<Mutex<Option<Vec<StorageNode>>>>,
     handle: Mutex<Option<JoinHandle<()>>>,

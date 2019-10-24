@@ -47,8 +47,6 @@ failure = "0.1.5"
 bytes = "0.4.12"
 strum = "0.16.0"
 strum_macros = "0.16.0"
-joyent-rust-utils = { git = "https://github.com/joyent/rust-utils", tag = "v0.1.0" }
-
 
 
 diesel = {version = "1.4.2", features = ["sqlite"]}
