@@ -17,6 +17,7 @@ use std::io::{BufReader, Error};
 use std::process;
 
 use crate::jobs::{evacuate::EvacuateJob, Job, JobAction};
+use crate::moray_client;
 use crate::util;
 
 #[derive(Deserialize, Default, Debug, Clone)]
@@ -225,7 +226,12 @@ fn job_subcommand_handler(matches: &ArgMatches, config: Config) -> SubCommand {
 
     let max_objects = if max == 0 { None } else { Some(max) };
 
-    let from_shark = format!("{}.{}", shark_id, domain_name);
+    let shark_id = format!("{}.{}", shark_id, domain_name);
+
+    let from_shark = moray_client::get_manta_object_shark(
+        &shark_id,
+        domain_name)
+        .expect("Error looking up manta shark");
     // TODO: This should probably be based on the Job UUID and not the pid as
     // we plan to have a server mode that will generate multiple jobs in a
     // single process.

@@ -265,23 +265,15 @@ pub struct EvacuateJob {
 impl EvacuateJob {
     /// Create a new EvacauteJob instance.
     /// As part of this initialization also create a new SqliteConnection.
-    pub fn new<S: Into<String>>(
-        from_shark_id: S,
+    pub fn new (
+        from_shark: MantaObjectShark,
         domain_name: &str,
         db_url: &str,
         max_objects: Option<u32>,
     ) -> Self {
-        let manta_storage_id = from_shark_id.into();
         let conn = SqliteConnection::establish(db_url)
             .unwrap_or_else(|_| panic!("Error connecting to {}", db_url));
 
-        let from_shark = moray_client::get_manta_object_shark(
-            &manta_storage_id,
-            domain_name,
-        )
-        .expect("Error finding shark datacenter");
-
-        dbg!(&from_shark);
         Self {
             min_avail_mb: Some(1000),
             max_tasks_per_assignment: Some(1000),
@@ -1850,9 +1842,6 @@ fn start_assignment_checker(
                     match md_update_tx.send(assignment.to_owned()) {
                         Ok(()) => (),
                         Err(e) => {
-                            // here rui  Do you need to set the assignment
-                            // state in the hash?  no because we are exiting,
-                            // right?
                             job_action.mark_assignment_error(
                                 &assignment.id,
                                 EvacuateObjectError::InternalError,
@@ -2176,7 +2165,7 @@ mod tests {
         let _guard = util::init_global_logger();
         let mut g = StdThreadGen::new(10);
         let job_action = EvacuateJob::new(
-            String::from("1.stor.fakedomain.us"),
+            MantaObjectShark::default(),
             "fakedomain.us",
             "assignment_processing_test.db",
             None,
@@ -2301,7 +2290,7 @@ mod tests {
         // These tests are run locally and don't go out over the network so any properly formatted
         // host/domain name is valid here.
         let job_action = EvacuateJob::new(
-            String::from("1.stor.fakedomain.us"),
+            MantaObjectShark::default(),
             "fakedomain.us",
             "empty_picker_test.db",
             None,
@@ -2430,7 +2419,7 @@ mod tests {
         // These tests are run locally and don't go out over the network so any properly formatted
         // host/domain name is valid here.
         let job_action = EvacuateJob::new(
-            String::from("1.stor.fakedomain.us"),
+            MantaObjectShark::default(),
             "region.fakedomain.us",
             "full_test.db",
             None,
