@@ -120,6 +120,7 @@ pub enum InternalErrorCode {
     AssignmentGetError,
     LockError,
     HashNotFound,
+    DuplicateShark,
 }
 
 impl fmt::Display for InternalError {
