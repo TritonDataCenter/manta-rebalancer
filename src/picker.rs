@@ -190,7 +190,6 @@ pub trait SharkSource: Sync + Send {
 // Use our prototype picker zone for now.  Might change this to a shard 1 moray
 // client in the future.
 fn fetch_sharks(address: &str) -> Vec<StorageNode> {
-    // TODO: should find picker in DNS
     let mut ret = reqwest::get(address).unwrap();
     let result = ret.json::<HashMap<String, Vec<StorageNode>>>().unwrap();
     let mut new_sharks = vec![];
