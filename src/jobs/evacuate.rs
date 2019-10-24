@@ -1307,7 +1307,7 @@ where
             let mut shark_index = 0;
             let algo = mod_picker::DefaultPickerAlgorithm {
                 min_avail_mb: job_action.min_avail_mb,
-                blacklist: vec![from_shark_datacenter],
+                blacklist: vec![],
             };
 
             let mut valid_sharks = vec![];
