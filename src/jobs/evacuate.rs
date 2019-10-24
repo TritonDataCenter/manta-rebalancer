@@ -401,7 +401,7 @@ impl EvacuateJob {
 
         // start picker thread which will periodically update the list of
         // available sharks.
-        let mut picker = mod_picker::Picker::new();
+        let mut picker = mod_picker::Picker::new(domain)?;
         picker.start().map_err(Error::from)?;
         let picker = Arc::new(picker);
 
@@ -1145,8 +1145,11 @@ impl ProcessAssignment for EvacuateJob {
                 assignment.state = AssignmentState::AgentComplete;
             }
             AgentAssignmentState::Complete(Some(failed_tasks)) => {
-                info!("Assignment {} resulted in {} failed tasks.",
-                      &assignment.id, failed_tasks.len());
+                info!(
+                    "Assignment {} resulted in {} failed tasks.",
+                    &assignment.id,
+                    failed_tasks.len()
+                );
                 trace!("{:#?}", &failed_tasks);
 
                 // failed_tasks: Vec<Task>
