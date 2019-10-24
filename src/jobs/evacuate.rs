@@ -265,7 +265,7 @@ pub struct EvacuateJob {
 impl EvacuateJob {
     /// Create a new EvacauteJob instance.
     /// As part of this initialization also create a new SqliteConnection.
-    pub fn new (
+    pub fn new(
         from_shark: MantaObjectShark,
         domain_name: &str,
         db_url: &str,
