@@ -53,11 +53,11 @@ impl Arbitrary for StorageNode {
     }
 }
 
-#[derive(Default)]
 pub struct Picker {
     sharks: Arc<Mutex<Option<Vec<StorageNode>>>>,
     handle: Mutex<Option<JoinHandle<()>>>,
     running: Arc<AtomicBool>,
+    address: String,
 }
 
 ///
@@ -106,21 +106,27 @@ impl DefaultPickerAlgorithm {
 }
 
 impl Picker {
-    pub fn new() -> Self {
-        Picker {
+    pub fn new(domain: &str) -> Result<Self, Error> {
+        let picker_domain_name = format!("picker.{}", domain);
+        let address = format!("http://{}/poll", picker_domain_name);
+        Ok(Picker {
             running: Arc::new(AtomicBool::new(true)),
             handle: Mutex::new(None),
             sharks: Arc::new(Mutex::new(Some(vec![]))),
-        }
+            address,
+        })
     }
 
     /// Populate the picker's sharks field, and start the picker updater thread.
     pub fn start(&mut self) -> Result<(), Error> {
         let mut locked_sharks = self.sharks.lock().unwrap();
-        *locked_sharks = Some(fetch_sharks());
+        *locked_sharks = Some(fetch_sharks(&self.address));
 
-        let handle =
-            Self::updater(Arc::clone(&self.sharks), Arc::clone(&self.running));
+        let handle = Self::updater(
+            self.address.clone(),
+            Arc::clone(&self.sharks),
+            Arc::clone(&self.running),
+        );
         let mut locked_handle = self.handle.lock().unwrap();
         *locked_handle = Some(handle);
         Ok(())
@@ -142,6 +148,7 @@ impl Picker {
     }
 
     fn updater(
+        address: String,
         sharks: Arc<Mutex<Option<Vec<StorageNode>>>>,
         running: Arc<AtomicBool>,
     ) -> JoinHandle<()> {
@@ -153,7 +160,7 @@ impl Picker {
             while keep_running.load(Ordering::Relaxed) {
                 thread::sleep(sleep_time);
 
-                let mut new_sharks = fetch_sharks();
+                let mut new_sharks = fetch_sharks(&address);
                 new_sharks.sort_by(|a, b| a.available_mb.cmp(&b.available_mb));
 
                 let mut old_sharks = updater_sharks.lock().unwrap();
@@ -181,9 +188,8 @@ pub trait SharkSource: Sync + Send {
 
 // Use our prototype picker zone for now.  Might change this to a shard 1 moray
 // client in the future.
-fn fetch_sharks() -> Vec<StorageNode> {
-    // TODO: should find picker in DNS
-    let mut ret = reqwest::get("http://10.77.77.43/poll").unwrap();
+fn fetch_sharks(address: &str) -> Vec<StorageNode> {
+    let mut ret = reqwest::get(address).unwrap();
     let result = ret.json::<HashMap<String, Vec<StorageNode>>>().unwrap();
     let mut new_sharks = vec![];
 

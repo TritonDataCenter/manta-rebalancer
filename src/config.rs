@@ -17,6 +17,7 @@ use std::io::{BufReader, Error};
 use std::process;
 
 use crate::jobs::{evacuate::EvacuateJob, Job, JobAction};
+use crate::moray_client;
 use crate::util;
 
 #[derive(Deserialize, Default, Debug, Clone)]
@@ -161,6 +162,17 @@ impl Command {
                                             .value_name("DOMAIN_NAME")
                                             .help("Domain of Manta Deployment")
                                             .required(false)
+                                    )
+                                    .arg(
+                                        Arg::with_name("max_objects")
+                                            .short("X")
+                                            .takes_value(true)
+                                            .value_name("MAX_OBJECTS")
+                                            .help("Limit the number of \
+                                            objects evacuated.  0 for \
+                                            unlimited.  Default: 10.  TESTING \
+                                            ONLY.")
+                                            .required(false)
                                     ),
 
                             ),
@@ -206,8 +218,19 @@ impl Command {
 fn job_subcommand_handler(matches: &ArgMatches, config: Config) -> SubCommand {
     let shark_id = matches.value_of("from_shark").unwrap_or("").to_string();
     let domain_name = matches.value_of("domain").unwrap_or(&config.domain_name);
+    let max: u32 = matches
+        .value_of("max_objects")
+        .unwrap_or("10")
+        .parse()
+        .unwrap();
 
-    let from_shark = format!("{}.{}", shark_id, domain_name);
+    let max_objects = if max == 0 { None } else { Some(max) };
+
+    let shark_id = format!("{}.{}", shark_id, domain_name);
+
+    let from_shark =
+        moray_client::get_manta_object_shark(&shark_id, domain_name)
+            .expect("Error looking up manta shark");
     // TODO: This should probably be based on the Job UUID and not the pid as
     // we plan to have a server mode that will generate multiple jobs in a
     // single process.
@@ -216,6 +239,7 @@ fn job_subcommand_handler(matches: &ArgMatches, config: Config) -> SubCommand {
         from_shark,
         domain_name,
         &db_url,
+        max_objects,
     )));
     let job = Job::new(job_action, config);
 

@@ -20,23 +20,17 @@ where
     W: io::Write + std::marker::Send + 'static,
 {
     Logger::root(
-        Mutex::new(
-            slog_bunyan::with_name(crate_name!(), io)
-            .build()
-        )
-        .fuse(),
-        o!("build-id" => crate_version!())
+        Mutex::new(slog_bunyan::with_name(crate_name!(), io).build()).fuse(),
+        o!("build-id" => crate_version!()),
     )
 }
 
-pub fn init_global_logger() -> slog_scope::GlobalLoggerGuard
-{
+pub fn init_global_logger() -> slog_scope::GlobalLoggerGuard {
     let log = create_bunyan_logger(std::io::stdout());
     slog_scope::set_global_logger(log)
 }
 
-pub fn get_thread_name() -> String
-{
+pub fn get_thread_name() -> String {
     let cn = crate_name!().to_owned();
 
     if thread::current().name().is_none() {

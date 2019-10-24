@@ -257,17 +257,20 @@ pub struct EvacuateJob {
 
     /// Accumulator for total time spent on DB inserts. (test/dev)
     pub total_db_time: Mutex<u128>,
+
+    /// TESTING ONLY
+    pub max_objects: Option<u32>,
 }
 
 impl EvacuateJob {
     /// Create a new EvacauteJob instance.
     /// As part of this initialization also create a new SqliteConnection.
-    pub fn new<S: Into<String>>(
-        from_shark: S,
+    pub fn new(
+        from_shark: MantaObjectShark,
         domain_name: &str,
         db_url: &str,
+        max_objects: Option<u32>,
     ) -> Self {
-        let manta_storage_id = from_shark.into();
         let conn = SqliteConnection::establish(db_url)
             .unwrap_or_else(|_| panic!("Error connecting to {}", db_url));
 
@@ -276,13 +279,11 @@ impl EvacuateJob {
             max_tasks_per_assignment: Some(1000),
             dest_shark_list: RwLock::new(HashMap::new()),
             assignments: RwLock::new(HashMap::new()),
-            from_shark: MantaObjectShark {
-                manta_storage_id,
-                ..Default::default()
-            },
+            from_shark,
             conn: Mutex::new(conn),
             total_db_time: Mutex::new(0),
             domain_name: domain_name.to_string(),
+            max_objects,
         }
     }
 
@@ -401,7 +402,7 @@ impl EvacuateJob {
 
         // start picker thread which will periodically update the list of
         // available sharks.
-        let mut picker = mod_picker::Picker::new();
+        let mut picker = mod_picker::Picker::new(domain)?;
         picker.start().map_err(Error::from)?;
         let picker = Arc::new(picker);
 
@@ -1145,8 +1146,11 @@ impl ProcessAssignment for EvacuateJob {
                 assignment.state = AssignmentState::AgentComplete;
             }
             AgentAssignmentState::Complete(Some(failed_tasks)) => {
-                info!("Assignment {} resulted in {} failed tasks.",
-                      &assignment.id, failed_tasks.len());
+                info!(
+                    "Assignment {} resulted in {} failed tasks.",
+                    &assignment.id,
+                    failed_tasks.len()
+                );
                 trace!("{:#?}", &failed_tasks);
 
                 // failed_tasks: Vec<Task>
@@ -1189,6 +1193,7 @@ fn start_sharkspotter(
     min_shard: u32,
     max_shard: u32,
 ) -> Result<thread::JoinHandle<Result<(), Error>>, Error> {
+    let max_objects = job_action.max_objects;
     let shark = &job_action.from_shark.manta_storage_id;
     let config = sharkspotter::config::Config {
         domain: String::from(domain),
@@ -1208,13 +1213,15 @@ fn start_sharkspotter(
             let mut count = 0;
             sharkspotter::run(config, log, move |object, shard, etag| {
                 trace!("Sharkspotter discovered object: {:#?}", &object);
-                // while testing, limit the number of objects processed for now
                 count += 1;
-                if count > 20 {
-                    return Err(std::io::Error::new(
-                        ErrorKind::Other,
-                        "Just stop already",
-                    ));
+                // while testing, limit the number of objects processed for now
+                if let Some(max) = max_objects {
+                    if count >= max {
+                        return Err(std::io::Error::new(
+                            ErrorKind::Other,
+                            "Just stop already",
+                        ));
+                    }
                 }
 
                 // TODO: build a test for this
@@ -1295,12 +1302,10 @@ where
     thread::Builder::new()
         .name(String::from("assignment_manager"))
         .spawn(move || {
-            let from_shark_datacenter =
-                job_action.from_shark.datacenter.to_owned();
             let mut shark_index = 0;
             let algo = mod_picker::DefaultPickerAlgorithm {
                 min_avail_mb: job_action.min_avail_mb,
-                blacklist: vec![from_shark_datacenter],
+                blacklist: vec![],
             };
 
             let mut valid_sharks = vec![];
@@ -1837,9 +1842,6 @@ fn start_assignment_checker(
                     match md_update_tx.send(assignment.to_owned()) {
                         Ok(()) => (),
                         Err(e) => {
-                            // here rui  Do you need to set the assignment
-                            // state in the hash?  no because we are exiting,
-                            // right?
                             job_action.mark_assignment_error(
                                 &assignment.id,
                                 EvacuateObjectError::InternalError,
@@ -2163,9 +2165,10 @@ mod tests {
         let _guard = util::init_global_logger();
         let mut g = StdThreadGen::new(10);
         let job_action = EvacuateJob::new(
-            String::from("1.stor.fakedomain.us"),
+            MantaObjectShark::default(),
             "fakedomain.us",
             "assignment_processing_test.db",
+            None,
         );
 
         // Create the database table
@@ -2287,9 +2290,10 @@ mod tests {
         // These tests are run locally and don't go out over the network so any properly formatted
         // host/domain name is valid here.
         let job_action = EvacuateJob::new(
-            String::from("1.stor.fakedomain.us"),
+            MantaObjectShark::default(),
             "fakedomain.us",
             "empty_picker_test.db",
+            None,
         );
         let job_action = Arc::new(job_action);
 
@@ -2415,9 +2419,10 @@ mod tests {
         // These tests are run locally and don't go out over the network so any properly formatted
         // host/domain name is valid here.
         let job_action = EvacuateJob::new(
-            String::from("1.stor.fakedomain.us"),
+            MantaObjectShark::default(),
             "region.fakedomain.us",
             "full_test.db",
+            None,
         );
 
         // Create the database table
