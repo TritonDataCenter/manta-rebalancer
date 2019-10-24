@@ -9,6 +9,7 @@
  */
 
 use crate::error::Error;
+use joyent_rust_utils::lookup_ip;
 use quickcheck::{Arbitrary, Gen};
 use quickcheck_helpers::random::string as random_string;
 use reqwest;
@@ -183,6 +184,7 @@ pub trait SharkSource: Sync + Send {
 // client in the future.
 fn fetch_sharks() -> Vec<StorageNode> {
     // TODO: should find picker in DNS
+    let picker_ip = lookup_ip("picker");
     let mut ret = reqwest::get("http://10.77.77.43/poll").unwrap();
     let result = ret.json::<HashMap<String, Vec<StorageNode>>>().unwrap();
     let mut new_sharks = vec![];
