@@ -1290,6 +1290,19 @@ fn start_sharkspotter(
 /// the future, or make it tunable)
 /// * If all storage ndoes with availableMb > Some TBD threshold have an
 /// outstanding assignment, sleep/wait for an assignment to complete.
+///
+
+enum AssignmentMsg {
+    Flush,
+    Stop,
+    Data(EvacuateObject)
+}
+
+struct SharkHashEntry {
+    handle: thread::JoinHandle<()>,
+    tx: crossbeam::Sender<AssignmentMsg>
+}
+
 fn start_assignment_manager<S>(
     empty_assignment_tx: crossbeam::Sender<Assignment>,
     checker_fini_tx: crossbeam_channel::Sender<FiniMsg>,
@@ -1311,6 +1324,10 @@ where
             let mut valid_sharks = vec![];
             let mut shark_list = vec![];
 
+            let mut shark_hash = HashMap::new();
+            let (evac_obj_tx, evac_obj_rx) = crossbeam::bounded(5);
+
+            let evac_obj_rx = Arc::new(&evac_obj_rx);
             loop {
                 // TODO: allow for premature cancellation
                 trace!("shark index: {}", shark_index);
@@ -1379,6 +1396,35 @@ where
                 }
 
                 let assignment = Assignment::new(cur_shark.clone());
+
+                for ent in shark_hash.keys() {
+                    if shark_list.iter().any(|s| {
+                        s.manta_storage_id == ent
+                    }) {
+                        continue;
+                    }
+
+                }
+                let shark_ent = match shark_hash.entry(cur_shark
+                    .manta_storage_id) {
+                    Occupied(entry) => entry,
+                    Vacant(entry) => {
+                        let (tx, rx) = crossbeam_channel::bounded(5);
+                        let rx = Arc::clone(&rx);
+                        let builder = thread::Builder::new();
+                        let hark_handle= builder
+                            .name(String::from("object_generator_test"))
+                            .spawn(
+                                shark_assignment_generator(
+                                    Arc::clone(&job_action),
+                                    rx)
+                            );
+
+
+                        entry.insert(SharkHashEntry {handle, tx});
+                    }
+                };
+
                 if let Err(e) = empty_assignment_tx.send(assignment) {
                     error!(
                         "Manager: Error sending assignment to generator \
@@ -1394,6 +1440,13 @@ where
             Ok(())
         })
         .map_err(Error::from)
+}
+
+fn shark_assignment_generator(
+    job_action: Arc<EvacuateJob>,
+    assign_msg_rx: crossbeam::Receiver<AssignmentMsg>
+) -> impl Fn() {
+    move || {}
 }
 
 // If we have exceeded the per shark number of tasks then move on.  If
