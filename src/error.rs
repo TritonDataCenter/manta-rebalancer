@@ -20,6 +20,7 @@ pub enum Error {
     SerdeJson(serde_json::error::Error),
     Reqwest(reqwest::Error),
     Resolve(trust_dns_resolver::error::ResolveError),
+    ParseInt(std::num::ParseIntError),
 }
 
 impl std::error::Error for Error {
@@ -31,6 +32,7 @@ impl std::error::Error for Error {
             Error::Diesel(e) => e.description(),
             Error::SerdeJson(e) => e.description(),
             Error::Reqwest(e) => e.description(),
+            Error::ParseInt(e) => e.description(),
             Error::Resolve(e) => {
                 let kind = e.kind();
                 match kind {
@@ -90,6 +92,12 @@ impl From<trust_dns_resolver::error::ResolveError> for Error {
     }
 }
 
+impl From<std::num::ParseIntError> for Error {
+    fn from(error: std::num::ParseIntError) -> Self {
+        Error::ParseInt(error)
+    }
+}
+
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
@@ -100,6 +108,7 @@ impl fmt::Display for Error {
             Error::SerdeJson(e) => write!(f, "{}", e),
             Error::Reqwest(e) => write!(f, "{}", e),
             Error::Resolve(e) => write!(f, "{}", e),
+            Error::ParseInt(e) => write!(f, "{}", e),
         }
     }
 }
