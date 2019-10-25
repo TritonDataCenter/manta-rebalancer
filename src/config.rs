@@ -13,9 +13,10 @@ extern crate clap;
 use clap::{App, AppSettings, Arg, ArgMatches, SubCommand as ClapSubCommand};
 use serde::Deserialize;
 use std::fs::File;
-use std::io::{BufReader, Error};
+use std::io::BufReader;
 use std::process;
 
+use crate::error::Error;
 use crate::jobs::{evacuate::EvacuateJob, Job, JobAction};
 use crate::moray_client;
 use crate::util;
@@ -201,7 +202,7 @@ impl Command {
                     job_matches.subcommand_matches("evacuate")
                 {
                     subcommand =
-                        job_subcommand_handler(create_matches, config.clone());
+                        job_subcommand_handler(create_matches, config.clone())?;
                 }
             }
         }
@@ -215,14 +216,16 @@ impl Command {
 // 1. Command::new() handling override of domain_name from config file
 // 2. Job::new() taking all args necessary to create new Job Action (e.g.
 // EvacuateJob)
-fn job_subcommand_handler(matches: &ArgMatches, config: Config) -> SubCommand {
+fn job_subcommand_handler(
+    matches: &ArgMatches,
+    config: Config
+) -> Result<SubCommand, Error> {
     let shark_id = matches.value_of("from_shark").unwrap_or("").to_string();
     let domain_name = matches.value_of("domain").unwrap_or(&config.domain_name);
     let max: u32 = matches
         .value_of("max_objects")
         .unwrap_or("10")
-        .parse()
-        .unwrap();
+        .parse()?;
 
     let max_objects = if max == 0 { None } else { Some(max) };
 
@@ -230,7 +233,7 @@ fn job_subcommand_handler(matches: &ArgMatches, config: Config) -> SubCommand {
 
     let from_shark =
         moray_client::get_manta_object_shark(&shark_id, domain_name)
-            .expect("Error looking up manta shark");
+            .map_err(Error::from)?;
     // TODO: This should probably be based on the Job UUID and not the pid as
     // we plan to have a server mode that will generate multiple jobs in a
     // single process.
@@ -243,5 +246,6 @@ fn job_subcommand_handler(matches: &ArgMatches, config: Config) -> SubCommand {
     )));
     let job = Job::new(job_action, config);
 
-    SubCommand::DoJob(Box::new(job))
+
+    Ok(SubCommand::DoJob(Box::new(job)))
 }

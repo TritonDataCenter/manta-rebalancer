@@ -37,7 +37,7 @@ pub fn get_manta_object_shark(
     storage_id: &str,
     domain: &str,
 ) -> Result<MantaObjectShark, Error> {
-    let mut mclient = create_client(1, domain).unwrap();
+    let mut mclient = create_client(1, domain)?;
     let filter = format!("{}={}", MANTA_STORAGE_ID, storage_id);
     let opts = ObjectMethodOptions::default();
     let mut ret = MantaObjectShark::default();
