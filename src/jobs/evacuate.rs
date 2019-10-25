@@ -2239,6 +2239,15 @@ fn metadata_update_worker(
                 Err(e) => panic!("{}", e),
             }
 
+            // TODO move this somewhere that makes more sense
+            if let None = job_action.assignments
+                .write()
+                .expect("assignments write")
+                .remove(&assignment.id) {
+                    warn!("Attempt to remove assignment not in hash: {}", &assignment.id);
+                }
+
+
             // https://stackoverflow
             // .com/questions/47626047/execute-an-insert-or-update-using-diesel
             // TODO: batch update all objects in `updated_objects` with
