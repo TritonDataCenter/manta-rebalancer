@@ -394,15 +394,6 @@ impl EvacuateJob {
         let post_thread =
             start_assignment_post(full_assignment_rx, Arc::clone(&job_action))?;
 
-        /*
-        let generator_thread = start_assignment_generator(
-            obj_rx,
-            empty_assignment_rx,
-            full_assignment_tx,
-            Arc::clone(&job_action),
-        )?;
-        */
-
         // start picker thread which will periodically update the list of
         // available sharks.
         let mut picker = mod_picker::Picker::new(domain)?;
@@ -1466,7 +1457,6 @@ where
                     }
                 }
 
-
                 // create and add any shark threads that are in the list but
                 // not in the hash.
                 for shark in shark_list.iter() {
@@ -1500,7 +1490,7 @@ where
                 //    make sure shark is not busy
                 //    send object to that shark's thread
                 // end loop
-                for _ in 0..1000 {
+                for _ in 0..50 {
 
                     // Get an object
                     let eobj = match obj_rx.recv() {
@@ -1648,7 +1638,8 @@ fn shark_assignment_generator(
                     ).expect(""); // TODO: return Result?
 
                     // Insert objects into DB
-                    job_action.insert_many_into_db(&eobj_vec);
+                    job_action.insert_many_into_db(&eobj_vec).expect("insert \
+                    many into db expect TODO");
                     break;
                 },
                 AssignmentMsg::Flush => {
@@ -1682,6 +1673,8 @@ fn shark_assignment_generator(
                         },
                     );
 
+                    // TODO: check for available space
+                    /*
                     assignment.total_size += content_mb;
                     available_space -= content_mb;
 
@@ -1690,6 +1683,7 @@ fn shark_assignment_generator(
                         &available_space,
                         &assignment.tasks.len()
                     );
+                    */
 
                     eobj.status = EvacuateObjectStatus::Assigned;
                     eobj.assignment_id = assignment.id.clone();
@@ -1710,7 +1704,8 @@ fn shark_assignment_generator(
                 assignment = Assignment::new(shark.clone());
 
                 // Insert objects into DB
-                job_action.insert_many_into_db(&eobj_vec);
+                job_action.insert_many_into_db(&eobj_vec).expect("insert many\
+                 TODO");
                 eobj_vec = Vec::new();
             }
         }
@@ -2484,6 +2479,154 @@ mod tests {
 
     #[test]
     fn no_skip() {
+        use super::*;
+        use rand::Rng;
+
+        struct NoSkipPicker;
+        impl NoSkipPicker {
+            fn new() -> Self {
+                NoSkipPicker {}
+            }
+        }
+
+        impl SharkSource for NoSkipPicker {
+            fn choose(&self, _: &PickerAlgorithm) -> Option<Vec<StorageNode>> {
+
+                let mut sharks = vec![];
+                for i in 1..5 {
+                    let mut shark: StorageNode = generate_storage_node(true);
+
+                    shark.manta_storage_id = format!("{}.stor.domain", i);
+                    shark.datacenter = String::from("foo");
+                    // TODO datacenter
+
+                    sharks.push(shark);
+                }
+                Some(sharks)
+            }
+        }
+
+        let job_action = EvacuateJob::new(
+            MantaObjectShark::default(),
+            "fakedomain.us",
+            "no_skip_test.db",
+            Some(100),
+        );
+        assert!(job_action.create_table().is_ok());
+        let job_action = Arc::new(job_action);
+
+        let picker = NoSkipPicker::new();
+        let picker = Arc::new(picker);
+
+        let (full_assignment_tx, full_assignment_rx) = crossbeam::bounded(5);
+        let (obj_tx, obj_rx) = crossbeam::bounded(5);
+        //let (md_update_tx, md_update_rx) = crossbeam::bounded(5);
+        let (checker_fini_tx, checker_fini_rx) = crossbeam::bounded(1);
+
+        let mut test_objects = HashMap::new();
+
+        let mut g = StdThreadGen::new(10);
+
+
+        let mut rng = rand::thread_rng();
+
+        for _ in 0..100 {
+            let mut mobj = MantaObject::arbitrary(&mut g);
+            let mut sharks = vec![];
+            let out = String::new();
+
+            // first pass: 1 or 2
+            // second pass: 3 or 4
+            for i in 0..2 {
+                let shark_num = rng.gen_range(1 + i * 2, 3 + i * 2);
+
+                let shark = MantaObjectShark {
+                    datacenter: String::from("foo"), //todo
+                    manta_storage_id: format!("{}.stor.domain", shark_num),
+                };
+                sharks.push(shark);
+            }
+            mobj.sharks = sharks;
+
+            test_objects.insert(mobj.object_id.clone(), mobj);
+        }
+
+        let test_objects_copy = test_objects.clone();
+        let manager_thread = start_assignment_manager(
+            full_assignment_tx,
+            checker_fini_tx,
+            obj_rx,
+            Arc::clone(&job_action),
+            Arc::clone(&picker),
+        ).expect("start assignment manager");
+
+
+        let builder = thread::Builder::new();
+        let obj_generator_th = builder
+            .name(String::from("no skip object_generator_test"))
+            .spawn(move || {
+                for (_, o) in test_objects_copy.into_iter() {
+                    let ssobj = SharkSpotterObject {
+                        shard: 1,
+                        object: o.clone(),
+                        // TODO
+                        etag: String::from("Fake_etag"),
+                    };
+                    match obj_tx.send(ssobj) {
+                        Ok(()) => (),
+                        Err(e) => {
+                            error!(
+                                "Could not send object.  Assignment \
+                                 generator must have shutdown {}.",
+                                e
+                            );
+                            break;
+                        }
+                    }
+                }
+            })
+            .expect("failed to build object generator thread");
+
+        let verification_objects= test_objects.clone();
+        let builder = thread::Builder::new();
+        let verification_thread = builder
+            .name(String::from("verification thread"))
+            .spawn(move ||{
+                let mut assignment_count = 0;
+                loop {
+
+                    match full_assignment_rx.recv() {
+                        Ok(assignment) => {
+                            assignment_count += 1;
+                            let dest_shark = assignment.dest_shark.manta_storage_id;
+                            for (tid, task) in assignment.tasks {
+                                match verification_objects.get(&task.object_id) {
+                                    Some(obj) => {
+                                        println!("Checking that {:#?} is not in \
+                                    {:#?}", dest_shark, obj.sharks);
+
+                                        assert_eq!(obj.sharks.iter().any(|shark| {
+                                            shark.manta_storage_id == dest_shark
+                                        }), false);
+                                    },
+                                    None => {
+                                        assert!(false, "test error");
+                                    }
+                                }
+                            }
+                        }
+                        Err(_) => {
+                            println!("Error");
+                            info!("Verification Thread: Channel closed, exiting.");
+                            break;
+                        }
+                    }
+                }
+                println!("Assignment Count: {}", assignment_count);
+        }).expect("TODO thread check");
+        verification_thread.join().expect("verification join TODO");
+        obj_generator_th.join().expect("obj_gen thr join TODO");
+        manager_thread.join().expect("manager thread join TODO");
 
 
     }
@@ -2741,8 +2884,6 @@ mod tests {
         let picker = MockPicker::new();
         let picker = Arc::new(picker);
 
-        //let (empty_assignment_tx, empty_assignment_rx) = crossbeam::bounded
-        // (5);
         let (full_assignment_tx, full_assignment_rx) = crossbeam::bounded(5);
         let (obj_tx, obj_rx) = crossbeam::bounded(5);
         let (md_update_tx, md_update_rx) = crossbeam::bounded(5);
@@ -2812,16 +2953,6 @@ mod tests {
         let assign_post_thread =
             start_assignment_post(full_assignment_rx, Arc::clone(&job_action))
                 .expect("assignment post thread");
-
-        /*
-        let generator_thread = start_assignment_generator(
-            obj_rx,
-            empty_assignment_rx,
-            full_assignment_tx,
-            Arc::clone(&job_action),
-        )
-        .expect("start assignment generator");
-        */
 
         let manager_thread = start_assignment_manager(
             full_assignment_tx,
