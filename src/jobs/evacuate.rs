@@ -249,6 +249,9 @@ pub struct EvacuateJob {
     /// Maximum number of tasks to include in a single assignment.
     pub max_tasks_per_assignment: Option<u32>,
 
+    // TODO:
+    // max assignment size
+    // max number of shark threads
     /// SqliteConnection to local database.
     pub conn: Mutex<SqliteConnection>,
 
@@ -573,15 +576,15 @@ impl EvacuateJob {
     where
         S: SharkSource + 'static,
     {
-        let valid_sharks = match picker
-            .choose(&mod_picker::PickerAlgorithm::Default(algo))
-            {
+        let valid_sharks =
+            match picker.choose(&mod_picker::PickerAlgorithm::Default(algo)) {
                 Some(sharks) => sharks,
                 None => {
                     return Err(InternalError::new(
                         Some(InternalErrorCode::PickerError),
                         "No valid sharks available.",
-                    ).into())
+                    )
+                    .into())
                 }
             };
 
@@ -598,7 +601,7 @@ impl EvacuateJob {
         // take the reader lock for each iteration and only take
         // the writer lock inside the job_action methods called
         // above.
-        let mut shark_list:Vec<StorageNode> = self
+        let mut shark_list: Vec<StorageNode> = self
             .dest_shark_list
             .read()
             .expect("dest_shark_list read lock")
@@ -1335,14 +1338,14 @@ fn start_sharkspotter(
 
 #[derive(Clone)]
 enum AssignmentMsg {
-    Flush,  // send all assignments to the Post thread, but keep running
-    Stop,   // send all assignments to the Post thread, and stop running
-    Data(EvacuateObject) // Add EvacuateObject to active assignment
+    Flush, // send all assignments to the Post thread, but keep running
+    Stop,  // send all assignments to the Post thread, and stop running
+    Data(EvacuateObject), // Add EvacuateObject to active assignment
 }
 
 struct SharkHashEntry {
     handle: thread::JoinHandle<()>,
-    tx: crossbeam::Sender<AssignmentMsg>
+    tx: crossbeam::Sender<AssignmentMsg>,
 }
 
 fn _msg_all_assignment_threads(
@@ -1353,9 +1356,10 @@ fn _msg_all_assignment_threads(
 
     shark_hash.iter().for_each(|(shark_id, she)| {
         if let Err(e) = she.tx.send(command.clone()) {
-            error!("Error stopping shark ({}) assignments: {}",
-                   shark_id,
-                   CrossbeamError::from(e)
+            error!(
+                "Error stopping shark ({}) assignments: {}",
+                shark_id,
+                CrossbeamError::from(e)
             );
             // TODO: join?
             // This is a little funky.  We cant send
@@ -1368,7 +1372,6 @@ fn _msg_all_assignment_threads(
     for k in remove_keys {
         shark_hash.remove(&k);
     }
-
 }
 fn _stop_shark_assignment_threads(
     shark_hash: &mut HashMap<StorageId, SharkHashEntry>,
@@ -1388,14 +1391,11 @@ fn _join_drain_shark_assignment_threads(
     mut shark_hash: HashMap<StorageId, SharkHashEntry>,
 ) {
     shark_hash.into_iter().for_each(|(shark_id, she)| {
-        she.handle
-            .join()
-            .expect(format!(
-                "Error joining shark_assignment_thread {}",
-                shark_id).as_str()
-            );
+        she.handle.join().expect(
+            format!("Error joining shark_assignment_thread {}", shark_id)
+                .as_str(),
+        );
     });
-
 }
 
 // Takes ownership of the shark_hash, sends all associated threads the stop
@@ -1427,25 +1427,26 @@ where
             };
 
             // create shark hash
-            let mut shark_hash: HashMap<StorageId, SharkHashEntry> = HashMap::new();
+            let mut shark_hash: HashMap<StorageId, SharkHashEntry> =
+                HashMap::new();
             let mut done = false;
 
             while !done {
                 // TODO: MANTA-4519
                 // get a fresh shark count
-                let shark_list = job_action
-                    .get_shark_list(Arc::clone(&picker), &algo)?;
+                let mut shark_list =
+                    job_action.get_shark_list(Arc::clone(&picker), &algo)?;
 
-                // delete any sharks from hash that are not in the new list
-                // for key in shark_hash.keys() ...
-                //    send stop
-                //    join
-                //    remove
+                // TODO: file ticket, tunable number of sharks which implies
+                // number of threads.
+                shark_list.truncate(5);
+
+                // For any active sharks that are not in the list remove them
+                // from the hash, send the stop command, join the associated
+                // threads.
                 let mut remove_keys = vec![];
                 for (key, shark_ent) in shark_hash.iter() {
-                    if shark_list.iter().any(|s| {
-                        &s.manta_storage_id == key
-                    }) {
+                    if shark_list.iter().any(|s| &s.manta_storage_id == key) {
                         continue;
                     }
                     shark_ent.tx.send(AssignmentMsg::Stop);
@@ -1457,7 +1458,7 @@ where
                     }
                 }
 
-                // create and add any shark threads that are in the list but
+                // Create and add any shark threads that are in the list but
                 // not in the hash.
                 for shark in shark_list.iter() {
                     if shark_hash.contains_key(&shark.manta_storage_id) {
@@ -1469,29 +1470,30 @@ where
                     let handle = builder
                         .name(format!(
                             "shark_assignment_generator({})",
-                            shark .manta_storage_id))
-                        .spawn(
-                            shark_assignment_generator(
-                                Arc::clone(&job_action),
-                                shark.clone(),
-                                rx,
-                                full_assignment_tx.clone())
-                    )?;
+                            shark.manta_storage_id
+                        ))
+                        .spawn(shark_assignment_generator(
+                            Arc::clone(&job_action),
+                            shark.clone(),
+                            rx,
+                            full_assignment_tx.clone(),
+                        ))?;
 
-                    shark_hash.insert(shark.manta_storage_id.clone(),
-                                      SharkHashEntry {handle, tx});
+                    shark_hash.insert(
+                        shark.manta_storage_id.clone(),
+                        SharkHashEntry { handle, tx },
+                    );
                 }
 
-
-
-                // for (some max number) get an object from shark spotter
-                // iter over hash,
-                //    find first entry that is not either shark in object
-                //    make sure shark is not busy
-                //    send object to that shark's thread
+                // for some max number of iterations get an object from shark
+                // spotter, then:
+                // - iteration over the hash:
+                //      * Skip busy sharks
+                //      * find first entry that is not either shark in object
+                //      * send object to that shark's thread
                 // end loop
+                // TODO: file ticket, max number of outstanding objects
                 for _ in 0..50 {
-
                     // Get an object
                     let eobj = match obj_rx.recv() {
                         Ok(obj) => {
@@ -1507,9 +1509,8 @@ where
                     };
 
                     // Iterate over the hash of shark_assignment threads
-                    let shark_hash_ent = shark_hash
-                        .iter()
-                        .find(|(shark_id, _shark_hash_ent)| {
+                    let shark_hash_ent = shark_hash.iter().find(
+                        |(shark_id, _shark_hash_ent)| {
                             // skip busy sharks
                             if job_action.shark_busy(shark_id) {
                                 return false;
@@ -1521,19 +1522,24 @@ where
                             // match the shark_hash_ent, then we can't use this
                             // one for this object.
                             // So !any is what we are looking for here.
-                            !eobj.object.sharks.iter().any(|s| {
-                                &s.manta_storage_id == *shark_id
-                            })
-                    });
+                            !eobj
+                                .object
+                                .sharks
+                                .iter()
+                                .any(|s| &s.manta_storage_id == *shark_id)
+                        },
+                    );
 
                     let mut remove_shark: String = String::default();
                     // Send the object to the associated shark thread.
                     match shark_hash_ent {
                         Some((shark_id, she)) => {
-                            if let Err(e) = she.tx.send(AssignmentMsg::Data
-                                (eobj)) {
-                                error!("Error sending object to shark ({}) \
-                                    generator thread: {}",
+                            if let Err(e) =
+                                she.tx.send(AssignmentMsg::Data(eobj))
+                            {
+                                error!(
+                                    "Error sending object to shark ({}) \
+                                     generator thread: {}",
                                     shark_id,
                                     CrossbeamError::from(e)
                                 );
@@ -1544,7 +1550,7 @@ where
                                 remove_shark = shark_id.clone();
                                 break;
                             }
-                        },
+                        }
                         None => {
                             // TODO
                             // insert object into DB as no suitable sharks
@@ -1592,18 +1598,20 @@ fn _channel_send_assignment(
             .insert(assignment.id.clone(), assignment.clone());
 
         let assignment_uuid = assignment.id.clone();
-        full_assignment_tx.send(assignment.to_owned()).map_err(|e| {
-            error!("Error sending assignment to be posted: {}", e);
+        full_assignment_tx
+            .send(assignment.to_owned())
+            .map_err(|e| {
+                error!("Error sending assignment to be posted: {}", e);
 
-            job_action.mark_assignment_error(
-                &assignment_uuid,
-                EvacuateObjectError::InternalError,
-            );
-            InternalError::new(
-                Some(InternalErrorCode::Crossbeam),
-                CrossbeamError::from(e).description(),
-            )
-        })?;
+                job_action.mark_assignment_error(
+                    &assignment_uuid,
+                    EvacuateObjectError::InternalError,
+                );
+                InternalError::new(
+                    Some(InternalErrorCode::Crossbeam),
+                    CrossbeamError::from(e).description(),
+                )
+            })?;
     }
 
     Ok(())
@@ -1613,7 +1621,7 @@ fn shark_assignment_generator(
     job_action: Arc<EvacuateJob>,
     shark: StorageNode, // TODO: reference?
     assign_msg_rx: crossbeam::Receiver<AssignmentMsg>,
-    full_assignment_tx: crossbeam::Sender<Assignment>
+    full_assignment_tx: crossbeam::Sender<Assignment>,
 ) -> impl Fn() {
     move || {
         let max_tasks = job_action.max_tasks_per_assignment;
@@ -1622,11 +1630,10 @@ fn shark_assignment_generator(
         let mut flush = false;
         let mut eobj_vec = vec![];
 
-        loop{
-
-            let mut assign_msg = match assign_msg_rx.recv() {
+        loop {
+            let assign_msg = match assign_msg_rx.recv() {
                 Ok(msg) => msg,
-                Err(_) => break,
+                Err(_) => break, // TODO
             };
 
             match assign_msg {
@@ -1634,17 +1641,20 @@ fn shark_assignment_generator(
                     _channel_send_assignment(
                         Arc::clone(&job_action),
                         &full_assignment_tx,
-                        &assignment
-                    ).expect(""); // TODO: return Result?
+                        &assignment,
+                    )
+                    .expect(""); // TODO: return Result?
 
                     // Insert objects into DB
-                    job_action.insert_many_into_db(&eobj_vec).expect("insert \
-                    many into db expect TODO");
+                    job_action.insert_many_into_db(&eobj_vec).expect(
+                        "insert \
+                         many into db expect TODO",
+                    );
                     break;
-                },
+                }
                 AssignmentMsg::Flush => {
                     flush = true;
-                },
+                }
                 AssignmentMsg::Data(mut eobj) => {
                     let obj = eobj.object.clone();
                     // pick source shark
@@ -1655,10 +1665,12 @@ fn shark_assignment_generator(
                     {
                         Some(src) => src,
                         None => {
-                            job_action.skip_object(
-                                &mut eobj,
-                                ObjectSkippedReason::SourceIsEvacShark,
-                            ).expect("TODO expect, skip_object");
+                            job_action
+                                .skip_object(
+                                    &mut eobj,
+                                    ObjectSkippedReason::SourceIsEvacShark,
+                                )
+                                .expect("TODO expect, skip_object");
                             continue;
                         }
                     };
@@ -1691,25 +1703,26 @@ fn shark_assignment_generator(
                 }
             }
 
-
-            if flush == true ||
-                _continue_adding_tasks(max_tasks, &assignment) == false {
-
+            if flush == true
+                || _continue_adding_tasks(max_tasks, &assignment) == false
+            {
                 flush = false;
                 _channel_send_assignment(
                     Arc::clone(&job_action),
                     &full_assignment_tx,
-                    &assignment
-                ).expect(""); // TODO: return Result?
+                    &assignment,
+                )
+                .expect(""); // TODO: return Result?
                 assignment = Assignment::new(shark.clone());
 
                 // Insert objects into DB
-                job_action.insert_many_into_db(&eobj_vec).expect("insert many\
-                 TODO");
+                job_action.insert_many_into_db(&eobj_vec).expect(
+                    "insert many\
+                     TODO",
+                );
                 eobj_vec = Vec::new();
             }
         }
-
     }
 }
 
@@ -2491,9 +2504,8 @@ mod tests {
 
         impl SharkSource for NoSkipPicker {
             fn choose(&self, _: &PickerAlgorithm) -> Option<Vec<StorageNode>> {
-
                 let mut sharks = vec![];
-                for i in 1..5 {
+                for i in 1..10 {
                     let mut shark: StorageNode = generate_storage_node(true);
 
                     shark.manta_storage_id = format!("{}.stor.domain", i);
@@ -2527,10 +2539,10 @@ mod tests {
 
         let mut g = StdThreadGen::new(10);
 
-
         let mut rng = rand::thread_rng();
 
-        for _ in 0..100 {
+        let num_objects = 10_000;
+        for _ in 0..num_objects {
             let mut mobj = MantaObject::arbitrary(&mut g);
             let mut sharks = vec![];
             let out = String::new();
@@ -2558,8 +2570,8 @@ mod tests {
             obj_rx,
             Arc::clone(&job_action),
             Arc::clone(&picker),
-        ).expect("start assignment manager");
-
+        )
+        .expect("start assignment manager");
 
         let builder = thread::Builder::new();
         let obj_generator_th = builder
@@ -2587,28 +2599,38 @@ mod tests {
             })
             .expect("failed to build object generator thread");
 
-        let verification_objects= test_objects.clone();
+        let verification_objects = test_objects.clone();
         let builder = thread::Builder::new();
         let verification_thread = builder
             .name(String::from("verification thread"))
-            .spawn(move ||{
+            .spawn(move || {
                 let mut assignment_count = 0;
+                let mut task_count = 0;
                 loop {
-
                     match full_assignment_rx.recv() {
                         Ok(assignment) => {
                             assignment_count += 1;
-                            let dest_shark = assignment.dest_shark.manta_storage_id;
+                            task_count += assignment.tasks.len();
+                            let dest_shark =
+                                assignment.dest_shark.manta_storage_id;
                             for (tid, task) in assignment.tasks {
-                                match verification_objects.get(&task.object_id) {
+                                match verification_objects.get(&task.object_id)
+                                {
                                     Some(obj) => {
-                                        println!("Checking that {:#?} is not in \
-                                    {:#?}", dest_shark, obj.sharks);
+                                        println!(
+                                            "Checking that {:#?} is not in \
+                                             {:#?}",
+                                            dest_shark, obj.sharks
+                                        );
 
-                                        assert_eq!(obj.sharks.iter().any(|shark| {
-                                            shark.manta_storage_id == dest_shark
-                                        }), false);
-                                    },
+                                        assert_eq!(
+                                            obj.sharks.iter().any(|shark| {
+                                                shark.manta_storage_id
+                                                    == dest_shark
+                                            }),
+                                            false
+                                        );
+                                    }
                                     None => {
                                         assert!(false, "test error");
                                     }
@@ -2616,19 +2638,23 @@ mod tests {
                             }
                         }
                         Err(_) => {
-                            println!("Error");
-                            info!("Verification Thread: Channel closed, exiting.");
+                            println!("Verification thread closing");
+                            info!(
+                                "Verification Thread: Channel closed, exiting."
+                            );
                             break;
                         }
                     }
                 }
                 println!("Assignment Count: {}", assignment_count);
-        }).expect("TODO thread check");
+                println!("Task Count: {}", task_count);
+                println!("Num Objects: {}", num_objects);
+                assert_eq!(task_count, num_objects);
+            })
+            .expect("TODO thread check");
         verification_thread.join().expect("verification join TODO");
         obj_generator_th.join().expect("obj_gen thr join TODO");
         manager_thread.join().expect("manager thread join TODO");
-
-
     }
 
     #[test]
