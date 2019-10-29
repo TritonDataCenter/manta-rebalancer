@@ -218,14 +218,11 @@ impl Command {
 // EvacuateJob)
 fn job_subcommand_handler(
     matches: &ArgMatches,
-    config: Config
+    config: Config,
 ) -> Result<SubCommand, Error> {
     let shark_id = matches.value_of("from_shark").unwrap_or("").to_string();
     let domain_name = matches.value_of("domain").unwrap_or(&config.domain_name);
-    let max: u32 = matches
-        .value_of("max_objects")
-        .unwrap_or("10")
-        .parse()?;
+    let max: u32 = matches.value_of("max_objects").unwrap_or("10").parse()?;
 
     let max_objects = if max == 0 { None } else { Some(max) };
 
@@ -245,7 +242,6 @@ fn job_subcommand_handler(
         max_objects,
     )));
     let job = Job::new(job_action, config);
-
 
     Ok(SubCommand::DoJob(Box::new(job)))
 }
