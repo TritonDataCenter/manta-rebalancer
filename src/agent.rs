@@ -7,7 +7,7 @@
 /*
  * Copyright 2019, Joyent, Inc.
  */
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::fs;
 use std::fs::File;
@@ -78,18 +78,54 @@ struct PathExtractor {
 #[derive(Clone, Debug)]
 pub struct Agent {
     assignments: Arc<Mutex<Assignments>>,
+    quiescing: Arc<Mutex<HashSet<String>>>,
     tx: Arc<Mutex<mpsc::Sender<String>>>,
 }
 
 impl Agent {
     pub fn new(tx: Arc<Mutex<mpsc::Sender<String>>>) -> Agent {
         let assignments = Arc::new(Mutex::new(Assignments::new()));
-        Agent { assignments, tx }
+        let quiescing = Arc::new(Mutex::new(HashSet::new()));
+        Agent {
+            assignments,
+            quiescing,
+            tx,
+        }
     }
 
     pub fn run(addr: &'static str) {
         info!("Listening for requests at {}", addr);
         gotham::start(addr, router());
+    }
+
+    // Given an assignment uuid, check for its presence in both the "scheduled"
+    // and "completed" directory.  If found in either, or the assignment is in
+    // the process of being saved to disk, return true, otherwise false.
+    fn assignment_exists(&self, uuid: &str) -> bool {
+        let scheduled = format!("{}/{}", REBALANCER_SCHEDULED_DIR, &uuid);
+        let finished = format!("{}/{}", REBALANCER_FINISHED_DIR, &uuid);
+
+        if Path::new(&scheduled).exists() || Path::new(&finished).exists() {
+            info!("Assignment {} has already been received.", uuid);
+            return true;
+        }
+
+        let q = &mut self.quiescing.lock().unwrap();
+        match q.get(uuid) {
+            // An assignment by this uuid is currently in the process of being
+            // saved to disk.  Return.
+            Some(_) => {
+                info!("Assignment {} is already quiescing.", uuid);
+                return true;
+            }
+            _ => {
+                // No known assignment by this uuid exists anywhere.  Add it to
+                // the list of assignments that have been received but have yet
+                // to be written out to disk.
+                q.insert(uuid.to_owned());
+                return false;
+            }
+        }
     }
 }
 
@@ -367,15 +403,6 @@ fn assignment_complete(assignments: Arc<Mutex<Assignments>>, uuid: String) {
     hm.remove(&uuid);
 }
 
-// Given an assignment uuid, check for its presence in both the "scheduled" and
-// "completed" directory.  If found in either, return true, otherwise, false.
-fn assignment_exists(uuid: &str) -> bool {
-    let scheduled = format!("{}/{}", REBALANCER_SCHEDULED_DIR, &uuid);
-    let finished = format!("{}/{}", REBALANCER_FINISHED_DIR, &uuid);
-
-    Path::new(&scheduled).exists() || Path::new(&finished).exists()
-}
-
 fn post(agent: Agent, mut state: State) -> Box<HandlerFuture> {
     let f = Body::take_from(&mut state)
         .concat2()
@@ -397,7 +424,7 @@ fn post(agent: Agent, mut state: State) -> Box<HandlerFuture> {
                 // Ensure that an asignment with this uuid is not already
                 // currently in flight.  If there is one, do not allow this
                 // assignment to proceed.
-                if assignment_exists(&uuid) {
+                if agent.assignment_exists(&uuid) {
                     let res =
                         create_empty_response(&state, StatusCode::CONFLICT);
                     return future::ok((state, res));
@@ -408,6 +435,7 @@ fn post(agent: Agent, mut state: State) -> Box<HandlerFuture> {
 
                 info!("Received assignment {}.", &uuid);
                 debug!("Received assignment: {:#?}", &assignment);
+
                 // Before we even process the assignment, save it to persistent
                 // storage.
                 assignment_save(
@@ -415,6 +443,9 @@ fn post(agent: Agent, mut state: State) -> Box<HandlerFuture> {
                     REBALANCER_SCHEDULED_DIR,
                     assignment.clone(),
                 );
+
+                // Assignment has been saved.  Remove its id from the the table.
+                agent.quiescing.lock().unwrap().remove(&uuid);
 
                 // Create a response containing our newly initialized stats.
                 // This serves as confirmation to the client that we recieved
