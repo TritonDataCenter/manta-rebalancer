@@ -486,6 +486,7 @@ impl EvacuateJob {
         Ok(())
     }
 
+    #[allow(clippy::ptr_arg)]
     fn skip_assignment(
         &self,
         assign_id: &AssignmentId,
@@ -502,6 +503,7 @@ impl EvacuateJob {
     }
 
     /// If a shark is in the Assigned state then it is busy.
+    #[allow(clippy::ptr_arg)]
     fn shark_busy(&self, shark: &StorageId) -> bool {
         self.dest_shark_list
             .read()
@@ -874,6 +876,7 @@ impl EvacuateJob {
             })
     }
 
+    #[allow(clippy::ptr_arg)]
     fn mark_dest_shark(&self, dest_shark: &StorageId, status: DestSharkStatus) {
         if let Some(shark) = self
             .dest_shark_list
@@ -1333,7 +1336,7 @@ fn start_sharkspotter(
 enum AssignmentMsg {
     Flush, // send all assignments to the Post thread, but keep running
     Stop,  // send all assignments to the Post thread, and stop running
-    Data(EvacuateObject), // Add EvacuateObject to active assignment
+    Data(Box<EvacuateObject>), // Add EvacuateObject to active assignment
 }
 
 struct SharkHashEntry {
@@ -1468,8 +1471,8 @@ where
                     .retain(|s| !job_action.shark_busy(&s.manta_storage_id));
 
                 if shark_list.is_empty() {
-                    warn!("All Sharks are busy, sleeping for 5 seconds");
-                    //thread::sleep(std::time::Duration::from_secs(5));
+                    warn!("All Sharks are busy");
+                    // TODO: Possibly sleep here?
                     continue;
                 }
 
@@ -1587,7 +1590,7 @@ where
                     match shark_hash_ent {
                         Some((shark_id, she)) => {
                             if let Err(e) =
-                                she.tx.send(AssignmentMsg::Data(eobj))
+                                she.tx.send(AssignmentMsg::Data(Box::new(eobj)))
                             {
                                 error!(
                                     "Error sending object to shark ({}) \
@@ -1595,10 +1598,8 @@ where
                                     shark_id,
                                     CrossbeamError::from(e)
                                 );
-                                // TODO:
-                                // This is a little funky.  We cant send
-                                // anything to the thread, but we need it to
-                                // shutdown...
+                                // We cant anything to the thread, but we need
+                                // it to join thread.
                                 remove_sharks.push(shark_id.clone());
                                 break;
                             }
@@ -1627,7 +1628,6 @@ where
             // are all flushing.
             _stop_join_drain_assignment_threads(shark_hash);
 
-            // TODO: MANTA-4527
             info!("Manager: Shutting down assignment checker");
             checker_fini_tx.send(FiniMsg).expect("Fini Msg");
             Ok(())
@@ -1700,7 +1700,30 @@ fn shark_assignment_generator(
         while !stop {
             let assign_msg = match assign_msg_rx.recv() {
                 Ok(msg) => msg,
-                Err(_) => break, // TODO
+                Err(_) => {
+                    if assignment.tasks.is_empty() {
+                        break;
+                    }
+
+                    // This shouldn't happen because before the assignment
+                    // manager exits it should send each shark thread the
+                    // Stop message.  But in the event that it does exit
+                    // without doing this and we have an active assignment,
+                    // this will clean that up before exiting.
+                    job_action.mark_dest_shark(
+                        &shark.manta_storage_id,
+                        DestSharkStatus::Assigned,
+                    );
+
+                    _channel_send_assignment(
+                        Arc::clone(&job_action),
+                        &full_assignment_tx,
+                        &assignment,
+                    )?;
+
+                    job_action.insert_many_into_db(&eobj_vec)?;
+                    break;
+                }
             };
 
             match assign_msg {
@@ -1710,7 +1733,8 @@ fn shark_assignment_generator(
                 AssignmentMsg::Flush => {
                     flush = true;
                 }
-                AssignmentMsg::Data(mut eobj) => {
+                AssignmentMsg::Data(data) => {
+                    let mut eobj = *data;
                     eobj.dest_shark = shark.manta_storage_id.clone();
                     // The assignment manager might send us an object even
                     // though our shark is busy.  In that case simply add it
@@ -1736,12 +1760,10 @@ fn shark_assignment_generator(
                         None => {
                             // The only shark we could find was the one that
                             // is being evacuated.
-                            job_action
-                                .skip_object(
-                                    &mut eobj,
-                                    ObjectSkippedReason::SourceIsEvacShark,
-                                )
-                                .expect("TODO expect, skip_object");
+                            job_action.skip_object(
+                                &mut eobj,
+                                ObjectSkippedReason::SourceIsEvacShark,
+                            )?;
                             continue;
                         }
                     };
@@ -1753,7 +1775,7 @@ fn shark_assignment_generator(
                         job_action.skip_object(
                             &mut eobj,
                             ObjectSkippedReason::DestinationInsufficientSpace,
-                        ).expect("skip object TODO expect");
+                        )?;
 
                         break;
                     }
@@ -1802,8 +1824,7 @@ fn shark_assignment_generator(
                     Arc::clone(&job_action),
                     &full_assignment_tx,
                     &assignment,
-                )
-                .expect(""); // TODO: return Result?
+                )?;
 
                 // Re-set the available space to half of what is remaining.
                 // See comment above where we initialize 'available_space'
@@ -1814,10 +1835,7 @@ fn shark_assignment_generator(
                 assignment.max_size = available_space;
 
                 // Insert objects into DB
-                job_action.insert_many_into_db(&eobj_vec).expect(
-                    "insert many\
-                     TODO",
-                );
+                job_action.insert_many_into_db(&eobj_vec)?;
                 eobj_vec = Vec::new();
             }
         }
@@ -2454,8 +2472,12 @@ mod tests {
                     let mut shark: StorageNode = generate_storage_node(true);
 
                     shark.manta_storage_id = format!("{}.stor.domain", i);
-                    shark.datacenter = String::from("foo");
-                    // TODO datacenter
+                    if i % 3 == 0 {
+                        let str_len = rand::thread_rng().gen_range(1, 50);
+                        shark.datacenter = util::random_string(str_len);
+                    } else {
+                        shark.datacenter = String::from("foo");
+                    }
 
                     sharks.push(shark);
                 }
@@ -2482,7 +2504,8 @@ mod tests {
 
         let (full_assignment_tx, full_assignment_rx) = crossbeam::bounded(5);
         let (obj_tx, obj_rx) = crossbeam::bounded(5);
-        let (checker_fini_tx, _) = crossbeam::bounded(1);
+        let (checker_fini_tx, checker_fini_rx) = crossbeam::bounded(1);
+        let (md_update_tx, _) = crossbeam::bounded(1);
 
         let mut test_objects = HashMap::new();
 
@@ -2510,6 +2533,13 @@ mod tests {
 
             test_objects.insert(mobj.object_id.clone(), mobj);
         }
+
+        let assignment_checker_thread = start_assignment_checker(
+            Arc::clone(&job_action),
+            checker_fini_rx,
+            md_update_tx,
+        )
+        .expect("start assignment checker thread");
 
         let test_objects_copy = test_objects.clone();
         let manager_thread = start_assignment_manager(
@@ -2549,6 +2579,7 @@ mod tests {
 
         let verification_objects = test_objects.clone();
         let builder = thread::Builder::new();
+        let verif_job_action = Arc::clone(&job_action);
         let verification_thread = builder
             .name(String::from("verification thread"))
             .spawn(move || {
@@ -2584,7 +2615,7 @@ mod tests {
                                     }
                                 }
                             }
-                            job_action.mark_dest_shark(
+                            verif_job_action.mark_dest_shark(
                                 &dest_shark,
                                 DestSharkStatus::Ready,
                             );
@@ -2600,7 +2631,8 @@ mod tests {
                 }
 
                 use self::evacuateobjects::dsl::{evacuateobjects, status};
-                let locked_conn = job_action.conn.lock().expect("DB conn");
+                let locked_conn =
+                    verif_job_action.conn.lock().expect("DB conn");
                 let records: Vec<EvacuateObject> = evacuateobjects
                     .filter(status.eq(EvacuateObjectStatus::Skipped))
                     .load::<EvacuateObject>(&*locked_conn)
@@ -2617,9 +2649,24 @@ mod tests {
                 println!("Num Objects: {}", num_objects);
                 assert_eq!(task_count + skip_count, num_objects);
             })
-            .expect("TODO thread check");
+            .expect("verification thread");
+
         verification_thread.join().expect("verification join TODO");
         obj_generator_th.join().expect("obj_gen thr join TODO");
+
+        // mark all assignments as post processed so that the checker thread
+        // can exit.
+        let mut locked_assignments =
+            job_action.assignments.write().expect("lock assignments");
+        locked_assignments.iter_mut().for_each(|(_, a)| {
+            a.state = AssignmentState::PostProcessed;
+        });
+        drop(locked_assignments);
+
+        assignment_checker_thread
+            .join()
+            .expect("checker thread join")
+            .expect("checker thread error");
         manager_thread
             .join()
             .expect("manager thread join")
@@ -2750,7 +2797,6 @@ mod tests {
     fn empty_picker_test() {
         let _guard = util::init_global_logger();
         let picker = Arc::new(EmptyPicker {});
-        //let (empty_assignment_tx, _) = crossbeam::bounded(5);
         let (full_assignment_tx, _) = crossbeam::bounded(5);
         let (checker_fini_tx, _) = crossbeam::bounded(1);
         let (_, obj_rx) = crossbeam::bounded(5);
