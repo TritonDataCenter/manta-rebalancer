@@ -371,8 +371,6 @@ impl EvacuateJob {
         // TODO: How big should each channel be?
         // Set up channels for thread to communicate.
         let (obj_tx, obj_rx) = crossbeam::bounded(5);
-        //let (empty_assignment_tx, empty_assignment_rx) = crossbeam::bounded
-        // (5);
         let (full_assignment_tx, full_assignment_rx) = crossbeam::bounded(5);
         let (md_update_tx, md_update_rx) = crossbeam::bounded(5);
         let (checker_fini_tx, checker_fini_rx) = crossbeam::bounded(1);
