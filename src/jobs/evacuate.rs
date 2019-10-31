@@ -251,11 +251,9 @@ pub struct EvacuateJob {
     /// Maximum number of tasks to include in a single assignment.
     pub max_tasks_per_assignment: Option<u32>,
 
-    /// Maximum size of objects to include in a single assignment.
-    pub max_size_per_assignment: u32,
+    // TODO: Maximum total size of objects to include in a single assignment.
 
-    // TODO:
-    // max number of shark threads
+    // TODO: max number of shark threads
     /// SqliteConnection to local database.
     pub conn: Mutex<SqliteConnection>,
 
@@ -284,7 +282,6 @@ impl EvacuateJob {
         Self {
             min_avail_mb: Some(1000),             // TODO: config
             max_tasks_per_assignment: Some(1000), // TODO: config
-            max_size_per_assignment: 1000,        // TODO: config
             dest_shark_list: RwLock::new(HashMap::new()),
             assignments: RwLock::new(HashMap::new()),
             from_shark,
