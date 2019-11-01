@@ -497,20 +497,6 @@ impl EvacuateJob {
             });
     }
 
-    /// If a shark is in the Assigned state then it is busy.
-    #[allow(clippy::ptr_arg)]
-    fn shark_busy(&self, shark: &StorageId) -> bool {
-        return false;
-        self.dest_shark_list
-            .read()
-            .expect("dest_shark_list read lock")
-            .get(shark)
-            .map_or(false, |eds| {
-                debug!("shark '{}' status: {:?}", shark, eds.status);
-                eds.status == DestSharkStatus::Assigned
-            })
-    }
-
     fn skip_object(
         &self,
         eobj: &mut EvacuateObject,
@@ -1462,10 +1448,6 @@ where
                 let mut shark_list =
                     job_action.get_shark_list(Arc::clone(&picker), &algo)?;
 
-                // If sharks are busy remove them.
-                shark_list
-                    .retain(|s| !job_action.shark_busy(&s.manta_storage_id));
-
                 if shark_list.is_empty() {
                     warn!("All Sharks are busy");
                     // TODO: Possibly sleep here?
@@ -1549,12 +1531,7 @@ where
                     // Iterate over the hash of shark_assignment threads
                     let mut last_reason = ObjectSkippedReason::AgentBusy;
                     let shark_hash_ent =
-                        shark_hash.iter().find(|(shark_id, shark_hash_ent)| {
-                            // skip busy sharks
-                            if job_action.shark_busy(shark_id) {
-                                return false;
-                            }
-
+                        shark_hash.iter().find(|(_, shark_hash_ent)| {
                             if let Some(reason) = validate_destination(
                                 &eobj.object,
                                 &job_action.from_shark,
@@ -1563,22 +1540,7 @@ where
                                 last_reason = reason;
                                 return false;
                             }
-
                             true
-
-                            /*
-                            // If the object is currently on this shark then
-                            // we try the next one.
-                            // That is to say, if any of the object's sharks
-                            // match the shark_hash_ent, then we can't use this
-                            // one for this object.
-                            // So !any is what we are looking for here.
-                            !eobj
-                                .object
-                                .sharks
-                                .iter()
-                                .any(|s| &s.manta_storage_id == *shark_id)
-                                */
                         });
 
                     let mut remove_sharks: Vec<StorageId> = vec![];
@@ -1732,18 +1694,6 @@ fn shark_assignment_generator(
                 AssignmentMsg::Data(data) => {
                     let mut eobj = *data;
                     eobj.dest_shark = shark.manta_storage_id.clone();
-                    // The assignment manager might send us an object even
-                    // though our shark is busy.  In that case simply add it
-                    // to the DB as skipped and move on.  See comment above
-                    // for where we attempt a retry.  We could remove this
-                    // once the Agent allows for multiple assignments at once.
-                    if job_action.shark_busy(&shark.manta_storage_id) {
-                        job_action.skip_object(
-                            &mut eobj,
-                            ObjectSkippedReason::AgentBusy,
-                        )?;
-                        continue;
-                    }
 
                     // pick source shark
                     let obj = eobj.object.clone();
