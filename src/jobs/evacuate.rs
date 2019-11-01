@@ -415,12 +415,24 @@ impl EvacuateJob {
         // At this point the rebalance job is running and we are blocked at
         // the assignment_manager thread join.
 
-        // TODO: should we "expect()" all these joins?  If we expect and
-        // return Err() what does that mean for the other threads?
-        assignment_manager
-            .join()
-            .expect("Assignment Manager")
-            .expect("Error joining assignment manager thread");
+        // TODO: should we "expect()" all these joins?
+        match assignment_manager.join().expect("Assignment Manager") {
+            Ok(()) => (),
+            Err(e) => {
+                if let Error::Internal(err) = e {
+                    if err.code == InternalErrorCode::PickerError {
+                        error!(
+                            "Encountered empty picker on startup, exiting \
+                             safely"
+                        );
+                    } else {
+                        panic!("Error {}", err);
+                    }
+                } else {
+                    panic!("Error {}", e);
+                }
+            }
+        }
 
         picker.fini();
 
@@ -555,26 +567,20 @@ impl EvacuateJob {
         &self,
         picker: Arc<S>,
         algo: &mod_picker::DefaultPickerAlgorithm,
-    ) -> Result<Vec<StorageNode>, Error>
+    ) -> Vec<StorageNode>
     where
         S: SharkSource + 'static,
     {
         trace!("Getting new shark list");
-        let valid_sharks =
-            match picker.choose(&mod_picker::PickerAlgorithm::Default(algo)) {
-                Some(sharks) => sharks,
-                None => {
-                    return Err(InternalError::new(
-                        Some(InternalErrorCode::PickerError),
-                        "No valid sharks available.",
-                    )
-                    .into())
-                }
-            };
 
-        // update destination shark list
-        // TODO: perhaps this should be a BTreeMap or just a vec.
-        self.update_dest_sharks(&valid_sharks);
+        // If the picker finds some sharks then update our hash.  If the
+        // picker doesn't have any new sharks for us, then we will use
+        // whatever is in the hash already, which might be [].
+        if let Some(valid_sharks) =
+            picker.choose(&mod_picker::PickerAlgorithm::Default(algo))
+        {
+            self.update_dest_sharks(&valid_sharks);
+        }
 
         // TODO: Think about this a bit more.  On one hand making
         // a 1 time copy and cycling through the whole list makes
@@ -595,7 +601,7 @@ impl EvacuateJob {
 
         shark_list.sort_by_key(|s| s.available_mb);
 
-        Ok(shark_list)
+        shark_list
     }
 
     // TODO: Consider doing batched inserts: MANTA-4464.
@@ -1436,21 +1442,38 @@ where
                 min_avail_mb: job_action.min_avail_mb,
                 blacklist: vec![],
             };
+            let shark_list_retry_delay = std::time::Duration::from_millis(500);
 
             // create shark hash
             let mut shark_hash: HashMap<StorageId, SharkHashEntry> =
                 HashMap::new();
             let mut done = false;
 
+            // Before we start, check to see if we have ANY valid sharks.  If
+            // not, exit now.
+            if job_action
+                .get_shark_list(Arc::clone(&picker), &algo)
+                .is_empty()
+            {
+                return Err(InternalError::new(
+                    Some(InternalErrorCode::PickerError),
+                    "No valid sharks available.",
+                )
+                .into());
+            }
+
             while !done {
                 // TODO: MANTA-4519
                 // get a fresh shark list
                 let mut shark_list =
-                    job_action.get_shark_list(Arc::clone(&picker), &algo)?;
+                    job_action.get_shark_list(Arc::clone(&picker), &algo);
 
                 if shark_list.is_empty() {
-                    warn!("All Sharks are busy");
-                    // TODO: Possibly sleep here?
+                    warn!(
+                        "Received empty list of sharks, will retry in {}ms",
+                        shark_list_retry_delay.as_millis()
+                    );
+                    thread::sleep(shark_list_retry_delay);
                     continue;
                 }
 
@@ -2766,11 +2789,7 @@ mod tests {
         ) {
             Ok(h) => h,
             Err(e) => {
-                assert_eq!(
-                    true, false,
-                    "Could not start assignment manager {}",
-                    e
-                );
+                assert!(false, "Could not start assignment manager {}", e);
                 return;
             }
         };
@@ -2961,7 +2980,7 @@ mod tests {
                 if let Error::Internal(err) = e {
                     if err.code == InternalErrorCode::PickerError {
                         error!(
-                            "Enountered empty picker on startup, exiting \
+                            "Encountered empty picker on startup, exiting \
                              safely"
                         );
                     } else {
