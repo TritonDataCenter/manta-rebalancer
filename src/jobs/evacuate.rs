@@ -500,6 +500,7 @@ impl EvacuateJob {
     /// If a shark is in the Assigned state then it is busy.
     #[allow(clippy::ptr_arg)]
     fn shark_busy(&self, shark: &StorageId) -> bool {
+        return false;
         self.dest_shark_list
             .read()
             .expect("dest_shark_list read lock")
