@@ -14,7 +14,6 @@ use clap::{App, AppSettings, Arg, ArgMatches, SubCommand as ClapSubCommand};
 use serde::Deserialize;
 use std::fs::File;
 use std::io::BufReader;
-use std::process;
 
 use crate::error::Error;
 use crate::jobs::{evacuate::EvacuateJob, Job, JobAction};
@@ -221,27 +220,26 @@ fn job_subcommand_handler(
     config: Config,
 ) -> Result<SubCommand, Error> {
     let shark_id = matches.value_of("from_shark").unwrap_or("").to_string();
-    let domain_name = matches.value_of("domain").unwrap_or(&config.domain_name);
+    let domain_name = matches
+        .value_of("domain")
+        .unwrap_or(&config.domain_name)
+        .to_owned();
     let max: u32 = matches.value_of("max_objects").unwrap_or("10").parse()?;
 
     let max_objects = if max == 0 { None } else { Some(max) };
-
     let shark_id = format!("{}.{}", shark_id, domain_name);
-
     let from_shark =
-        moray_client::get_manta_object_shark(&shark_id, domain_name)
+        moray_client::get_manta_object_shark(&shark_id, &domain_name)
             .map_err(Error::from)?;
-    // TODO: This should probably be based on the Job UUID and not the pid as
-    // we plan to have a server mode that will generate multiple jobs in a
-    // single process.
-    let db_url = format!("{}.{}", &config.database_url, process::id());
+
+    let mut job = Job::new(config);
     let job_action = JobAction::Evacuate(Box::new(EvacuateJob::new(
         from_shark,
-        domain_name,
-        &db_url,
+        &domain_name,
+        &job.get_id().to_string(),
         max_objects,
     )));
-    let job = Job::new(job_action, config);
+    job.add_action(job_action);
 
     Ok(SubCommand::DoJob(Box::new(job)))
 }
