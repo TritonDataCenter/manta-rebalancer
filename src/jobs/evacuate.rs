@@ -562,46 +562,66 @@ impl EvacuateJob {
             .collect();
     }
 
-    // Check for a new picker snapshot
+    // Check for a new picker snapshot.
+    // If the picker finds some sharks then update our hash.  If the
+    // picker doesn't have any new sharks for us, then we will use
+    // whatever is in the hash already.  If the list in our hash is also
+    // empty then we sleep and retry.
+    // Note that receiving back `None` from `picker.choose()` simply means
+    // there is no update from the last time we asked so we should use the
+    // existing value.
+    // TODO: make retry delay configurable
     fn get_shark_list<S>(
         &self,
         picker: Arc<S>,
         algo: &mod_picker::DefaultPickerAlgorithm,
-    ) -> Vec<StorageNode>
+        retries: u16,
+    ) -> Result<Vec<StorageNode>, Error>
     where
         S: SharkSource + 'static,
     {
-        trace!("Getting new shark list");
+        let mut shark_list: Vec<StorageNode> = vec![];
+        let mut tries = 0;
+        let shark_list_retry_delay = std::time::Duration::from_millis(500);
 
-        // If the picker finds some sharks then update our hash.  If the
-        // picker doesn't have any new sharks for us, then we will use
-        // whatever is in the hash already, which might be [].
-        if let Some(valid_sharks) =
-            picker.choose(&mod_picker::PickerAlgorithm::Default(algo))
-        {
-            self.update_dest_sharks(&valid_sharks);
+        trace!("Getting new shark list");
+        while tries < retries {
+            if let Some(valid_sharks) =
+                picker.choose(&mod_picker::PickerAlgorithm::Default(algo))
+            {
+                self.update_dest_sharks(&valid_sharks);
+            }
+
+            shark_list = self
+                .dest_shark_list
+                .read()
+                .expect("dest_shark_list read lock")
+                .values()
+                .map(|v| v.shark.to_owned())
+                .collect();
+
+            if shark_list.is_empty() {
+                warn!(
+                    "Received empty list of sharks, will retry in {}ms",
+                    shark_list_retry_delay.as_millis()
+                );
+                thread::sleep(shark_list_retry_delay);
+            } else {
+                break;
+            }
+            tries += 1;
         }
 
-        // TODO: Think about this a bit more.  On one hand making
-        // a 1 time copy and cycling through the whole list makes
-        // sense if we want to update the dest_shark_list while
-        // iterating over existing sharks.  On the other hand it
-        // doesn't seem like we would need to update the list of
-        // sharks except when we enter this block, so we could
-        // take the reader lock for each iteration and only take
-        // the writer lock inside the job_action methods called
-        // above.
-        let mut shark_list: Vec<StorageNode> = self
-            .dest_shark_list
-            .read()
-            .expect("dest_shark_list read lock")
-            .values()
-            .map(|v| v.shark.to_owned())
-            .collect();
-
-        shark_list.sort_by_key(|s| s.available_mb);
-
-        shark_list
+        if shark_list.is_empty() {
+            Err(InternalError::new(
+                Some(InternalErrorCode::PickerError),
+                "No valid sharks available.",
+            )
+            .into())
+        } else {
+            shark_list.sort_by_key(|s| s.available_mb);
+            Ok(shark_list)
+        }
     }
 
     // TODO: Consider doing batched inserts: MANTA-4464.
@@ -1404,6 +1424,7 @@ fn _stop_join_some_assignment_threads(
 ) {
     for key in shark_id_list.iter() {
         if let Some(ent) = shark_hash.remove(key) {
+            trace!("Stopping {:?} thread", ent.handle.thread().name());
             if let Err(e) = ent.tx.send(AssignmentMsg::Stop) {
                 error!("Error sending Stop command to {}: {}", key, e);
             }
@@ -1442,41 +1463,15 @@ where
                 min_avail_mb: job_action.min_avail_mb,
                 blacklist: vec![],
             };
-            let shark_list_retry_delay = std::time::Duration::from_millis(500);
 
-            // create shark hash
             let mut shark_hash: HashMap<StorageId, SharkHashEntry> =
                 HashMap::new();
             let mut done = false;
-
-            // Before we start, check to see if we have ANY valid sharks.  If
-            // not, exit now.
-            if job_action
-                .get_shark_list(Arc::clone(&picker), &algo)
-                .is_empty()
-            {
-                return Err(InternalError::new(
-                    Some(InternalErrorCode::PickerError),
-                    "No valid sharks available.",
-                )
-                .into());
-            }
-
             while !done {
                 // TODO: MANTA-4519
                 // get a fresh shark list
                 let mut shark_list =
-                    job_action.get_shark_list(Arc::clone(&picker), &algo);
-
-                if shark_list.is_empty() {
-                    warn!(
-                        "Received empty list of sharks, will retry in {}ms",
-                        shark_list_retry_delay.as_millis()
-                    );
-                    thread::sleep(shark_list_retry_delay);
-                    // TODO: threshold number of retries?
-                    continue;
-                }
+                    job_action.get_shark_list(Arc::clone(&picker), &algo, 3)?;
 
                 // TODO: file ticket, tunable number of sharks which implies
                 // number of threads.
@@ -1490,7 +1485,6 @@ where
                     if shark_list.iter().any(|s| &s.manta_storage_id == key) {
                         continue;
                     }
-                    trace!("Telling thread to stop");
                     remove_keys.push(key.clone());
                 }
                 _stop_join_some_assignment_threads(
