@@ -670,6 +670,7 @@ fn download(
     if verify_file_md5(&file_path, csum) {
         Ok(())
     } else {
+        error!("Checksum failed for {}/{}.", owner, object);
         Err(ObjectSkippedReason::MD5Mismatch)
     }
 }
@@ -837,7 +838,7 @@ fn router() -> Router {
                 let uuid = match rx.lock().unwrap().recv() {
                     Ok(r) => r,
                     Err(e) => {
-                        error!("Channel read error: {}", e);
+                        debug!("Channel read error: {}", e);
                         return;
                     }
                 };
@@ -871,9 +872,14 @@ mod tests {
         build_simple_router, DefineSingleRoute, DrawRoutes,
     };
     use gotham::test::TestServer;
+    use lazy_static::lazy_static;
     use std::{mem, thread, time};
 
     static MANTA_SRC_DIR: &str = "/var/tmp/rebalancer/src";
+
+    lazy_static! {
+        static ref INITIALIZED: Mutex<bool> = Mutex::new(false);
+    }
 
     // Very basic web server used to serve out files upon request.  This is
     // intended to be a replacement for a normal storage node in Manta (for
@@ -886,6 +892,11 @@ mod tests {
     // GET /rebalancer/<object>.  To test with a wide variety of accounts, use
     // a real storage node.
     fn simple_server() {
+        let mut init = INITIALIZED.lock().unwrap();
+        if *init {
+            return;
+        }
+
         let addr = "127.0.0.1:80";
         let router = build_simple_router(|route| {
             // You can add a `to_dir` or `to_file` route simply using a
@@ -902,7 +913,11 @@ mod tests {
             );
         });
 
-        thread::spawn(move || gotham::start(addr, router));
+        thread::spawn(move || {
+            let _guard = util::init_global_logger();
+            gotham::start(addr, router);
+        });
+        *init = true;
     }
 
     // This is a wrapper for `send_assignment_impl()'.  Under most circumstances
@@ -1087,7 +1102,6 @@ mod tests {
     //               should appear as "Complete".
     #[test]
     fn download() {
-        let _guard = util::init_global_logger();
         let (test_server, assignment) = unit_test_init("test/agent/areacodes");
         let uuid = send_assignment(&test_server, assignment);
         monitor_assignment(&test_server, &uuid, TaskStatus::Complete);
@@ -1102,7 +1116,6 @@ mod tests {
     //               as "Complete".
     #[test]
     fn replace_healthy() {
-        let _guard = util::init_global_logger();
         // Download a file once.
         let (test_server, assignment) = unit_test_init("test/agent/areacodes");
         let uuid = send_assignment(&test_server, Arc::clone(&assignment));
@@ -1126,7 +1139,6 @@ mod tests {
     //              as "Failed(HTTPStatusCode(NotFound))".
     #[test]
     fn object_not_found() {
-        let _guard = util::init_global_logger();
         let (test_server, assignment) = unit_test_init("test/agent/areacodes");
 
         // Rename the object id to something that we know is not on the storage
@@ -1156,7 +1168,6 @@ mod tests {
     //              as Failed("MD5Mismatch").
     #[test]
     fn failed_checksum() {
-        let _guard = util::init_global_logger();
         let (test_server, assignment) = unit_test_init("test/agent/areacodes");
 
         // Scribble on the checksum information for the object.  This ensures
@@ -1182,7 +1193,6 @@ mod tests {
     //              should return a response of 409 (CONFLICT).
     #[test]
     fn duplicate_assignment() {
-        let _guard = util::init_global_logger();
         // Download a file once.
         let (test_server, assignment) = unit_test_init("test/agent/areacodes");
         let uuid = send_assignment(&test_server, Arc::clone(&assignment));
