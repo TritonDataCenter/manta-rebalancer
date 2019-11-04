@@ -200,17 +200,6 @@ impl Arbitrary for TaskStatus {
     }
 }
 
-impl Default for Job {
-    fn default() -> Self {
-        Self {
-            action: JobAction::default(),
-            state: JobState::default(),
-            id: Uuid::new_v4(),
-            config: Config::default(),
-        }
-    }
-}
-
 //
 // There are many reasons why an object may fail on a rebalance job.  This
 // enum of reasons is meant to be shared between both the agent and the
@@ -365,12 +354,23 @@ impl FromSql<sql_types::Text, Sqlite> for ObjectSkippedReason {
 }
 
 impl Job {
-    pub fn new(action: JobAction, config: Config) -> Self {
+    pub fn new(config: Config) -> Self {
         Job {
-            action,
             config,
             ..Default::default()
         }
+    }
+
+    pub fn set_id(&mut self, id: Uuid) {
+        self.id = id;
+    }
+
+    pub fn get_id(&self) -> Uuid {
+        self.id
+    }
+
+    pub fn add_action(&mut self, action: JobAction) {
+        self.action = action;
     }
 
     // The goal here is to eventually have a run method for all JobActions.
@@ -393,5 +393,16 @@ impl Default for JobAction {
 impl Default for JobState {
     fn default() -> Self {
         JobState::Init
+    }
+}
+
+impl Default for Job {
+    fn default() -> Self {
+        Self {
+            action: JobAction::default(),
+            state: JobState::default(),
+            id: Uuid::new_v4(),
+            config: Config::default(),
+        }
     }
 }
