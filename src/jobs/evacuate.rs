@@ -1474,6 +1474,7 @@ where
                         shark_list_retry_delay.as_millis()
                     );
                     thread::sleep(shark_list_retry_delay);
+                    // TODO: threshold number of retries?
                     continue;
                 }
 

@@ -116,14 +116,14 @@ impl Agent {
             // saved to disk.  Return.
             Some(_) => {
                 info!("Assignment {} is already quiescing.", uuid);
-                true
+                return true;
             }
             _ => {
                 // No known assignment by this uuid exists anywhere.  Add it to
                 // the list of assignments that have been received but have yet
                 // to be written out to disk.
                 q.insert(uuid.to_owned());
-                false
+                return false;
             }
         }
     }
