@@ -211,27 +211,27 @@ impl Command {
         if let Some(sub_matches) = matches.subcommand_matches("job") {
             // Job
 
-            if let Some(create_matches) = sub_matches
-                .subcommand_matches("create")
+            if let Some(create_matches) =
+                sub_matches.subcommand_matches("create")
             {
                 // Job Create
                 if let Some(evacuate_matches) =
                     create_matches.subcommand_matches("evacuate")
                 {
-                    subcommand =
-                        job_create_subcommand_handler(evacuate_matches, config
-                            .clone())?;
+                    subcommand = job_create_subcommand_handler(
+                        evacuate_matches,
+                        config.clone(),
+                    )?;
                 }
-            } else if let Some(status_matches) = sub_matches
-                .subcommand_matches("status")
+            } else if let Some(status_matches) =
+                sub_matches.subcommand_matches("status")
             {
-                let uuid: Uuid = Uuid::parse_str(
-                    status_matches.value_of("JOB_ID")
-                    .unwrap()
-                ).unwrap_or_else(|e| {
-                    println!("Error parsing Job ID: {}", e);
-                    std::process::exit(1);
-                });
+                let uuid: Uuid =
+                    Uuid::parse_str(status_matches.value_of("JOB_ID").unwrap())
+                        .unwrap_or_else(|e| {
+                            println!("Error parsing Job ID: {}", e);
+                            std::process::exit(1);
+                        });
                 subcommand = SubCommand::Status(uuid);
             }
         }

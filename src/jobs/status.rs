@@ -12,57 +12,54 @@
 use super::evacuate::EvacuateObjectStatus;
 use crate::error::Error;
 
-use uuid::Uuid;
-use diesel::SqliteConnection;
 use diesel::prelude::*;
-
-use diesel::dsl::count;
-
+use diesel::SqliteConnection;
+use uuid::Uuid;
 
 // TODO: consider doing a single query to get all objects hold them in memory
 // and do the counts in rust code.
-pub fn get_status(uuid: Uuid) -> Result<(), Error>{
+pub fn get_status(uuid: Uuid) -> Result<(), Error> {
     use super::evacuate::evacuateobjects::dsl::*;
-
+    let mut status_vec: Vec<EvacuateObjectStatus> = vec![];
     let conn = SqliteConnection::establish(&uuid.to_string())
         .unwrap_or_else(|_| panic!("Error connecting to {}", uuid));
 
-    let skip_count = evacuateobjects
-        .filter(status.eq(EvacuateObjectStatus::Skipped))
-        .select(
-            count(id)
-        )
-        .first::<i64>(&conn).unwrap();
+    for _ in 0..100 {
+        match evacuateobjects.select(status).get_results(&conn) {
+            Ok(ret) => {
+                status_vec = ret;
+                break;
+            }
+            Err(_) => {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                continue;
+            }
+        }
+    }
 
-    let error_count = evacuateobjects
-        .filter(status.eq(EvacuateObjectStatus::Error))
-        .select(
-            count(id)
-        )
-        .first::<i64>(&conn).unwrap();
+    let skip_count = status_vec
+        .iter()
+        .filter(|s| *s == &EvacuateObjectStatus::Skipped)
+        .count();
 
-    let successful_count = evacuateobjects
-        .filter(status.eq(EvacuateObjectStatus::Complete))
-        .select(
-            count(id)
-        )
-        .first::<i64>(&conn).unwrap();
+    let error_count = status_vec
+        .iter()
+        .filter(|s| *s == &EvacuateObjectStatus::Error)
+        .count();
 
-    let total_count = evacuateobjects
-        .select(
-            count(id)
-        )
-        .first::<i64>(&conn).unwrap();
+    let successful_count = status_vec
+        .iter()
+        .filter(|s| *s == &EvacuateObjectStatus::Complete)
+        .count();
+
+    let total_count = status_vec.len();
 
     println!(
         "Skipped Objects: {}\n\
-        Error Objects: {}\n\
-        Successful Objects: {}\n\
-        Total Objects: {}\n",
-        skip_count,
-        error_count,
-        successful_count,
-        total_count,
+         Error Objects: {}\n\
+         Successful Objects: {}\n\
+         Total Objects: {}\n",
+        skip_count, error_count, successful_count, total_count,
     );
 
     Ok(())
@@ -74,7 +71,7 @@ mod tests {
     use crate::jobs::evacuate::{self, EvacuateObject};
     use quickcheck::{Arbitrary, StdThreadGen};
 
-    static NUM_OBJS: u32 = 1000;
+    static NUM_OBJS: u32 = 200000;
 
     #[test]
     fn get_status_test() {
@@ -93,11 +90,10 @@ mod tests {
         }
 
         diesel::insert_into(evacuateobjects)
-            .values(obj_vec)
+            .values(obj_vec.clone())
             .execute(&conn)
             .unwrap();
 
         get_status(uuid).unwrap();
-
     }
 }
