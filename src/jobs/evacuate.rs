@@ -35,8 +35,10 @@ use crossbeam_channel::TryRecvError;
 use crossbeam_deque::{Injector, Steal};
 use libmanta::moray::{MantaObject, MantaObjectShark};
 use moray::client::MorayClient;
+use quickcheck::{Arbitrary, Gen};
 use reqwest;
 use threadpool::ThreadPool;
+use uuid::Uuid;
 
 // --- Diesel Stuff, TODO This should be refactored --- //
 
@@ -74,6 +76,7 @@ struct UpdateEvacuateObject<'a> {
     Display,
     EnumString,
     EnumVariantNames,
+    EnumIter,
     Debug,
     Clone,
     Copy,
@@ -90,6 +93,13 @@ pub enum EvacuateObjectStatus {
     Error,          // A persistent error has occurred.
     PostProcessing, // Updating metadata and any other postprocessing steps.
     Complete,       // Object has been fully rebalanced.
+}
+
+impl Arbitrary for EvacuateObjectStatus {
+    fn arbitrary<G: Gen>(g: &mut G) -> EvacuateObjectStatus {
+        let i: usize = g.next_u32() as usize % Self::iter().count();
+        Self::iter().nth(i).unwrap()
+    }
 }
 
 impl ToSql<sql_types::Text, Sqlite> for EvacuateObjectStatus {
@@ -116,6 +126,7 @@ impl FromSql<sql_types::Text, Sqlite> for EvacuateObjectStatus {
     Display,
     EnumString,
     EnumVariantNames,
+    EnumIter,
     Debug,
     Clone,
     Copy,
@@ -131,6 +142,13 @@ pub enum EvacuateObjectError {
     DuplicateShark,
     InternalError,
     MetadataUpdateFailed,
+}
+
+impl Arbitrary for EvacuateObjectError {
+    fn arbitrary<G: Gen>(g: &mut G) -> EvacuateObjectError {
+        let i: usize = g.next_u32() as usize % Self::iter().count();
+        Self::iter().nth(i).unwrap()
+    }
 }
 
 // Evacuate Object Error
@@ -154,6 +172,63 @@ impl FromSql<sql_types::Text, Sqlite> for EvacuateObjectError {
     }
 }
 
+pub fn create_evacuateobjects_table(conn: &SqliteConnection)
+    -> Result<usize, Error>
+{
+    let status_strings = EvacuateObjectStatus::variants();
+    let error_strings = EvacuateObjectError::variants();
+    let mut skipped_strings: Vec<String> = vec![];
+
+    for reason in ObjectSkippedReason::iter() {
+        match reason {
+            ObjectSkippedReason::HTTPStatusCode(_) => continue,
+            _ => {
+                skipped_strings.push(reason.to_string());
+            }
+        }
+    }
+
+    for code in 100..600 {
+        let reason = format!(
+            "{{{}:{}}}",
+            // This value doesn't matter.  The to_string() method only
+            // returns the variant name.
+            ObjectSkippedReason::HTTPStatusCode(0).to_string(),
+            code
+        );
+
+        skipped_strings.push(reason);
+    }
+
+    let status_check = format!("'{}'", status_strings.join("', '"));
+    let error_check = format!("'{}'", error_strings.join("', '"));
+    let skipped_check = format!("'{}'", skipped_strings.join("', '"));
+
+    // TODO: check if table exists first and if so issue warning.  We may
+    // need to handle this a bit more gracefully in the future for
+    // restarting jobs...
+    conn.execute(r#"DROP TABLE evacuateobjects"#)
+        .unwrap_or_else(|e| {
+            debug!("Table doesn't exist: {}", e);
+            0
+        });
+
+    let create_query = format!(
+        "
+            CREATE TABLE evacuateobjects(
+                id TEXT PRIMARY KEY,
+                assignment_id TEXT,
+                object TEXT,
+                shard Integer,
+                etag TEXT,
+                status TEXT CHECK(status IN ({})) NOT NULL,
+                skipped_reason TEXT CHECK(skipped_reason IN ({})),
+                error TEXT CHECK(error IN ({}))
+            );",
+        status_check, skipped_check, error_check
+    );
+    conn.execute(&create_query).map_err(Error::from)
+}
 // --- END Diesel Stuff --- //
 
 struct FiniMsg;
@@ -178,6 +253,7 @@ impl Default for EvacuateObjectStatus {
     Queryable,
     Identifiable,
     AsChangeset,
+    AsExpression,
     Debug,
     Default,
     Clone,
@@ -206,6 +282,39 @@ pub struct EvacuateObject {
     // None).
     // Alternatively we could simply expand the skipped_reasons or errors to
     // be more specific.
+}
+
+impl Arbitrary for EvacuateObject {
+    fn arbitrary<G: Gen>(g: &mut G) -> EvacuateObject {
+        let manta_object = MantaObject::arbitrary(g);
+        let status = EvacuateObjectStatus::arbitrary(g);
+        let mut skipped_reason = None;
+        let mut error = None;
+        let shard = g.next_u32() as i32 % 100;
+
+
+        match status {
+            EvacuateObjectStatus::Skipped => {
+                skipped_reason = Some(ObjectSkippedReason::arbitrary(g));
+            },
+            EvacuateObjectStatus::Error => {
+                error = Some(EvacuateObjectError::arbitrary(g));
+            },
+            _ => ()
+        }
+
+        EvacuateObject {
+            id: Uuid::new_v4().to_string(),
+            assignment_id: Uuid::new_v4().to_string(),
+            object: manta_object.clone(),
+            shard,
+            etag: manta_object.etag.clone(),
+            status,
+            skipped_reason,
+            error,
+
+        }
+    }
 }
 
 impl EvacuateObject {
@@ -293,62 +402,8 @@ impl EvacuateJob {
     }
 
     fn create_table(&self) -> Result<usize, Error> {
-        let status_strings = EvacuateObjectStatus::variants();
-        let error_strings = EvacuateObjectError::variants();
-        let mut skipped_strings: Vec<String> = vec![];
-
-        for reason in ObjectSkippedReason::iter() {
-            match reason {
-                ObjectSkippedReason::HTTPStatusCode(_) => continue,
-                _ => {
-                    skipped_strings.push(reason.to_string());
-                }
-            }
-        }
-
-        for code in 100..600 {
-            let reason = format!(
-                "{{{}:{}}}",
-                // This value doesn't matter.  The to_string() method only
-                // returns the variant name.
-                ObjectSkippedReason::HTTPStatusCode(0).to_string(),
-                code
-            );
-
-            skipped_strings.push(reason);
-        }
-
-        let status_check = format!("'{}'", status_strings.join("', '"));
-        let error_check = format!("'{}'", error_strings.join("', '"));
-        let skipped_check = format!("'{}'", skipped_strings.join("', '"));
-
-        // TODO: check if table exists first and if so issue warning.  We may
-        // need to handle this a bit more gracefully in the future for
-        // restarting jobs...
-
         let conn = self.conn.lock().expect("DB conn lock");
-        conn.execute(r#"DROP TABLE evacuateobjects"#)
-            .unwrap_or_else(|e| {
-                debug!("Table doesn't exist: {}", e);
-                0
-            });
-
-        let create_query = format!(
-            "
-            CREATE TABLE evacuateobjects(
-                id TEXT PRIMARY KEY,
-                assignment_id TEXT,
-                object TEXT,
-                shard Integer,
-                dest_shark TEXT,
-                etag TEXT,
-                status TEXT CHECK(status IN ({})) NOT NULL,
-                skipped_reason TEXT CHECK(skipped_reason IN ({})),
-                error TEXT CHECK(error IN ({}))
-            );",
-            status_check, skipped_check, error_check
-        );
-        conn.execute(&create_query).map_err(Error::from)
+        create_evacuateobjects_table(&*conn)
     }
 
     pub fn run(self, config: &Config) -> Result<(), Error> {
@@ -917,6 +972,7 @@ impl EvacuateJob {
             .expect("getting filtered objects")
     }
 }
+
 
 /// 1. Set AssignmentState to Assigned.
 /// 2. Update assignment that has been successfully posted to the Agent into the
