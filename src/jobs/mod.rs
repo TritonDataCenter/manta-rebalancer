@@ -9,6 +9,7 @@
  */
 
 pub mod evacuate;
+pub mod status;
 
 use crate::config::Config;
 use crate::error::Error;
