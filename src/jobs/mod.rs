@@ -247,6 +247,9 @@ pub enum ObjectSkippedReason {
     // The specified agent does not have that assignment
     AgentAssignmentNoEnt,
 
+    // The agent is busy and cant accept assignments at this time.
+    AgentBusy,
+
     // Internal Assignment Error
     AssignmentError,
 
