@@ -172,9 +172,9 @@ impl FromSql<sql_types::Text, Sqlite> for EvacuateObjectError {
     }
 }
 
-pub fn create_evacuateobjects_table(conn: &SqliteConnection)
-    -> Result<usize, Error>
-{
+pub fn create_evacuateobjects_table(
+    conn: &SqliteConnection,
+) -> Result<usize, Error> {
     let status_strings = EvacuateObjectStatus::variants();
     let error_strings = EvacuateObjectError::variants();
     let mut skipped_strings: Vec<String> = vec![];
@@ -292,15 +292,14 @@ impl Arbitrary for EvacuateObject {
         let mut error = None;
         let shard = g.next_u32() as i32 % 100;
 
-
         match status {
             EvacuateObjectStatus::Skipped => {
                 skipped_reason = Some(ObjectSkippedReason::arbitrary(g));
-            },
+            }
             EvacuateObjectStatus::Error => {
                 error = Some(EvacuateObjectError::arbitrary(g));
-            },
-            _ => ()
+            }
+            _ => (),
         }
 
         EvacuateObject {
@@ -312,7 +311,6 @@ impl Arbitrary for EvacuateObject {
             status,
             skipped_reason,
             error,
-
         }
     }
 }
@@ -710,12 +708,23 @@ impl EvacuateJob {
     ) -> Result<usize, Error> {
         use self::evacuateobjects::dsl::*;
 
-        let locked_conn = self.conn.lock().expect("db conn lock");
+        use std::sync::MutexGuard;
+        let mut conn: Option<MutexGuard<SqliteConnection>> = None;
+        for _ in 0..100 {
+            if let Ok(locked_conn) = self.conn.lock() {
+                conn = Some(locked_conn);
+                break;
+            } else {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+                continue;
+            }
+        }
+
         let now = std::time::Instant::now();
         // TODO: consider checking record count to ensure update success
         let ret = diesel::insert_into(evacuateobjects)
             .values(vec_objs)
-            .execute(&*locked_conn)
+            .execute(&*conn.unwrap())
             .unwrap_or_else(|e| {
                 let msg = format!("Error inserting object into DB: {}", e);
                 error!("{}", msg);
@@ -972,7 +981,6 @@ impl EvacuateJob {
             .expect("getting filtered objects")
     }
 }
-
 
 /// 1. Set AssignmentState to Assigned.
 /// 2. Update assignment that has been successfully posted to the Agent into the
@@ -2951,7 +2959,7 @@ mod tests {
         let job_action = EvacuateJob::new(
             MantaObjectShark::default(),
             "region.fakedomain.us",
-            "full_test.db",
+            &Uuid::new_v4().to_string(),
             None,
         );
 
@@ -2963,7 +2971,7 @@ mod tests {
         let mut test_objects = vec![];
 
         let mut g = StdThreadGen::new(10);
-        for _ in 0..50 {
+        for _ in 0..20000 {
             let mobj = MantaObject::arbitrary(&mut g);
             test_objects.push(mobj);
         }
