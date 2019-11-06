@@ -8,7 +8,6 @@
  * Copyright 2019, Joyent, Inc.
  */
 
-//use super::evacuate::EvacuateObject;
 use super::evacuate::EvacuateObjectStatus;
 use crate::error::Error;
 use crate::util;
@@ -16,8 +15,6 @@ use crate::util;
 use diesel::prelude::*;
 use uuid::Uuid;
 
-// TODO: consider doing a single query to get all objects hold them in memory
-// and do the counts in rust code.
 pub fn get_status(uuid: Uuid) -> Result<(), Error> {
     use super::evacuate::evacuateobjects::dsl::*;
     let db_name = uuid.to_string();

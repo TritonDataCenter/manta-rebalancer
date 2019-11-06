@@ -413,18 +413,6 @@ pub struct EvacuateJob {
     pub max_objects: Option<u32>,
 }
 
-/*
-// TODO: move me somewhere a bit more sane.
-fn _create_db(db_url: &str, db_name: &str) {
-    let conn = PgConnection::establish(&db_url)
-        .unwrap_or_else(|_| panic!("Error connecting to {}", db_url));
-
-    let create_query = format!("CREATE DATABASE \"{}\"", db_name);
-    conn.execute(&create_query)
-        .expect("Error creating Database");
-}
-*/
-
 impl EvacuateJob {
     /// Create a new EvacauteJob instance.
     /// As part of this initialization also create a new SqliteConnection.
@@ -764,22 +752,7 @@ impl EvacuateJob {
     ) -> Result<usize, Error> {
         use self::evacuateobjects::dsl::*;
 
-        /*
-        use std::sync::MutexGuard;
-        let mut conn: Option<MutexGuard<PgConnection>> = None;
-        for _ in 0..100 {
-            if let Ok(locked_conn) = self.conn.lock() {
-                conn = Some(locked_conn);
-                break;
-            } else {
-                std::thread::sleep(std::time::Duration::from_millis(10));
-                continue;
-            }
-        }
-        */
-
         let locked_conn = self.conn.lock().expect("DB conn lock");
-
         let now = std::time::Instant::now();
         // TODO: consider checking record count to ensure update success
         let ret = diesel::insert_into(evacuateobjects)
