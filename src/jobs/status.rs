@@ -72,7 +72,7 @@ mod tests {
         let mut g = StdThreadGen::new(10);
         let mut obj_vec = vec![];
 
-        util::create_and_connect_db(&uuid.to_string());
+        let conn = util::create_and_connect_db(&uuid.to_string());
         evacuate::create_evacuateobjects_table(&conn).unwrap();
 
         for _ in 0..NUM_OBJS {
