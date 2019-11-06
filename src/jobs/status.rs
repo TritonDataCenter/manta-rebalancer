@@ -12,8 +12,8 @@
 use super::evacuate::EvacuateObjectStatus;
 use crate::error::Error;
 
+use diesel::pg::PgConnection;
 use diesel::prelude::*;
-use diesel::SqliteConnection;
 use uuid::Uuid;
 
 // TODO: consider doing a single query to get all objects hold them in memory
@@ -21,21 +21,14 @@ use uuid::Uuid;
 pub fn get_status(uuid: Uuid) -> Result<(), Error> {
     use super::evacuate::evacuateobjects::dsl::*;
     let mut status_vec: Vec<EvacuateObjectStatus> = vec![];
-    let conn = SqliteConnection::establish(&uuid.to_string())
-        .unwrap_or_else(|_| panic!("Error connecting to {}", uuid));
+    let db_name = uuid.to_string();
+    let db_url = String::from("postgres://postgres:postgres@");
+    let connect_url = format!("{}/{}", db_url, db_name);
 
-    for _ in 0..100 {
-        match evacuateobjects.select(status).get_results(&conn) {
-            Ok(ret) => {
-                status_vec = ret;
-                break;
-            }
-            Err(_) => {
-                std::thread::sleep(std::time::Duration::from_millis(50));
-                continue;
-            }
-        }
-    }
+    let conn = PgConnection::establish(&connect_url)
+        .unwrap_or_else(|_| panic!("Error connecting to {}", db_url));
+
+    status_vec = evacuateobjects.select(status).get_results(&conn).unwrap();
 
     let skip_count = status_vec
         .iter()
@@ -69,9 +62,10 @@ pub fn get_status(uuid: Uuid) -> Result<(), Error> {
 mod tests {
     use super::*;
     use crate::jobs::evacuate::{self, EvacuateObject};
+    use crate::util;
     use quickcheck::{Arbitrary, StdThreadGen};
 
-    static NUM_OBJS: u32 = 200000;
+    static NUM_OBJS: u32 = 200;
 
     #[test]
     fn get_status_test() {
@@ -80,7 +74,12 @@ mod tests {
         let uuid = Uuid::new_v4();
         let mut g = StdThreadGen::new(10);
         let mut obj_vec = vec![];
-        let conn = SqliteConnection::establish(&uuid.to_string())
+        let db_url = String::from("postgres://postgres:postgres@");
+        let connect_url = format!("{}/{}", db_url, uuid);
+
+        util::create_db(&db_url, &uuid.to_string());
+
+        let conn = PgConnection::establish(&connect_url)
             .unwrap_or_else(|_| panic!("Error connecting to {}", uuid));
 
         evacuate::create_evacuateobjects_table(&conn).unwrap();
