@@ -22,6 +22,7 @@ use std::str::FromStr;
 
 use diesel::backend;
 use diesel::deserialize::{self, FromSql};
+use diesel::pg::{Pg, PgValue};
 use diesel::serialize::{self, IsNull, Output, ToSql};
 use diesel::sql_types;
 use diesel::sqlite::Sqlite;
@@ -279,6 +280,35 @@ pub enum ObjectSkippedReason {
     HTTPStatusCode(HttpStatusCode),
 }
 
+fn _osr_from_sql(ts: String) -> deserialize::Result<ObjectSkippedReason> {
+    if ts.starts_with('{') && ts.ends_with('}') {
+        // Start with:
+        //      "{skipped_reason:status_code}"
+        let matches: &[_] = &['{', '}'];
+
+        // trim_matches:
+        //      "skipped_reason:status_code"
+        //
+        // split().collect():
+        //      ["skipped_reason", "status_code"]
+        let sr_sc: Vec<&str> = ts.trim_matches(matches).split(':').collect();
+        assert_eq!(sr_sc.len(), 2);
+
+        // ["skipped_reason", "status_code"]
+        let reason = ObjectSkippedReason::from_str(&sr_sc[0])?;
+        match reason {
+            ObjectSkippedReason::HTTPStatusCode(_) => {
+                Ok(ObjectSkippedReason::HTTPStatusCode(sr_sc[1].parse()?))
+            }
+            _ => {
+                panic!("variant with value not found");
+            }
+        }
+    } else {
+        ObjectSkippedReason::from_str(&ts).map_err(std::convert::Into::into)
+    }
+}
+
 impl ObjectSkippedReason {
     // The "Strum" crate already provides a "to_string()" method which we
     // want to use here.  This is for handling the special case of variants
@@ -328,29 +358,25 @@ impl FromSql<sql_types::Text, Sqlite> for ObjectSkippedReason {
     ) -> deserialize::Result<Self> {
         let t = not_none!(bytes).read_text();
         let ts: String = t.to_string();
-        if ts.starts_with('{') && ts.ends_with('}') {
-            // "{skipped_reason:status_code}"
-            let matches: &[_] = &['{', '}'];
+        _osr_from_sql(ts)
+    }
+}
 
-            // trim_matches: "skipped_reason:status_code"
-            // split().collect(): ["skipped_reason", "status_code"]
-            let sr_sc: Vec<&str> =
-                ts.trim_matches(matches).split(':').collect();
-            assert_eq!(sr_sc.len(), 2);
+impl ToSql<sql_types::Text, Pg> for ObjectSkippedReason {
+    fn to_sql<W: Write>(&self, out: &mut Output<W, Pg>) -> serialize::Result {
+        let sr = self.into_string();
+        out.write_all(sr.as_bytes())?;
 
-            // ["skipped_reason", "status_code"]
-            let reason = ObjectSkippedReason::from_str(&sr_sc[0])?;
-            match reason {
-                ObjectSkippedReason::HTTPStatusCode(_) => {
-                    Ok(ObjectSkippedReason::HTTPStatusCode(sr_sc[1].parse()?))
-                }
-                _ => {
-                    panic!("variant with value not found");
-                }
-            }
-        } else {
-            Self::from_str(t).map_err(std::convert::Into::into)
-        }
+        Ok(IsNull::No)
+    }
+}
+
+impl FromSql<sql_types::Text, Pg> for ObjectSkippedReason {
+    fn from_sql(bytes: Option<PgValue<'_>>) -> deserialize::Result<Self> {
+        let t: PgValue = not_none!(bytes);
+        let t_str = String::from_utf8_lossy(t.as_bytes());
+        let ts: String = t_str.to_string();
+        _osr_from_sql(ts)
     }
 }
 

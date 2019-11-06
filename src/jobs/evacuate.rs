@@ -17,6 +17,7 @@ use crate::jobs::{
 };
 use crate::moray_client;
 use crate::picker::{self as mod_picker, SharkSource, StorageNode};
+use crate::util;
 
 use std::collections::hash_map::Entry::{Occupied, Vacant};
 use std::collections::HashMap;
@@ -45,6 +46,7 @@ use uuid::Uuid;
 
 use diesel::backend;
 use diesel::deserialize::{self, FromSql};
+use diesel::pg::{Pg, PgConnection, PgValue};
 use diesel::prelude::*;
 use diesel::serialize::{self, IsNull, Output, ToSql};
 use diesel::sql_types;
@@ -123,6 +125,22 @@ impl FromSql<sql_types::Text, Sqlite> for EvacuateObjectStatus {
     }
 }
 
+impl ToSql<sql_types::Text, Pg> for EvacuateObjectStatus {
+    fn to_sql<W: Write>(&self, out: &mut Output<W, Pg>) -> serialize::Result {
+        let s = self.to_string();
+        out.write_all(s.as_bytes())?;
+        Ok(IsNull::No)
+    }
+}
+
+impl FromSql<sql_types::Text, Pg> for EvacuateObjectStatus {
+    fn from_sql(bytes: Option<PgValue<'_>>) -> deserialize::Result<Self> {
+        let t: PgValue = not_none!(bytes);
+        let t_str = String::from_utf8_lossy(t.as_bytes());
+        Self::from_str(&t_str).map_err(std::convert::Into::into)
+    }
+}
+
 #[derive(
     Display,
     EnumString,
@@ -173,8 +191,24 @@ impl FromSql<sql_types::Text, Sqlite> for EvacuateObjectError {
     }
 }
 
+impl ToSql<sql_types::Text, Pg> for EvacuateObjectError {
+    fn to_sql<W: Write>(&self, out: &mut Output<W, Pg>) -> serialize::Result {
+        let s = self.to_string();
+        out.write_all(s.as_bytes())?;
+        Ok(IsNull::No)
+    }
+}
+
+impl FromSql<sql_types::Text, Pg> for EvacuateObjectError {
+    fn from_sql(bytes: Option<PgValue<'_>>) -> deserialize::Result<Self> {
+        let t: PgValue = not_none!(bytes);
+        let t_str = String::from_utf8_lossy(t.as_bytes());
+        Self::from_str(&t_str).map_err(std::convert::Into::into)
+    }
+}
+
 pub fn create_evacuateobjects_table(
-    conn: &SqliteConnection,
+    conn: &PgConnection,
 ) -> Result<usize, Error> {
     let status_strings = EvacuateObjectStatus::variants();
     let error_strings = EvacuateObjectError::variants();
@@ -365,7 +399,8 @@ pub struct EvacuateJob {
 
     // TODO: max number of shark threads
     /// SqliteConnection to local database.
-    pub conn: Mutex<SqliteConnection>,
+    //pub conn: Mutex<SqliteConnection>,
+    pub conn: Mutex<PgConnection>,
 
     /// domain_name of manta deployment
     pub domain_name: String,
@@ -377,16 +412,33 @@ pub struct EvacuateJob {
     pub max_objects: Option<u32>,
 }
 
+/*
+// TODO: move me somewhere a bit more sane.
+fn _create_db(db_url: &str, db_name: &str) {
+    let conn = PgConnection::establish(&db_url)
+        .unwrap_or_else(|_| panic!("Error connecting to {}", db_url));
+
+    let create_query = format!("CREATE DATABASE \"{}\"", db_name);
+    conn.execute(&create_query)
+        .expect("Error creating Database");
+}
+*/
+
 impl EvacuateJob {
     /// Create a new EvacauteJob instance.
     /// As part of this initialization also create a new SqliteConnection.
     pub fn new(
         from_shark: MantaObjectShark,
         domain_name: &str,
-        db_url: &str,
+        db_name: &str,
         max_objects: Option<u32>,
     ) -> Self {
-        let conn = SqliteConnection::establish(db_url)
+        let db_url = String::from("postgres://postgres@");
+        let connect_url = format!("{}/{}", db_url, db_name);
+
+        util::create_db(&db_url, db_name);
+
+        let conn = PgConnection::establish(&connect_url)
             .unwrap_or_else(|_| panic!("Error connecting to {}", db_url));
 
         Self {
@@ -711,8 +763,9 @@ impl EvacuateJob {
     ) -> Result<usize, Error> {
         use self::evacuateobjects::dsl::*;
 
+        /*
         use std::sync::MutexGuard;
-        let mut conn: Option<MutexGuard<SqliteConnection>> = None;
+        let mut conn: Option<MutexGuard<PgConnection>> = None;
         for _ in 0..100 {
             if let Ok(locked_conn) = self.conn.lock() {
                 conn = Some(locked_conn);
@@ -722,12 +775,15 @@ impl EvacuateJob {
                 continue;
             }
         }
+        */
+
+        let locked_conn = self.conn.lock().expect("DB conn lock");
 
         let now = std::time::Instant::now();
         // TODO: consider checking record count to ensure update success
         let ret = diesel::insert_into(evacuateobjects)
             .values(vec_objs)
-            .execute(&*conn.unwrap())
+            .execute(&*locked_conn)
             .unwrap_or_else(|e| {
                 let msg = format!("Error inserting object into DB: {}", e);
                 error!("{}", msg);
