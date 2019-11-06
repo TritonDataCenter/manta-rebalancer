@@ -255,6 +255,7 @@ pub fn create_evacuateobjects_table(
                 assignment_id TEXT,
                 object TEXT,
                 shard Integer,
+                dest_shark TEXT,
                 etag TEXT,
                 status TEXT CHECK(status IN ({})) NOT NULL,
                 skipped_reason TEXT CHECK(skipped_reason IN ({})),

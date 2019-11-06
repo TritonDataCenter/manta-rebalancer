@@ -20,7 +20,6 @@ use uuid::Uuid;
 // and do the counts in rust code.
 pub fn get_status(uuid: Uuid) -> Result<(), Error> {
     use super::evacuate::evacuateobjects::dsl::*;
-    let mut status_vec: Vec<EvacuateObjectStatus> = vec![];
     let db_name = uuid.to_string();
     let db_url = String::from("postgres://postgres:postgres@");
     let connect_url = format!("{}/{}", db_url, db_name);
@@ -28,7 +27,10 @@ pub fn get_status(uuid: Uuid) -> Result<(), Error> {
     let conn = PgConnection::establish(&connect_url)
         .unwrap_or_else(|_| panic!("Error connecting to {}", db_url));
 
-    status_vec = evacuateobjects.select(status).get_results(&conn).unwrap();
+    let status_vec: Vec<EvacuateObjectStatus> = evacuateobjects
+        .select(status)
+        .get_results(&conn)
+        .unwrap();
 
     let skip_count = status_vec
         .iter()
