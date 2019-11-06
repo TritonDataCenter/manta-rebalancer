@@ -434,13 +434,7 @@ impl EvacuateJob {
         db_name: &str,
         max_objects: Option<u32>,
     ) -> Self {
-        let db_url = String::from("postgres://postgres@");
-        let connect_url = format!("{}/{}", db_url, db_name);
-
-        util::create_db(&db_url, db_name);
-
-        let conn = PgConnection::establish(&connect_url)
-            .unwrap_or_else(|_| panic!("Error connecting to {}", db_url));
+        let conn = util::create_and_connect_db(db_name);
 
         Self {
             min_avail_mb: Some(1000),             // TODO: config
@@ -2606,7 +2600,7 @@ mod tests {
         let job_action = EvacuateJob::new(
             from_shark,
             "fakedomain.us",
-            "no_skip_test.db",
+            &Uuid::new_v4().to_string(),
             Some(100),
         );
         assert!(job_action.create_table().is_ok());
@@ -2793,7 +2787,7 @@ mod tests {
         let job_action = EvacuateJob::new(
             MantaObjectShark::default(),
             "fakedomain.us",
-            "assignment_processing_test.db",
+            &Uuid::new_v4().to_string(),
             None,
         );
 
@@ -2919,7 +2913,7 @@ mod tests {
         let job_action = EvacuateJob::new(
             MantaObjectShark::default(),
             "fakedomain.us",
-            "empty_picker_test.db",
+            &Uuid::new_v4().to_string(),
             None,
         );
         let job_action = Arc::new(job_action);

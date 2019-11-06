@@ -11,8 +11,8 @@
 //use super::evacuate::EvacuateObject;
 use super::evacuate::EvacuateObjectStatus;
 use crate::error::Error;
+use crate::util;
 
-use diesel::pg::PgConnection;
 use diesel::prelude::*;
 use uuid::Uuid;
 
@@ -21,16 +21,11 @@ use uuid::Uuid;
 pub fn get_status(uuid: Uuid) -> Result<(), Error> {
     use super::evacuate::evacuateobjects::dsl::*;
     let db_name = uuid.to_string();
-    let db_url = String::from("postgres://postgres:postgres@");
-    let connect_url = format!("{}/{}", db_url, db_name);
 
-    let conn = PgConnection::establish(&connect_url)
-        .unwrap_or_else(|_| panic!("Error connecting to {}", db_url));
+    let conn = util::connect_db(&db_name);
 
-    let status_vec: Vec<EvacuateObjectStatus> = evacuateobjects
-        .select(status)
-        .get_results(&conn)
-        .unwrap();
+    let status_vec: Vec<EvacuateObjectStatus> =
+        evacuateobjects.select(status).get_results(&conn).unwrap();
 
     let skip_count = status_vec
         .iter()
@@ -76,14 +71,8 @@ mod tests {
         let uuid = Uuid::new_v4();
         let mut g = StdThreadGen::new(10);
         let mut obj_vec = vec![];
-        let db_url = String::from("postgres://postgres:postgres@");
-        let connect_url = format!("{}/{}", db_url, uuid);
 
-        util::create_db(&db_url, &uuid.to_string());
-
-        let conn = PgConnection::establish(&connect_url)
-            .unwrap_or_else(|_| panic!("Error connecting to {}", uuid));
-
+        util::create_and_connect_db(&uuid.to_string());
         evacuate::create_evacuateobjects_table(&conn).unwrap();
 
         for _ in 0..NUM_OBJS {
