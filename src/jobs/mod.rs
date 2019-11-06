@@ -388,10 +388,6 @@ impl Job {
         }
     }
 
-    pub fn set_id(&mut self, id: Uuid) {
-        self.id = id;
-    }
-
     pub fn get_id(&self) -> Uuid {
         self.id
     }
