@@ -13,7 +13,19 @@ use std::sync::Mutex;
 use std::thread;
 
 use clap::{crate_name, crate_version};
+use diesel::pg::PgConnection;
+use diesel::prelude::*;
+
 use slog::{o, Drain, Logger};
+
+pub fn create_db(db_url: &str, db_name: &str) {
+    let conn = PgConnection::establish(&db_url)
+        .unwrap_or_else(|_| panic!("Error connecting to {}", db_url));
+
+    let create_query = format!("CREATE DATABASE \"{}\"", db_name);
+    conn.execute(&create_query)
+        .expect("Error creating Database");
+}
 
 pub fn create_bunyan_logger<W>(io: W) -> Logger
 where
