@@ -36,6 +36,7 @@ use crossbeam_deque::{Injector, Steal};
 use libmanta::moray::{MantaObject, MantaObjectShark};
 use moray::client::MorayClient;
 use quickcheck::{Arbitrary, Gen};
+use quickcheck_helpers::random::string as random_string;
 use reqwest;
 use threadpool::ThreadPool;
 use uuid::Uuid;
@@ -291,6 +292,7 @@ impl Arbitrary for EvacuateObject {
         let mut skipped_reason = None;
         let mut error = None;
         let shard = g.next_u32() as i32 % 100;
+        let dest_shark = random_string(g, 100);
 
         match status {
             EvacuateObjectStatus::Skipped => {
@@ -308,6 +310,7 @@ impl Arbitrary for EvacuateObject {
             object: manta_object.clone(),
             shard,
             etag: manta_object.etag.clone(),
+            dest_shark,
             status,
             skipped_reason,
             error,
