@@ -434,7 +434,13 @@ impl EvacuateJob {
         db_name: &str,
         max_objects: Option<u32>,
     ) -> Self {
-        let conn = util::create_and_connect_db(db_name);
+        let conn = match util::create_and_connect_db(db_name) {
+            Ok(c) => c,
+            Err(e) => {
+                println!("Error creating Evacuate Job: {}", e);
+                std::process::exit(1);
+            }
+        };
 
         Self {
             min_avail_mb: Some(1000),             // TODO: config
