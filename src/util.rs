@@ -18,13 +18,29 @@ use diesel::prelude::*;
 
 use slog::{o, Drain, Logger};
 
-pub fn create_db(db_url: &str, db_name: &str) {
-    let conn = PgConnection::establish(&db_url)
-        .unwrap_or_else(|_| panic!("Error connecting to {}", db_url));
+static DB_URL: &str = "postgres://postgres:postgres@";
+pub fn connect_db(db_name: &str) -> PgConnection {
+    let connect_url = format!("{}/{}", DB_URL, db_name);
+    PgConnection::establish(&connect_url)
+        .unwrap_or_else(|_| panic!("Error connecting to {}", DB_URL))
+}
 
+pub fn create_db(db_name: &str) {
     let create_query = format!("CREATE DATABASE \"{}\"", db_name);
+    let conn = PgConnection::establish(&DB_URL).unwrap_or_else(|_| {
+        panic!(
+            "Cannot create DB {}.  Error connecting to {}",
+            db_name, DB_URL
+        )
+    });
+
     conn.execute(&create_query)
         .expect("Error creating Database");
+}
+
+pub fn create_and_connect_db(db_name: &str) -> PgConnection {
+    create_db(db_name);
+    connect_db(db_name)
 }
 
 pub fn create_bunyan_logger<W>(io: W) -> Logger
