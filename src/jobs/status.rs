@@ -22,10 +22,22 @@ pub fn get_status(uuid: Uuid) -> Result<(), Error> {
     use super::evacuate::evacuateobjects::dsl::*;
     let db_name = uuid.to_string();
 
-    let conn = util::connect_db(&db_name);
+    let conn = match util::connect_db(&db_name) {
+        Ok(c) => c,
+        Err(e) => {
+            println!(
+                "Error connecting to database ({}).  Is this a valid Job \
+                 UUID: {}?",
+                e, db_name
+            );
+            return Err(e);
+        }
+    };
 
-    let status_vec: Vec<EvacuateObjectStatus> =
-        evacuateobjects.select(status).get_results(&conn).unwrap();
+    let status_vec: Vec<EvacuateObjectStatus> = evacuateobjects
+        .select(status)
+        .get_results(&conn)
+        .expect("DB select error");
 
     let skip_count = status_vec
         .iter()
@@ -65,14 +77,22 @@ mod tests {
     static NUM_OBJS: u32 = 200;
 
     #[test]
+    fn bad_job_id() {
+        let _guard = util::init_global_logger();
+        let uuid = Uuid::new_v4();
+        assert!(get_status(uuid).is_err());
+    }
+
+    #[test]
     fn get_status_test() {
         use crate::jobs::evacuate::evacuateobjects::dsl::*;
 
+        let _guard = util::init_global_logger();
         let uuid = Uuid::new_v4();
         let mut g = StdThreadGen::new(10);
         let mut obj_vec = vec![];
 
-        let conn = util::create_and_connect_db(&uuid.to_string());
+        let conn = util::create_and_connect_db(&uuid.to_string()).unwrap();
         evacuate::create_evacuateobjects_table(&conn).unwrap();
 
         for _ in 0..NUM_OBJS {

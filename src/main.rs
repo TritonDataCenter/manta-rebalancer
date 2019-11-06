@@ -24,7 +24,12 @@ fn main() -> Result<(), Error> {
     match command.subcommand {
         SubCommand::Server => Ok(()),
         SubCommand::DoJob(job) => job.run(),
-        SubCommand::Status(uuid) => status::get_status(uuid),
+        SubCommand::Status(uuid) => match status::get_status(uuid) {
+            Ok(_) => Ok(()),
+            Err(_) => {
+                std::process::exit(1);
+            }
+        },
         SubCommand::Agent => {
             // We should only be using 0.0.0.0 (INADDR_ANY) temporarily.  In
             // production we will be supply an ip address that is obtained from

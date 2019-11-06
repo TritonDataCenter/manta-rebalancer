@@ -21,6 +21,7 @@ pub enum Error {
     Reqwest(reqwest::Error),
     Resolve(trust_dns_resolver::error::ResolveError),
     ParseInt(std::num::ParseIntError),
+    DieselConnection(diesel::ConnectionError),
 }
 
 impl std::error::Error for Error {
@@ -33,6 +34,7 @@ impl std::error::Error for Error {
             Error::SerdeJson(e) => e.description(),
             Error::Reqwest(e) => e.description(),
             Error::ParseInt(e) => e.description(),
+            Error::DieselConnection(e) => e.description(),
             Error::Resolve(e) => {
                 let kind = e.kind();
                 match kind {
@@ -98,6 +100,12 @@ impl From<std::num::ParseIntError> for Error {
     }
 }
 
+impl From<diesel::ConnectionError> for Error {
+    fn from(error: diesel::ConnectionError) -> Self {
+        Error::DieselConnection(error)
+    }
+}
+
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
@@ -109,6 +117,7 @@ impl fmt::Display for Error {
             Error::Reqwest(e) => write!(f, "{}", e),
             Error::Resolve(e) => write!(f, "{}", e),
             Error::ParseInt(e) => write!(f, "{}", e),
+            Error::DieselConnection(e) => write!(f, "{}", e),
         }
     }
 }

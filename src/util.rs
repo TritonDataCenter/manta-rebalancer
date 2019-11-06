@@ -8,6 +8,8 @@
  * Copyright 2019, Joyent, Inc.
  */
 
+use crate::error::Error;
+
 use std::io;
 use std::sync::Mutex;
 use std::thread;
@@ -19,27 +21,21 @@ use diesel::prelude::*;
 use slog::{o, Drain, Logger};
 
 static DB_URL: &str = "postgres://postgres:postgres@";
-pub fn connect_db(db_name: &str) -> PgConnection {
+
+pub fn connect_db(db_name: &str) -> Result<PgConnection, Error> {
     let connect_url = format!("{}/{}", DB_URL, db_name);
-    PgConnection::establish(&connect_url)
-        .unwrap_or_else(|_| panic!("Error connecting to {}", DB_URL))
+    PgConnection::establish(&connect_url).map_err(Error::from)
 }
 
-pub fn create_db(db_name: &str) {
+pub fn create_db(db_name: &str) -> Result<usize, Error> {
     let create_query = format!("CREATE DATABASE \"{}\"", db_name);
-    let conn = PgConnection::establish(&DB_URL).unwrap_or_else(|_| {
-        panic!(
-            "Cannot create DB {}.  Error connecting to {}",
-            db_name, DB_URL
-        )
-    });
+    let conn = PgConnection::establish(&DB_URL)?;
 
-    conn.execute(&create_query)
-        .expect("Error creating Database");
+    conn.execute(&create_query).map_err(Error::from)
 }
 
-pub fn create_and_connect_db(db_name: &str) -> PgConnection {
-    create_db(db_name);
+pub fn create_and_connect_db(db_name: &str) -> Result<PgConnection, Error> {
+    create_db(db_name)?;
     connect_db(db_name)
 }
 
