@@ -11,6 +11,7 @@
 use remora::agent::Agent;
 use remora::config::{Command, SubCommand};
 use remora::error::Error;
+use remora::jobs::status;
 use remora::util;
 
 fn main() -> Result<(), Error> {
@@ -23,6 +24,7 @@ fn main() -> Result<(), Error> {
     match command.subcommand {
         SubCommand::Server => Ok(()),
         SubCommand::DoJob(job) => job.run(),
+        SubCommand::Status(uuid) => status::get_status(uuid),
         SubCommand::Agent => {
             // We should only be using 0.0.0.0 (INADDR_ANY) temporarily.  In
             // production we will be supply an ip address that is obtained from
