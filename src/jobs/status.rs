@@ -13,11 +13,14 @@ use crate::error::Error;
 use crate::util;
 
 use diesel::prelude::*;
+use inflector::cases::titlecase::to_title_case;
+use strum::IntoEnumIterator;
 use uuid::Uuid;
 
 pub fn get_status(uuid: Uuid) -> Result<(), Error> {
     use super::evacuate::evacuateobjects::dsl::*;
     let db_name = uuid.to_string();
+    let mut total_count = 0;
 
     let conn = match util::connect_db(&db_name) {
         Ok(c) => c,
@@ -36,30 +39,14 @@ pub fn get_status(uuid: Uuid) -> Result<(), Error> {
         .get_results(&conn)
         .expect("DB select error");
 
-    let skip_count = status_vec
-        .iter()
-        .filter(|s| *s == &EvacuateObjectStatus::Skipped)
-        .count();
+    for status_value in EvacuateObjectStatus::iter() {
+        let count = status_vec.iter().filter(|s| *s == &status_value).count();
 
-    let error_count = status_vec
-        .iter()
-        .filter(|s| *s == &EvacuateObjectStatus::Error)
-        .count();
+        println!("{}: {}", to_title_case(&status_value.to_string()), count);
+        total_count += count;
+    }
 
-    let successful_count = status_vec
-        .iter()
-        .filter(|s| *s == &EvacuateObjectStatus::Complete)
-        .count();
-
-    let total_count = status_vec.len();
-
-    println!(
-        "Skipped Objects: {}\n\
-         Error Objects: {}\n\
-         Successful Objects: {}\n\
-         Total Objects: {}\n",
-        skip_count, error_count, successful_count, total_count,
-    );
+    println!("Total: {}", total_count);
 
     Ok(())
 }
