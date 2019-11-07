@@ -66,6 +66,7 @@ pub enum SubCommand {
     Agent,
     DoJob(Box<Job>),
     Status(Uuid),
+    JobList,
 }
 
 pub struct Command {
@@ -117,9 +118,11 @@ impl Command {
                     .about("Job Management")
                     .version("0.1.0")
                     .setting(AppSettings::ArgRequiredElseHelp)
-                    // TODO:
-                    // remora job get <uuid>
-                    // remora job list
+                    .subcommand(
+                        ClapSubCommand::with_name("list")
+                            .about("Get list of rebalancer jobs")
+                            .version("0.1.0")
+                    )
                     .subcommand(
                         ClapSubCommand::with_name("status")
                             .about("Get the status of a rebalancer job")
@@ -131,7 +134,6 @@ impl Command {
                                 .index(1)
                             )
                     )
-                    // remora job create [options]
                     .subcommand(
                         ClapSubCommand::with_name("create")
                             .about("Create a rebalancer Job")
@@ -236,6 +238,8 @@ impl Command {
                             std::process::exit(1);
                         });
                 subcommand = SubCommand::Status(uuid);
+            } else if sub_matches.subcommand_matches("list").is_some() {
+                subcommand = SubCommand::JobList;
             }
         }
 

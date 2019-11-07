@@ -12,6 +12,8 @@ use super::evacuate::EvacuateObjectStatus;
 use crate::error::Error;
 use crate::util;
 
+use std::str::FromStr;
+
 use diesel::prelude::*;
 use inflector::cases::titlecase::to_title_case;
 use strum::IntoEnumIterator;
@@ -51,6 +53,18 @@ pub fn get_status(uuid: Uuid) -> Result<(), Error> {
     Ok(())
 }
 
+pub fn list_jobs() -> Result<(), Error> {
+    let db_list = util::list_databases()?;
+
+    for db in db_list {
+        if let Ok(job_id) = Uuid::from_str(&db) {
+            println!("{}", job_id);
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -59,6 +73,11 @@ mod tests {
     use quickcheck::{Arbitrary, StdThreadGen};
 
     static NUM_OBJS: u32 = 200;
+
+    #[test]
+    fn list_job_test() {
+        assert!(list_jobs().is_ok());
+    }
 
     #[test]
     fn bad_job_id() {

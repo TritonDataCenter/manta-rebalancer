@@ -20,12 +20,10 @@ use std::fmt;
 use std::io::Write;
 use std::str::FromStr;
 
-use diesel::backend;
 use diesel::deserialize::{self, FromSql};
 use diesel::pg::{Pg, PgValue};
 use diesel::serialize::{self, IsNull, Output, ToSql};
 use diesel::sql_types;
-use diesel::sqlite::Sqlite;
 use evacuate::EvacuateJob;
 use libmanta::moray::MantaObjectShark;
 use md5::{Digest, Md5};
@@ -337,28 +335,6 @@ impl Arbitrary for ObjectSkippedReason {
             }
             _ => reason,
         }
-    }
-}
-
-impl ToSql<sql_types::Text, Sqlite> for ObjectSkippedReason {
-    fn to_sql<W: Write>(
-        &self,
-        out: &mut Output<W, Sqlite>,
-    ) -> serialize::Result {
-        let sr = self.into_string();
-        out.write_all(sr.as_bytes())?;
-
-        Ok(IsNull::No)
-    }
-}
-
-impl FromSql<sql_types::Text, Sqlite> for ObjectSkippedReason {
-    fn from_sql(
-        bytes: Option<backend::RawValue<Sqlite>>,
-    ) -> deserialize::Result<Self> {
-        let t = not_none!(bytes).read_text();
-        let ts: String = t.to_string();
-        _osr_from_sql(ts)
     }
 }
 
