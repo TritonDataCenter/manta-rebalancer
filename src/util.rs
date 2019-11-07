@@ -17,6 +17,7 @@ use std::thread;
 use clap::{crate_name, crate_version};
 use diesel::pg::PgConnection;
 use diesel::prelude::*;
+use diesel::sql_query;
 
 use slog::{o, Drain, Logger};
 
@@ -32,6 +33,30 @@ pub fn create_db(db_name: &str) -> Result<usize, Error> {
     let conn = PgConnection::establish(&DB_URL)?;
 
     conn.execute(&create_query).map_err(Error::from)
+}
+
+table! {
+    use diesel::sql_types::Text;
+    pg_database (datname) {
+        datname -> Text,
+    }
+}
+
+#[derive(QueryableByName, Debug)]
+#[table_name = "pg_database"]
+struct PgDatabase {
+    datname: String,
+}
+
+pub fn list_databases() -> Result<Vec<String>, Error> {
+    let list_query = "SELECT datname FROM pg_database";
+    let conn = PgConnection::establish(&DB_URL)?;
+
+    //let ret: Result<Vec<String>, Error> = sql_query(list_query)
+    sql_query(list_query)
+        .load::<PgDatabase>(&conn)
+        .map(|res| res.iter().map(|r| r.datname.clone()).collect())
+        .map_err(Error::from)
 }
 
 pub fn create_and_connect_db(db_name: &str) -> Result<PgConnection, Error> {

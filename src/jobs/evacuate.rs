@@ -44,13 +44,11 @@ use uuid::Uuid;
 
 // --- Diesel Stuff, TODO This should be refactored --- //
 
-use diesel::backend;
 use diesel::deserialize::{self, FromSql};
 use diesel::pg::{Pg, PgConnection, PgValue};
 use diesel::prelude::*;
 use diesel::serialize::{self, IsNull, Output, ToSql};
 use diesel::sql_types;
-use diesel::sqlite::Sqlite;
 
 // Note: The ordering of the fields in this table must match the ordering of
 // the fields in 'struct EvacuateObject'
@@ -105,26 +103,6 @@ impl Arbitrary for EvacuateObjectStatus {
     }
 }
 
-impl ToSql<sql_types::Text, Sqlite> for EvacuateObjectStatus {
-    fn to_sql<W: Write>(
-        &self,
-        out: &mut Output<W, Sqlite>,
-    ) -> serialize::Result {
-        let s = self.to_string();
-        out.write_all(s.as_bytes())?;
-        Ok(IsNull::No)
-    }
-}
-
-impl FromSql<sql_types::Text, Sqlite> for EvacuateObjectStatus {
-    fn from_sql(
-        bytes: Option<backend::RawValue<Sqlite>>,
-    ) -> deserialize::Result<Self> {
-        let t = not_none!(bytes).read_text();
-        Self::from_str(t).map_err(std::convert::Into::into)
-    }
-}
-
 impl ToSql<sql_types::Text, Pg> for EvacuateObjectStatus {
     fn to_sql<W: Write>(&self, out: &mut Output<W, Pg>) -> serialize::Result {
         let s = self.to_string();
@@ -171,26 +149,6 @@ impl Arbitrary for EvacuateObjectError {
 }
 
 // Evacuate Object Error
-impl ToSql<sql_types::Text, Sqlite> for EvacuateObjectError {
-    fn to_sql<W: Write>(
-        &self,
-        out: &mut Output<W, Sqlite>,
-    ) -> serialize::Result {
-        let s = self.to_string();
-        out.write_all(s.as_bytes())?;
-        Ok(IsNull::No)
-    }
-}
-
-impl FromSql<sql_types::Text, Sqlite> for EvacuateObjectError {
-    fn from_sql(
-        bytes: Option<backend::RawValue<Sqlite>>,
-    ) -> deserialize::Result<Self> {
-        let t = not_none!(bytes).read_text();
-        Self::from_str(t).map_err(std::convert::Into::into)
-    }
-}
-
 impl ToSql<sql_types::Text, Pg> for EvacuateObjectError {
     fn to_sql<W: Write>(&self, out: &mut Output<W, Pg>) -> serialize::Result {
         let s = self.to_string();
@@ -399,8 +357,7 @@ pub struct EvacuateJob {
     // TODO: Maximum total size of objects to include in a single assignment.
 
     // TODO: max number of shark threads
-    /// SqliteConnection to local database.
-    //pub conn: Mutex<SqliteConnection>,
+
     pub conn: Mutex<PgConnection>,
 
     /// domain_name of manta deployment
@@ -415,7 +372,7 @@ pub struct EvacuateJob {
 
 impl EvacuateJob {
     /// Create a new EvacauteJob instance.
-    /// As part of this initialization also create a new SqliteConnection.
+    /// As part of this initialization also create a new PgConnection.
     pub fn new(
         from_shark: MantaObjectShark,
         domain_name: &str,

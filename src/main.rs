@@ -30,6 +30,12 @@ fn main() -> Result<(), Error> {
                 std::process::exit(1);
             }
         },
+        SubCommand::JobList => match status::list_jobs() {
+            Ok(_) => Ok(()),
+            Err(_) => {
+                std::process::exit(1);
+            }
+        },
         SubCommand::Agent => {
             // We should only be using 0.0.0.0 (INADDR_ANY) temporarily.  In
             // production we will be supply an ip address that is obtained from
