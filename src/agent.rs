@@ -881,7 +881,7 @@ mod tests {
             return;
         }
 
-        let addr = "127.0.0.1:80";
+        let addr = "127.0.0.1:8080";
         let router = build_simple_router(|route| {
             // You can add a `to_dir` or `to_file` route simply using a
             // `String` or `str` as above, or a `Path` or `PathBuf` to accept
@@ -1067,7 +1067,7 @@ mod tests {
             md5sum: calculate_md5(path.to_str().unwrap()),
             source: MantaObjectShark {
                 datacenter: "dc".to_owned(),
-                manta_storage_id: "localhost".to_owned(),
+                manta_storage_id: "localhost:8080".to_owned(),
             },
             status: TaskStatus::Pending,
         }
