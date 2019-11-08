@@ -29,6 +29,7 @@ serde_json = "1.0.39"
 gotham = "0.3.0"
 gotham_derive = "0.3.0"
 hyper = "0.12"
+joyent-rust-utils = { git = "https://github.com/joyent/rust-utils" }
 lazy_static = "1.4.0"
 mime = "0.3.13"
 moray = { git = "https://github.com/joyent/rust-moray", tag = "v0.6.0" }

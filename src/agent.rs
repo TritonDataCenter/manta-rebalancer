@@ -25,6 +25,7 @@ use gotham::state::{FromState, State};
 use gotham_derive::{StateData, StaticResponseExtender};
 
 use hyper::{Body, Chunk, Method};
+use joyent_rust_utils::file::calculate_md5;
 use libmanta::moray::MantaObjectShark;
 
 use crate::jobs::{AssignmentPayload, ObjectSkippedReason, Task, TaskStatus};
@@ -610,10 +611,6 @@ fn file_create(owner: &str, object: &str) -> File {
     }
 }
 
-fn verify_file_md5(file_path: &str, csum: &str) -> bool {
-    crate::util::calculate_file_md5(file_path) == csum
-}
-
 // TODO: Make this return an actual result.
 fn download(
     uri: &str,
@@ -650,7 +647,7 @@ fn download(
         }
     };
 
-    if verify_file_md5(&file_path, csum) {
+    if calculate_md5(&file_path) == csum {
         Ok(())
     } else {
         error!("Checksum failed for {}/{}.", owner, object);
@@ -673,7 +670,7 @@ fn process_task(task: &mut Task) {
     // short-circuit this operation and return.  There is
     // no need to download anything.  Mark the task as
     // complete and move on.
-    if path.exists() && verify_file_md5(&file_path, &task.md5sum) {
+    if path.exists() && calculate_md5(&file_path) == task.md5sum {
         task.set_status(TaskStatus::Complete);
         info!(
             "Checksum passed -- no need to download: {}/{}",
@@ -1070,7 +1067,7 @@ mod tests {
         Task {
             object_id: path.file_name().unwrap().to_str().unwrap().to_owned(),
             owner: "rebalancer".to_owned(),
-            md5sum: crate::util::calculate_file_md5(path.to_str().unwrap()),
+            md5sum: calculate_md5(path.to_str().unwrap()),
             source: MantaObjectShark {
                 datacenter: "dc".to_owned(),
                 manta_storage_id: "localhost".to_owned(),
