@@ -357,7 +357,6 @@ pub struct EvacuateJob {
     // TODO: Maximum total size of objects to include in a single assignment.
 
     // TODO: max number of shark threads
-
     pub conn: Mutex<PgConnection>,
 
     /// domain_name of manta deployment
@@ -2201,8 +2200,7 @@ fn metadata_update_worker(
                 Steal::Empty => break,
             };
 
-            info!("Updating metadata for assignment: {}",
-                assignment.id);
+            info!("Updating metadata for assignment: {}", assignment.id);
 
             let mut updated_objects = vec![];
             let dest_shark = &assignment.dest_shark;
@@ -2239,8 +2237,10 @@ fn metadata_update_worker(
                 let mclient = match client_hash.entry(shard) {
                     Occupied(entry) => entry.into_mut(),
                     Vacant(entry) => {
-                        debug!("Client for shard {} does not exist, creating.",
-                        shard);
+                        debug!(
+                            "Client for shard {} does not exist, creating.",
+                            shard
+                        );
                         let client = match moray_client::create_client(
                             shard,
                             &job_action.domain_name,
@@ -2390,8 +2390,10 @@ fn start_metadata_update_broker(
                 // really no reason to queue up a new worker.
                 let total_jobs = pool.active_count() + pool.queued_count();
                 if total_jobs >= pool.max_count() {
-                    trace!("Reached max thread count for pool not starting \
-                    new thread");
+                    trace!(
+                        "Reached max thread count for pool not starting \
+                         new thread"
+                    );
                     continue;
                 }
 
