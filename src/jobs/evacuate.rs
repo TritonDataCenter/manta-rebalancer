@@ -2228,9 +2228,11 @@ fn metadata_update_worker(
 
             debug!("Updated Objects: {:?}", updated_objects);
 
-            // TODO: Should the assignment be removed from the hash of
-            // assignments or entered into some DB somewhere for a persistent
-            // log?
+            // TODO: Should the assignment be entered into the DB for a
+            // persistent log?
+            // Mark this assignment in the event that we do dump core on the
+            // next instruction below, or if we do want to save off the
+            // information from the assignment in the DB.
             match job_action.set_assignment_state(
                 &assignment.id,
                 AssignmentState::PostProcessed,
@@ -2239,21 +2241,14 @@ fn metadata_update_worker(
                 Err(e) => panic!("{}", e),
             }
 
-            // TODO move this somewhere that makes more sense
+            info!("Assignment Complete: {}", &assignment.id);
+
             if let None = job_action.assignments
                 .write()
                 .expect("assignments write")
                 .remove(&assignment.id) {
                     warn!("Attempt to remove assignment not in hash: {}", &assignment.id);
                 }
-
-
-            // https://stackoverflow
-            // .com/questions/47626047/execute-an-insert-or-update-using-diesel
-            // TODO: batch update all objects in `updated_objects` with
-            // EvacuateObjectStatus::Complete in the local DB meaning we are
-            // completely done and this object has been rebalanced.
-            // This is the finish line.
 
             // TODO: check for DB insert error
             job_action.mark_many_objects(
