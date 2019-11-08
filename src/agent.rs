@@ -24,10 +24,9 @@ use gotham::router::{builder::*, Router};
 use gotham::state::{FromState, State};
 use gotham_derive::{StateData, StaticResponseExtender};
 
-use base64;
 use hyper::{Body, Chunk, Method};
+use joyent_rust_utils::file::calculate_md5;
 use libmanta::moray::MantaObjectShark;
-use md5::{Digest, Md5};
 
 use crate::jobs::{AssignmentPayload, ObjectSkippedReason, Task, TaskStatus};
 
@@ -612,25 +611,6 @@ fn file_create(owner: &str, object: &str) -> File {
     }
 }
 
-fn verify_file_md5(file_path: &str, csum: &str) -> bool {
-    let mut file = match fs::File::open(&file_path) {
-        Err(e) => panic!("Error opening file {}", e),
-        Ok(file) => file,
-    };
-
-    let mut hasher = Md5::new();
-    match std::io::copy(&mut file, &mut hasher) {
-        Ok(_) => (),
-        Err(e) => {
-            error!("Error hashing {}", e);
-            return false;
-        }
-    };
-
-    let result_ascii = base64::encode(&hasher.result());
-    result_ascii == csum
-}
-
 // TODO: Make this return an actual result.
 fn download(
     uri: &str,
@@ -667,7 +647,7 @@ fn download(
         }
     };
 
-    if verify_file_md5(&file_path, csum) {
+    if calculate_md5(&file_path) == csum {
         Ok(())
     } else {
         error!("Checksum failed for {}/{}.", owner, object);
@@ -690,7 +670,7 @@ fn process_task(task: &mut Task) {
     // short-circuit this operation and return.  There is
     // no need to download anything.  Mark the task as
     // complete and move on.
-    if path.exists() && verify_file_md5(&file_path, &task.md5sum) {
+    if path.exists() && calculate_md5(&file_path) == task.md5sum {
         task.set_status(TaskStatus::Complete);
         info!(
             "Checksum passed -- no need to download: {}/{}",
@@ -875,7 +855,7 @@ mod tests {
     use lazy_static::lazy_static;
     use std::{mem, thread, time};
 
-    static MANTA_SRC_DIR: &str = "/var/tmp/rebalancer/src";
+    static MANTA_SRC_DIR: &str = "test/agent/files";
 
     lazy_static! {
         static ref INITIALIZED: Mutex<bool> = Mutex::new(false);
@@ -930,14 +910,11 @@ mod tests {
     // called directly, allowing the caller to supply those expectations in the
     // form of two additional arguments: the uuid of the assignment and the
     // desired http status code returned from the server.
-    fn send_assignment(
-        test_server: &TestServer,
-        assignment: Arc<RwLock<Assignment>>,
-    ) -> String {
+    fn send_assignment(test_server: &TestServer, tasks: &Vec<Task>) -> String {
         // Generate a uuid to accompany the assignment that we are about to
         // send to the agent.
         let uuid = Uuid::new_v4().to_hyphenated().to_string();
-        send_assignment_impl(test_server, assignment, &uuid, StatusCode::OK);
+        send_assignment_impl(test_server, tasks, &uuid, StatusCode::OK);
         uuid
     }
 
@@ -946,11 +923,10 @@ mod tests {
     // return the uuid of the assignment which we will use to monitor progress.
     fn send_assignment_impl(
         test_server: &TestServer,
-        assignment: Arc<RwLock<Assignment>>,
+        tasks: &Vec<Task>,
         id: &str,
         status: StatusCode,
     ) {
-        let tasks = &assignment.read().unwrap().tasks;
         let uuid = id.to_string();
         let obj: (String, Vec<Task>) = (uuid.clone(), tasks.to_vec());
 
@@ -995,18 +971,6 @@ mod tests {
         // Perhaps it is overkill, but check to ensure that the uuid given
         // back to us matches what we actually sent.
         assert_eq!(uuid, resp_uuid);
-    }
-
-    // Given a path of an assignment on disk, load it in to memory.  If for
-    // some reason this does not succeed, panic, causing the test case that
-    // invoked it to fail.
-    fn load_assignment<S: Into<String>>(path: S) -> Arc<RwLock<Assignment>> {
-        let assignment = match assignment_recall(path) {
-            Ok(a) => a,
-            Err(e) => panic!(format!("Unable to load assignment: {}", e)),
-        };
-
-        assignment
     }
 
     // Send a request to get the latest information on an assignment.  This
@@ -1081,17 +1045,47 @@ mod tests {
         }
     }
 
+    fn create_assignment(path: &str) -> Vec<Task> {
+        let mut tasks = Vec::new();
+
+        for entry in WalkDir::new(path)
+            .min_depth(1)
+            .follow_links(false)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
+            let p = entry.path();
+            let task = object_to_task(&p);
+            println!("{:#?}", &task);
+            tasks.push(task);
+        }
+
+        tasks
+    }
+
+    fn object_to_task(path: &Path) -> Task {
+        Task {
+            object_id: path.file_name().unwrap().to_str().unwrap().to_owned(),
+            owner: "rebalancer".to_owned(),
+            md5sum: calculate_md5(path.to_str().unwrap()),
+            source: MantaObjectShark {
+                datacenter: "dc".to_owned(),
+                manta_storage_id: "localhost".to_owned(),
+            },
+            status: TaskStatus::Pending,
+        }
+    }
+
     // Utility function which is very frequently used to set up both the test
     // server (the agent) as well as a simple web server (which acts as a
     // storage node).  It only takes one argument which is the path of an
     // assignment to load.  Functions called from unit_test_init() that do not
     // succeed will panic, so there is no need to return anything other than the
     // the test server and the newly loaded assignment.
-    fn unit_test_init(path: &str) -> (TestServer, Arc<RwLock<Assignment>>) {
+    fn unit_test_init() -> TestServer {
         simple_server();
         let test_server: TestServer = TestServer::new(router()).unwrap();
-        let assignment = load_assignment(path);
-        (test_server, assignment)
+        test_server
     }
 
     // Test name:    Download
@@ -1102,8 +1096,9 @@ mod tests {
     //               should appear as "Complete".
     #[test]
     fn download() {
-        let (test_server, assignment) = unit_test_init("test/agent/areacodes");
-        let uuid = send_assignment(&test_server, assignment);
+        let test_server = unit_test_init();
+        let assignment = create_assignment(MANTA_SRC_DIR);
+        let uuid = send_assignment(&test_server, &assignment);
         monitor_assignment(&test_server, &uuid, TaskStatus::Complete);
     }
 
@@ -1117,8 +1112,9 @@ mod tests {
     #[test]
     fn replace_healthy() {
         // Download a file once.
-        let (test_server, assignment) = unit_test_init("test/agent/areacodes");
-        let uuid = send_assignment(&test_server, Arc::clone(&assignment));
+        let test_server = unit_test_init();
+        let assignment = create_assignment(MANTA_SRC_DIR);
+        let uuid = send_assignment(&test_server, &assignment);
         monitor_assignment(&test_server, &uuid, TaskStatus::Complete);
 
         // Send the exact same assignment again.  Note: Even though the contents
@@ -1128,7 +1124,7 @@ mod tests {
         // new random uuid on the callers behalf each time that it is called,
         // which is why we have assurance that there will not be a uuid
         // collision, resulting in a rejection.
-        let uuid = send_assignment(&test_server, assignment);
+        let uuid = send_assignment(&test_server, &assignment);
         monitor_assignment(&test_server, &uuid, TaskStatus::Complete);
     }
 
@@ -1139,12 +1135,13 @@ mod tests {
     //              as "Failed(HTTPStatusCode(NotFound))".
     #[test]
     fn object_not_found() {
-        let (test_server, assignment) = unit_test_init("test/agent/areacodes");
+        let test_server = unit_test_init();
+        let mut assignment = create_assignment(MANTA_SRC_DIR);
 
         // Rename the object id to something that we know is not on the storage
         // server.  In this case, a file by the name of "abc".
-        assignment.write().unwrap().tasks[0].object_id = "abc".to_string();
-        let uuid = send_assignment(&test_server, assignment);
+        assignment[0].object_id = "abc".to_string();
+        let uuid = send_assignment(&test_server, &assignment);
         monitor_assignment(
             &test_server,
             &uuid,
@@ -1168,13 +1165,14 @@ mod tests {
     //              as Failed("MD5Mismatch").
     #[test]
     fn failed_checksum() {
-        let (test_server, assignment) = unit_test_init("test/agent/areacodes");
+        let test_server = unit_test_init();
+        let mut assignment = create_assignment(MANTA_SRC_DIR);
 
         // Scribble on the checksum information for the object.  This ensures
         // that it will fail at the end, even though the agent calculates it
         // correctly.
-        assignment.write().unwrap().tasks[0].md5sum = "abc".to_string();
-        let uuid = send_assignment(&test_server, assignment);
+        assignment[0].md5sum = "abc".to_string();
+        let uuid = send_assignment(&test_server, &assignment);
         monitor_assignment(
             &test_server,
             &uuid,
@@ -1194,8 +1192,9 @@ mod tests {
     #[test]
     fn duplicate_assignment() {
         // Download a file once.
-        let (test_server, assignment) = unit_test_init("test/agent/areacodes");
-        let uuid = send_assignment(&test_server, Arc::clone(&assignment));
+        let test_server = unit_test_init();
+        let assignment = create_assignment(MANTA_SRC_DIR);
+        let uuid = send_assignment(&test_server, &assignment);
         monitor_assignment(&test_server, &uuid, TaskStatus::Complete);
 
         // Send the exact same assignment again and send it, although this time,
@@ -1203,7 +1202,7 @@ mod tests {
         // StatusCode::CONFLICT (409) from the server this time.
         send_assignment_impl(
             &test_server,
-            assignment,
+            &assignment,
             &uuid,
             StatusCode::CONFLICT,
         );
