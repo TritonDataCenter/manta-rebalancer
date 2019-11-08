@@ -474,7 +474,7 @@ impl EvacuateJob {
         {
             Some(a) => {
                 a.state = state;
-                info!("Done processing assignment {}", &a.id);
+                info!("Set assignment state to {:?} for {}", a.state, a.id);
             }
             None => {
                 let msg = format!(
@@ -2147,12 +2147,16 @@ fn metadata_update_worker(
                 Steal::Empty => break,
             };
 
+            info!("Updating metadata for assignment: {}", assignment.id);
+
             let mut updated_objects = vec![];
             let dest_shark = &assignment.dest_shark;
             let objects = job_action.load_assignment_objects(
                 &assignment.id,
                 EvacuateObjectStatus::PostProcessing,
             );
+
+            trace!("Updating metadata for {} objects", objects.len());
 
             for obj in objects {
                 let etag = obj.etag.clone();
@@ -2174,11 +2178,16 @@ fn metadata_update_worker(
                 }
                 let shard = obj.shard as u32;
 
+                trace!("Getting client for shard {}", shard);
                 // We can't use or_insert_with() here because in the event
                 // that client creation fails we want to handle that error.
                 let mclient = match client_hash.entry(shard) {
                     Occupied(entry) => entry.into_mut(),
                     Vacant(entry) => {
+                        debug!(
+                            "Client for shard {} does not exist, creating.",
+                            shard
+                        );
                         let client = match moray_client::create_client(
                             shard,
                             &job_action.domain_name,
@@ -2328,6 +2337,10 @@ fn start_metadata_update_broker(
                 // really no reason to queue up a new worker.
                 let total_jobs = pool.active_count() + pool.queued_count();
                 if total_jobs >= pool.max_count() {
+                    trace!(
+                        "Reached max thread count for pool not starting \
+                         new thread"
+                    );
                     continue;
                 }
 
@@ -2903,11 +2916,11 @@ mod tests {
         assert!(job_action.create_table().is_ok());
 
         let job_action = Arc::new(job_action);
-
         let mut test_objects = vec![];
-
         let mut g = StdThreadGen::new(10);
-        for _ in 0..50 {
+        let num_objects = 10000;
+
+        for _ in 0..num_objects {
             let mobj = MantaObject::arbitrary(&mut g);
             test_objects.push(mobj);
         }
