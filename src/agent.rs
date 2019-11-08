@@ -262,7 +262,9 @@ fn assignment_save(
             ],
         ) {
             Ok(_) => (),
-            Err(e) => panic!("Task insertion error: {}", e),
+            Err(e) => {
+                panic!("Task insertion error on assignment {}: {}", &uuid, e)
+            }
         };
     }
 
@@ -272,7 +274,7 @@ fn assignment_save(
         rusqlite::params![serde_json::to_vec(&stats).unwrap()],
     ) {
         Ok(_) => (),
-        Err(e) => panic!("Task insertion error: {}", e),
+        Err(e) => panic!("Task insertion error on assignment {}: {}", &uuid, e),
     };
 
     // Finally, kick off the transaction as a whole.  Up until this point,
@@ -859,6 +861,8 @@ mod tests {
 
     lazy_static! {
         static ref INITIALIZED: Mutex<bool> = Mutex::new(false);
+        static ref TEST_SERVER: Mutex<TestServer> =
+            Mutex::new(TestServer::new(router()).unwrap());
     }
 
     // Very basic web server used to serve out files upon request.  This is
@@ -871,7 +875,7 @@ mod tests {
     // requests for objects should look like:
     // GET /rebalancer/<object>.  To test with a wide variety of accounts, use
     // a real storage node.
-    fn simple_server() {
+    fn unit_test_init() {
         let mut init = INITIALIZED.lock().unwrap();
         if *init {
             return;
@@ -910,25 +914,21 @@ mod tests {
     // called directly, allowing the caller to supply those expectations in the
     // form of two additional arguments: the uuid of the assignment and the
     // desired http status code returned from the server.
-    fn send_assignment(test_server: &TestServer, tasks: &Vec<Task>) -> String {
+    fn send_assignment(tasks: &Vec<Task>) -> String {
         // Generate a uuid to accompany the assignment that we are about to
         // send to the agent.
         let uuid = Uuid::new_v4().to_hyphenated().to_string();
-        send_assignment_impl(test_server, tasks, &uuid, StatusCode::OK);
+        send_assignment_impl(tasks, &uuid, StatusCode::OK);
         uuid
     }
 
     // Utility that actually forms the request, sends it off to the test
     // server and verifies that it was received as intended.  Upon success,
     // return the uuid of the assignment which we will use to monitor progress.
-    fn send_assignment_impl(
-        test_server: &TestServer,
-        tasks: &Vec<Task>,
-        id: &str,
-        status: StatusCode,
-    ) {
+    fn send_assignment_impl(tasks: &Vec<Task>, id: &str, status: StatusCode) {
         let uuid = id.to_string();
         let obj: (String, Vec<Task>) = (uuid.clone(), tasks.to_vec());
+        let test_server = TEST_SERVER.lock().unwrap();
 
         // Finally, serialize the entire HashMap before stuffing it in the
         // message body.
@@ -979,7 +979,8 @@ mod tests {
     // likely be called repeatedly for a particular assignment until it is
     // observed that the number of tasks completed is equal to the total number
     // of tasks in the assignment.
-    fn get_progress(test_server: &TestServer, uuid: &str) -> Assignment {
+    fn get_progress(uuid: &str) -> Assignment {
+        let test_server = TEST_SERVER.lock().unwrap();
         let url = format!("http://localhost/assignments/{}", uuid);
         let response = test_server.client().get(url).perform().unwrap();
 
@@ -1001,9 +1002,9 @@ mod tests {
     // request will timeout causing a panic for a given test case anyway.  For
     // that reason, it is probably reasonable to allow this function to loop
     // indefinitely with the assumption that the agent is not hung.
-    fn monitor_progress(test_server: &TestServer, uuid: &str) -> Assignment {
+    fn monitor_progress(uuid: &str) -> Assignment {
         loop {
-            let assignment = get_progress(test_server, uuid);
+            let assignment = get_progress(uuid);
             thread::sleep(time::Duration::from_secs(10));
 
             // If we have finished processing all tasks, return the assignment
@@ -1020,13 +1021,9 @@ mod tests {
     // Given the uuid of a single assignment, monitor its progress until
     // it is complete.  Ensure that all tasks in the assignment have the
     // expected status at the end.
-    fn monitor_assignment(
-        test_server: &TestServer,
-        uuid: &str,
-        expected: TaskStatus,
-    ) {
+    fn monitor_assignment(uuid: &str, expected: TaskStatus) {
         // Wait for the assignment to complete.
-        let assignment = monitor_progress(test_server, &uuid);
+        let assignment = monitor_progress(&uuid);
         let stats = &assignment.stats;
 
         if let AgentAssignmentState::Complete(opt) = &stats.state {
@@ -1076,18 +1073,6 @@ mod tests {
         }
     }
 
-    // Utility function which is very frequently used to set up both the test
-    // server (the agent) as well as a simple web server (which acts as a
-    // storage node).  It only takes one argument which is the path of an
-    // assignment to load.  Functions called from unit_test_init() that do not
-    // succeed will panic, so there is no need to return anything other than the
-    // the test server and the newly loaded assignment.
-    fn unit_test_init() -> TestServer {
-        simple_server();
-        let test_server: TestServer = TestServer::new(router()).unwrap();
-        test_server
-    }
-
     // Test name:    Download
     // Description:  Download a healthy file from a storage node that the agent
     //               does not already have.
@@ -1096,10 +1081,10 @@ mod tests {
     //               should appear as "Complete".
     #[test]
     fn download() {
-        let test_server = unit_test_init();
+        unit_test_init();
         let assignment = create_assignment(MANTA_SRC_DIR);
-        let uuid = send_assignment(&test_server, &assignment);
-        monitor_assignment(&test_server, &uuid, TaskStatus::Complete);
+        let uuid = send_assignment(&assignment);
+        monitor_assignment(&uuid, TaskStatus::Complete);
     }
 
     // Test name:    Replace healthy
@@ -1112,10 +1097,10 @@ mod tests {
     #[test]
     fn replace_healthy() {
         // Download a file once.
-        let test_server = unit_test_init();
+        unit_test_init();
         let assignment = create_assignment(MANTA_SRC_DIR);
-        let uuid = send_assignment(&test_server, &assignment);
-        monitor_assignment(&test_server, &uuid, TaskStatus::Complete);
+        let uuid = send_assignment(&assignment);
+        monitor_assignment(&uuid, TaskStatus::Complete);
 
         // Send the exact same assignment again.  Note: Even though the contents
         // of this assignment are identical to the previous one, it will be
@@ -1124,8 +1109,8 @@ mod tests {
         // new random uuid on the callers behalf each time that it is called,
         // which is why we have assurance that there will not be a uuid
         // collision, resulting in a rejection.
-        let uuid = send_assignment(&test_server, &assignment);
-        monitor_assignment(&test_server, &uuid, TaskStatus::Complete);
+        let uuid = send_assignment(&assignment);
+        monitor_assignment(&uuid, TaskStatus::Complete);
     }
 
     // Test name:   Client Error.
@@ -1135,15 +1120,14 @@ mod tests {
     //              as "Failed(HTTPStatusCode(NotFound))".
     #[test]
     fn object_not_found() {
-        let test_server = unit_test_init();
+        unit_test_init();
         let mut assignment = create_assignment(MANTA_SRC_DIR);
 
         // Rename the object id to something that we know is not on the storage
         // server.  In this case, a file by the name of "abc".
         assignment[0].object_id = "abc".to_string();
-        let uuid = send_assignment(&test_server, &assignment);
+        let uuid = send_assignment(&assignment);
         monitor_assignment(
-            &test_server,
             &uuid,
             TaskStatus::Failed(ObjectSkippedReason::HTTPStatusCode(
                 reqwest::StatusCode::NOT_FOUND.into(),
@@ -1165,16 +1149,15 @@ mod tests {
     //              as Failed("MD5Mismatch").
     #[test]
     fn failed_checksum() {
-        let test_server = unit_test_init();
+        unit_test_init();
         let mut assignment = create_assignment(MANTA_SRC_DIR);
 
         // Scribble on the checksum information for the object.  This ensures
         // that it will fail at the end, even though the agent calculates it
         // correctly.
         assignment[0].md5sum = "abc".to_string();
-        let uuid = send_assignment(&test_server, &assignment);
+        let uuid = send_assignment(&assignment);
         monitor_assignment(
-            &test_server,
             &uuid,
             TaskStatus::Failed(ObjectSkippedReason::MD5Mismatch),
         );
@@ -1192,19 +1175,14 @@ mod tests {
     #[test]
     fn duplicate_assignment() {
         // Download a file once.
-        let test_server = unit_test_init();
+        unit_test_init();
         let assignment = create_assignment(MANTA_SRC_DIR);
-        let uuid = send_assignment(&test_server, &assignment);
-        monitor_assignment(&test_server, &uuid, TaskStatus::Complete);
+        let uuid = send_assignment(&assignment);
+        monitor_assignment(&uuid, TaskStatus::Complete);
 
         // Send the exact same assignment again and send it, although this time,
         // we will reuse our first uuid. We expect to receive a status code of
         // StatusCode::CONFLICT (409) from the server this time.
-        send_assignment_impl(
-            &test_server,
-            &assignment,
-            &uuid,
-            StatusCode::CONFLICT,
-        );
+        send_assignment_impl(&assignment, &uuid, StatusCode::CONFLICT);
     }
 }
