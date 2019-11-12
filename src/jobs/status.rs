@@ -80,7 +80,6 @@ pub fn list_jobs() -> Result<Vec<String>, StatusError> {
             return Err(StatusError::Unknown);
         }
     };
-
     let mut ret = vec![];
 
     for db in db_list {
