@@ -8,61 +8,17 @@
  * Copyright 2019, Joyent, Inc.
  */
 
-use crate::error::Error;
-
 use std::io;
 use std::sync::Mutex;
 use std::thread;
 
 use clap::{crate_name, crate_version};
-use diesel::pg::PgConnection;
-use diesel::prelude::*;
-use diesel::sql_query;
 
 use slog::{o, Drain, Logger};
 
-static DB_URL: &str = "postgres://postgres:postgres@";
+pub static MIN_HTTP_STATUS_CODE: u16 = 100;
+pub static MAX_HTTP_STATUS_CODE: u16 = 600;
 
-pub fn connect_db(db_name: &str) -> Result<PgConnection, Error> {
-    let connect_url = format!("{}/{}", DB_URL, db_name);
-    PgConnection::establish(&connect_url).map_err(Error::from)
-}
-
-pub fn create_db(db_name: &str) -> Result<usize, Error> {
-    let create_query = format!("CREATE DATABASE \"{}\"", db_name);
-    let conn = PgConnection::establish(&DB_URL)?;
-
-    conn.execute(&create_query).map_err(Error::from)
-}
-
-table! {
-    use diesel::sql_types::Text;
-    pg_database (datname) {
-        datname -> Text,
-    }
-}
-
-#[derive(QueryableByName, Debug)]
-#[table_name = "pg_database"]
-struct PgDatabase {
-    datname: String,
-}
-
-pub fn list_databases() -> Result<Vec<String>, Error> {
-    let list_query = "SELECT datname FROM pg_database";
-    let conn = PgConnection::establish(&DB_URL)?;
-
-    //let ret: Result<Vec<String>, Error> = sql_query(list_query)
-    sql_query(list_query)
-        .load::<PgDatabase>(&conn)
-        .map(|res| res.iter().map(|r| r.datname.clone()).collect())
-        .map_err(Error::from)
-}
-
-pub fn create_and_connect_db(db_name: &str) -> Result<PgConnection, Error> {
-    create_db(db_name)?;
-    connect_db(db_name)
-}
 
 pub fn create_bunyan_logger<W>(io: W) -> Logger
 where

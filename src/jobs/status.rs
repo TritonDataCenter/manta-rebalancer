@@ -10,7 +10,7 @@
 
 use super::evacuate::EvacuateObjectStatus;
 use crate::error::Error;
-use crate::util;
+use crate::pg_db;
 
 use std::str::FromStr;
 
@@ -24,7 +24,7 @@ pub fn get_status(uuid: Uuid) -> Result<(), Error> {
     let db_name = uuid.to_string();
     let mut total_count = 0;
 
-    let conn = match util::connect_db(&db_name) {
+    let conn = match pg_db::connect_db(&db_name) {
         Ok(c) => c,
         Err(e) => {
             println!(
@@ -54,7 +54,7 @@ pub fn get_status(uuid: Uuid) -> Result<(), Error> {
 }
 
 pub fn list_jobs() -> Result<(), Error> {
-    let db_list = util::list_databases()?;
+    let db_list = pg_db::list_databases()?;
 
     for db in db_list {
         if let Ok(job_id) = Uuid::from_str(&db) {
@@ -69,7 +69,7 @@ pub fn list_jobs() -> Result<(), Error> {
 mod tests {
     use super::*;
     use crate::jobs::evacuate::{self, EvacuateObject};
-    use crate::util;
+    use crate::pg_db;
     use quickcheck::{Arbitrary, StdThreadGen};
 
     static NUM_OBJS: u32 = 200;
@@ -95,7 +95,7 @@ mod tests {
         let mut g = StdThreadGen::new(10);
         let mut obj_vec = vec![];
 
-        let conn = util::create_and_connect_db(&uuid.to_string()).unwrap();
+        let conn = pg_db::create_and_connect_db(&uuid.to_string()).unwrap();
         evacuate::create_evacuateobjects_table(&conn).unwrap();
 
         for _ in 0..NUM_OBJS {

@@ -17,7 +17,8 @@ use crate::jobs::{
 };
 use crate::moray_client;
 use crate::picker::{self as mod_picker, SharkSource, StorageNode};
-use crate::util;
+use crate::pg_db;
+use crate::util::{MIN_HTTP_STATUS_CODE, MAX_HTTP_STATUS_CODE};
 
 use std::collections::hash_map::Entry::{Occupied, Vacant};
 use std::collections::HashMap;
@@ -181,7 +182,7 @@ pub fn create_evacuateobjects_table(
         }
     }
 
-    for code in 100..600 {
+    for code in MIN_HTTP_STATUS_CODE..MAX_HTTP_STATUS_CODE {
         let reason = format!(
             "{{{}:{}}}",
             // This value doesn't matter.  The to_string() method only
@@ -379,7 +380,7 @@ impl EvacuateJob {
         db_name: &str,
         max_objects: Option<u32>,
     ) -> Self {
-        let conn = match util::create_and_connect_db(db_name) {
+        let conn = match pg_db::create_and_connect_db(db_name) {
             Ok(c) => c,
             Err(e) => {
                 println!("Error creating Evacuate Job: {}", e);
