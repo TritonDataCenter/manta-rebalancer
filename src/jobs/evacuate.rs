@@ -16,9 +16,9 @@ use crate::jobs::{
     ObjectSkippedReason, StorageId, Task, TaskStatus,
 };
 use crate::moray_client;
-use crate::picker::{self as mod_picker, SharkSource, StorageNode};
 use crate::pg_db;
-use crate::util::{MIN_HTTP_STATUS_CODE, MAX_HTTP_STATUS_CODE};
+use crate::picker::{self as mod_picker, SharkSource, StorageNode};
+use crate::util::{MAX_HTTP_STATUS_CODE, MIN_HTTP_STATUS_CODE};
 
 use std::collections::hash_map::Entry::{Occupied, Vacant};
 use std::collections::HashMap;
@@ -358,7 +358,6 @@ pub struct EvacuateJob {
     // TODO: Maximum total size of objects to include in a single assignment.
 
     // TODO: max number of shark threads
-
     pub conn: Mutex<PgConnection>,
 
     /// domain_name of manta deployment
