@@ -94,7 +94,7 @@ impl Agent {
 
     pub fn run(addr: &'static str) {
         info!("Listening for requests at {}", addr);
-        gotham::start(addr, router());
+        gotham::start(addr, router(process_task));
     }
 
     // Given an assignment uuid, check for its presence in both the "scheduled"
@@ -657,6 +657,13 @@ fn download(
     }
 }
 
+// As soon as the test code in the rebalancer zone uses the Gotham API to
+// create a TestServer, the desired function for processing tasks can be
+// passed in as an argument to router() and the agent can be run on a separate
+// thread within the same process as the actual test code in the zone.  Until
+// then, it relies on an external agent running in a separate process, built
+// with the alway_pass feature enabled.  Once we move to a model where it
+// uses TestSever though, this function can go away.
 #[cfg(feature = "always_pass")]
 fn process_task(task: &mut Task) {
     task.set_status(TaskStatus::Complete);
@@ -731,7 +738,11 @@ fn assignment_get(
 // intention of modifying it and further, the same thread invoking this function
 // is the only one that will clean up the assignment when we have finished
 // processing it, by calling `assignment_complete()'.
-fn process_assignment(assignments: Arc<Mutex<Assignments>>, uuid: String) {
+fn process_assignment(
+    assignments: Arc<Mutex<Assignments>>,
+    uuid: String,
+    f: fn(&mut Task),
+) {
     // If we are unsuccessful in loading the assignment from disk, there is
     // nothing left to do here, other than return.
     if let Err(e) = load_saved_assignment(&assignments, &uuid) {
@@ -765,7 +776,7 @@ fn process_assignment(assignments: Arc<Mutex<Assignments>>, uuid: String) {
         };
 
         // Process it.
-        process_task(&mut t);
+        f(&mut t);
 
         // Grab the write lock on the assignment.  It will only be held until
         // the end of the loop (which is not for very long).
@@ -801,7 +812,7 @@ fn process_assignment(assignments: Arc<Mutex<Assignments>>, uuid: String) {
 }
 
 /// Create a `Router`
-fn router() -> Router {
+fn router(f: fn(&mut Task)) -> Router {
     build_simple_router(|route| {
         let (w, r): (mpsc::Sender<String>, mpsc::Receiver<String>) =
             mpsc::channel();
@@ -824,7 +835,7 @@ fn router() -> Router {
                         return;
                     }
                 };
-                process_assignment(Arc::clone(&assignments), uuid);
+                process_assignment(Arc::clone(&assignments), uuid, f);
             });
         }
 
@@ -862,7 +873,7 @@ mod tests {
     lazy_static! {
         static ref INITIALIZED: Mutex<bool> = Mutex::new(false);
         static ref TEST_SERVER: Mutex<TestServer> =
-            Mutex::new(TestServer::new(router()).unwrap());
+            Mutex::new(TestServer::new(router(process_task)).unwrap());
     }
 
     // Very basic web server used to serve out files upon request.  This is
