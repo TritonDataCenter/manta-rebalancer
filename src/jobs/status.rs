@@ -19,20 +19,20 @@ use inflector::cases::titlecase::to_title_case;
 use strum::IntoEnumIterator;
 use uuid::Uuid;
 
-pub fn get_status(uuid: Uuid) -> Result<(), Error> {
+pub fn get_status(uuid: Uuid) -> Result<String, String> {
     use super::evacuate::evacuateobjects::dsl::*;
     let db_name = uuid.to_string();
     let mut total_count = 0;
+    let mut ret = String::new();
 
     let conn = match pg_db::connect_db(&db_name) {
         Ok(c) => c,
         Err(e) => {
-            println!(
+            return Err(format!(
                 "Error connecting to database ({}).  Is this a valid Job \
                  UUID: {}?",
                 e, db_name
-            );
-            return Err(e);
+            ));
         }
     };
 
@@ -44,25 +44,31 @@ pub fn get_status(uuid: Uuid) -> Result<(), Error> {
     for status_value in EvacuateObjectStatus::iter() {
         let count = status_vec.iter().filter(|s| *s == &status_value).count();
 
-        println!("{}: {}", to_title_case(&status_value.to_string()), count);
+        ret = format!("{}{}: {}\n",
+            ret,
+            to_title_case(&status_value.to_string()),
+            count
+        );
+
         total_count += count;
     }
 
-    println!("Total: {}", total_count);
+    ret = format!("{}Total: {}\n", ret, total_count);
 
-    Ok(())
+    Ok(ret)
 }
 
-pub fn list_jobs() -> Result<(), Error> {
+pub fn list_jobs() -> Result<String, Error> {
     let db_list = pg_db::list_databases()?;
+    let mut ret = String::new();
 
     for db in db_list {
         if let Ok(job_id) = Uuid::from_str(&db) {
-            println!("{}", job_id);
+            ret = format!("{}{}\n", ret, job_id);
         }
     }
 
-    Ok(())
+    Ok(ret)
 }
 
 #[cfg(test)]

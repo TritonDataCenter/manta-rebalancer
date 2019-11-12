@@ -25,14 +25,22 @@ fn main() -> Result<(), Error> {
         SubCommand::Server => Ok(()),
         SubCommand::DoJob(job) => job.run(),
         SubCommand::Status(uuid) => match status::get_status(uuid) {
-            Ok(_) => Ok(()),
-            Err(_) => {
+            Ok(status_report) => {
+                println!("{}", status_report);
+                Ok(())
+            },
+            Err(e) => {
+                println!("{}", e);
                 std::process::exit(1);
             }
         },
         SubCommand::JobList => match status::list_jobs() {
-            Ok(_) => Ok(()),
-            Err(_) => {
+            Ok(list) => {
+                println!("{}", list);
+                Ok(())
+            },
+            Err(e) => {
+                println!("{}", e);
                 std::process::exit(1);
             }
         },
