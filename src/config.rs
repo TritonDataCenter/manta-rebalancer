@@ -86,7 +86,6 @@ pub struct Command {
 }
 
 impl Command {
-
     pub fn new() -> Result<Command, Error> {
         let mut subcommand = SubCommand::Server;
 
