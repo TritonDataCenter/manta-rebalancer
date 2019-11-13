@@ -4,17 +4,17 @@ extern crate gotham_derive;
 #[macro_use]
 extern crate serde_derive;
 
+use remora::{info, log_impl, util, warn};
 use std::collections::HashMap;
+use std::string::ToString;
 
-use remora::config;
+use remora::config::{self, Config};
 use remora::jobs::{self, JobAction};
 
 use crossbeam_channel;
 use futures::{future, Future, Stream};
-use gotham::handler::{
-    Handler, HandlerFuture, IntoHandlerError, IntoResponse, NewHandler,
-};
-use gotham::helpers::http::response::create_response;
+use gotham::handler::{Handler, HandlerFuture, IntoHandlerError, NewHandler};
+use gotham::helpers::http::response::{create_empty_response, create_response};
 use gotham::router::builder::{
     build_simple_router, DefineSingleRoute, DrawRoutes,
 };
@@ -23,6 +23,7 @@ use gotham::state::{FromState, State};
 use hyper::{Body, Response, StatusCode};
 use libmanta::moray::MantaObjectShark;
 use remora::jobs::evacuate::EvacuateJob;
+use remora::jobs::status::StatusError;
 use threadpool::ThreadPool;
 use uuid::Uuid;
 
@@ -43,41 +44,95 @@ struct JobList {
     jobs: Vec<String>,
 }
 
-impl IntoResponse for JobStatus {
-    fn into_response(self, state: &State) -> Response<Body> {
-        create_response(
+fn bad_request(state: &State, msg: String) -> Response<Body> {
+    warn!("{}", msg);
+    create_response(state, StatusCode::BAD_REQUEST, mime::APPLICATION_JSON, msg)
+}
+
+fn invalid_server_error(state: &State, msg: String) -> Response<Body> {
+    remora::error!("{}", msg);
+    create_response(
+        state,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        mime::APPLICATION_JSON,
+        msg,
+    )
+}
+
+fn get_job(mut state: State) -> (State, Response<Body>) {
+    info!("Get Job Request");
+    let get_job_params = GetJobParams::take_from(&mut state);
+    let uuid = match Uuid::parse_str(&get_job_params.uuid) {
+        Ok(id) => id,
+        Err(e) => {
+            let msg = format!("Invalid UUID: {}", e);
+            let ret = bad_request(&state, msg);
+            return (state, ret);
+        }
+    };
+
+    let status = match jobs::status::get_status(uuid) {
+        Ok(s) => s,
+        Err(e) => {
+            let ret: Response<Body>;
+            match e {
+                StatusError::DBExists => {
+                    ret = bad_request(
+                        &state,
+                        format!("Could not find job UUID: {}", uuid),
+                    );
+                }
+                StatusError::LookupError => {
+                    ret = invalid_server_error(
+                        &state,
+                        String::from("Job Database Error"),
+                    );
+                }
+            }
+            return (state, ret);
+        }
+    };
+
+    let response = match serde_json::to_string(&status) {
+        Ok(status) => create_response(
             &state,
             StatusCode::OK,
             mime::APPLICATION_JSON,
-            serde_json::to_string(&self).expect("serialized Job Status"),
-        )
-    }
-}
-
-fn get_job(mut state: State) -> (State, JobStatus) {
-    let get_job_params = GetJobParams::take_from(&mut state);
-    let uuid = Uuid::parse_str(&get_job_params.uuid).expect("valid uuid");
-    let status = jobs::status::get_status(uuid).expect("valid job");
-
-    let response = JobStatus { status };
+            status,
+        ),
+        Err(e) => {
+            let msg = format!("Error Getting Job Status: {}", e);
+            invalid_server_error(&state, msg)
+        }
+    };
 
     (state, response)
 }
 
-impl IntoResponse for JobList {
-    fn into_response(self, state: &State) -> Response<Body> {
-        create_response(
-            &state,
-            StatusCode::OK,
-            mime::APPLICATION_JSON,
-            serde_json::to_string(&self).expect("serialized Job Status"),
-        )
-    }
-}
-
-fn list_jobs(state: State) -> (State, JobList) {
-    let response = JobList {
-        jobs: jobs::status::list_jobs().unwrap(),
+fn list_jobs(state: State) -> (State, Response<Body>) {
+    info!("List Jobs Request");
+    let response = match jobs::status::list_jobs() {
+        Ok(list) => {
+            let jobs = match serde_json::to_string(&list) {
+                Ok(j) => j,
+                Err(e) => {
+                    let msg = format!("Error Getting Job List: {}", e);
+                    let ret = invalid_server_error(&state, msg);
+                    return (state, ret);
+                }
+            };
+            create_response(
+                &state,
+                StatusCode::OK,
+                mime::APPLICATION_JSON,
+                jobs,
+            )
+        }
+        Err(e) => {
+            let msg = format!("Error Getting Job List: {}", e);
+            let ret = invalid_server_error(&state, msg);
+            return (state, ret);
+        }
     };
 
     (state, response)
@@ -109,6 +164,7 @@ struct EvacuateJobPayload {
 #[derive(Clone)]
 struct JobCreateHandler {
     tx: crossbeam_channel::Sender<jobs::Job>,
+    config: Config,
 }
 
 impl NewHandler for JobCreateHandler {
@@ -121,34 +177,50 @@ impl NewHandler for JobCreateHandler {
 
 impl Handler for JobCreateHandler {
     fn handle(self, mut state: State) -> Box<HandlerFuture> {
-        // TODO:  config parsing should be done when the process starts
-        let config = config::Config::parse_config(None).expect("Config parse");
-        let mut job = jobs::Job::new(config.clone());
+        info!("Post Job Request");
+        let mut job = jobs::Job::new(self.config.clone());
         let job_uuid = job.get_id().to_string();
 
         let f =
             Body::take_from(&mut state).concat2().then(
                 move |body| match body {
                     Ok(valid_body) => {
-                        let payload: JobPayload =
-                            serde_json::from_slice(&valid_body.into_bytes())
-                                .expect("Bad Payload");
-                        future::ok(payload)
+                        match serde_json::from_slice::<JobPayload>(
+                            &valid_body.into_bytes(),
+                        ) {
+                            Ok(jp) => future::ok(jp),
+                            Err(e) => future::err(e.into_handler_error()),
+                        }
                     }
                     Err(e) => future::err(e.into_handler_error()),
                 },
             );
 
-        let payload = f.wait().expect("Bad payload");
+        let payload = match f.wait() {
+            Ok(p) => p,
+            Err(e) => {
+                return Box::new(future::err((state, e)));
+            }
+        };
+
         let ret = match payload.action {
             JobActionPayload::Evacuate(evac_payload) => {
                 let domain_name = evac_payload
                     .domain_name
-                    .unwrap_or_else(|| config.domain_name.clone());
+                    .unwrap_or_else(|| self.config.domain_name.clone());
                 let max_objects = match evac_payload.max_objects {
                     Some(str_val) => {
                         // TODO
-                        let val: u32 = str_val.parse().expect("max obj parse");
+                        let val: u32 = match str_val.parse() {
+                            Ok(v) => v,
+                            Err(_) => {
+                                let ret = create_empty_response(
+                                    &state,
+                                    StatusCode::UNPROCESSABLE_ENTITY,
+                                );
+                                return Box::new(future::ok((state, ret)));
+                            }
+                        };
 
                         if val == 0 {
                             None
@@ -161,7 +233,7 @@ impl Handler for JobCreateHandler {
                     }
                 };
 
-                let from_shark = evac_payload.from_shark;
+                let from_shark = evac_payload.from_shark.clone();
                 let job_action =
                     JobAction::Evacuate(Box::new(EvacuateJob::new(
                         from_shark,
@@ -171,7 +243,11 @@ impl Handler for JobCreateHandler {
                     )));
 
                 job.add_action(job_action);
-                self.tx.send(job).expect("Send job to threadpool");
+
+                if let Err(e) = self.tx.send(job) {
+                    panic!("Tx error: {}", e);
+                }
+
                 create_response(
                     &state,
                     StatusCode::OK,
@@ -185,9 +261,9 @@ impl Handler for JobCreateHandler {
     }
 }
 
-fn router() -> Router {
+fn router(config: Config) -> Router {
     let (tx, rx) = crossbeam_channel::bounded(5);
-    let job_create_handler = JobCreateHandler { tx };
+    let job_create_handler = JobCreateHandler { tx, config };
 
     let pool = ThreadPool::new(THREAD_COUNT);
     for _ in 0..THREAD_COUNT {
@@ -200,7 +276,12 @@ fn router() -> Router {
                     return;
                 }
             };
-            job.run().expect("bad job run");
+            // This blocks until the job is complete.  If the user want's to
+            // see the status of the job, they can issue a request to:
+            //      /jobs/<job uuid>
+            if let Err(e) = job.run() {
+                warn!("Error running job: {}", e);
+            }
         });
     }
 
@@ -217,20 +298,46 @@ fn router() -> Router {
 }
 
 fn main() {
+    let _guard = util::init_global_logger();
     let addr = "0.0.0.0:8888";
 
-    gotham::start(addr, router())
+    let config = config::Config::parse_config(None)
+        .map_err(|e| {
+            remora::error!("Error parsing config: {}", e);
+            std::process::exit(1);
+        })
+        .unwrap();
+
+    gotham::start(addr, router(config))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use gotham::test::TestServer;
-    use remora::util;
+    use lazy_static::lazy_static;
+    use std::sync::Mutex;
+
+    lazy_static! {
+        static ref INITIALIZED: Mutex<bool> = Mutex::new(false);
+    }
+
+    fn unit_test_init() {
+        let mut init = INITIALIZED.lock().unwrap();
+        if *init {
+            return;
+        }
+
+        let _guard = util::init_global_logger();
+
+        *init = true;
+    }
 
     #[test]
     fn basic() {
-        let test_server = TestServer::new(router()).unwrap();
+        unit_test_init();
+        let config = Config::parse_config(Some("src/config.json")).unwrap();
+        let test_server = TestServer::new(router(config)).unwrap();
 
         let response = test_server
             .client()
@@ -256,8 +363,9 @@ mod tests {
 
     #[test]
     fn post_test() {
-        let _guard = util::init_global_logger();
-        let test_server = TestServer::new(router()).unwrap();
+        unit_test_init();
+        let config = Config::parse_config(Some("src/config.json")).unwrap();
+        let test_server = TestServer::new(router(config)).unwrap();
         let action_payload = EvacuateJobPayload {
             domain_name: Some(String::from("fake.joyent.us")),
             from_shark: MantaObjectShark {
