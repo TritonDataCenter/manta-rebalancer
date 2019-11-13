@@ -93,7 +93,9 @@ fn get_job(mut state: State) -> (State, Response<Body>) {
         }
     };
 
-    let response = match serde_json::to_string(&status) {
+    let job_status = JobStatus { status };
+
+    let response = match serde_json::to_string(&job_status) {
         Ok(status) => create_response(
             &state,
             StatusCode::OK,
@@ -113,7 +115,8 @@ fn list_jobs(state: State) -> (State, Response<Body>) {
     info!("List Jobs Request");
     let response = match jobs::status::list_jobs() {
         Ok(list) => {
-            let jobs = match serde_json::to_string(&list) {
+            let job_list = JobList { jobs: list };
+            let jobs = match serde_json::to_string(&job_list) {
                 Ok(j) => j,
                 Err(e) => {
                     let msg = format!("Error Getting Job List: {}", e);
@@ -317,6 +320,7 @@ mod tests {
     use gotham::test::TestServer;
     use lazy_static::lazy_static;
     use std::sync::Mutex;
+    use std::thread;
 
     lazy_static! {
         static ref INITIALIZED: Mutex<bool> = Mutex::new(false);
@@ -328,7 +332,10 @@ mod tests {
             return;
         }
 
-        let _guard = util::init_global_logger();
+        thread::spawn(move || {
+            let _guard = util::init_global_logger();
+            loop {}
+        });
 
         *init = true;
     }
@@ -348,7 +355,7 @@ mod tests {
         let jobs_ret = response.read_body().unwrap();
         let job_list: JobList = serde_json::from_slice(&jobs_ret).unwrap();
 
-        println!("{:#?}", job_list);
+        println!("Retun value: {:#?}", job_list);
 
         let get_this_job = job_list.jobs[0].clone();
         let get_job_uri =
