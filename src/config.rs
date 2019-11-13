@@ -21,6 +21,8 @@ use crate::moray_client;
 use crate::util;
 use uuid::Uuid;
 
+static DEFAULT_CONFIG_PATH: &str = "/var/tmp/config.json";
+
 #[derive(Deserialize, Default, Debug, Clone)]
 pub struct Shard {
     pub host: String,
@@ -59,6 +61,15 @@ impl Config {
             shard_num
         })
     }
+
+    pub fn parse_config(config_path: Option<&str>) -> Result<Config, Error> {
+        let config_path = config_path.unwrap_or(DEFAULT_CONFIG_PATH);
+        let file = File::open(config_path)?;
+        let reader = BufReader::new(file);
+        let config: Config = serde_json::from_reader(reader)?;
+
+        Ok(config)
+    }
 }
 
 pub enum SubCommand {
@@ -75,13 +86,6 @@ pub struct Command {
 }
 
 impl Command {
-    pub fn parse_config(config_path: &str) -> Result<Config, Error> {
-        let file = File::open(config_path)?;
-        let reader = BufReader::new(file);
-        let config: Config = serde_json::from_reader(reader)?;
-
-        Ok(config)
-    }
 
     pub fn new() -> Result<Command, Error> {
         let mut subcommand = SubCommand::Server;
@@ -199,7 +203,7 @@ impl Command {
         let config_file = matches
             .value_of("config_file")
             .expect("Missing config file name");
-        let config = Command::parse_config(config_file)?;
+        let config = Config::parse_config(Some(config_file))?;
 
         if matches.is_present("server") {
             subcommand = SubCommand::Server;
