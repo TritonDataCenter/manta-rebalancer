@@ -811,8 +811,9 @@ fn process_assignment(
     assignment_complete(assignments, uuid);
 }
 
-/// Create a `Router`
-fn router(f: fn(&mut Task)) -> Router {
+// Create a `Router`.  This function is public because it will have external
+// consumers, namely the rebalancer zone test framework.
+pub fn router(f: fn(&mut Task)) -> Router {
     build_simple_router(|route| {
         let (w, r): (mpsc::Sender<String>, mpsc::Receiver<String>) =
             mpsc::channel();
