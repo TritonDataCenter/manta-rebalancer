@@ -116,7 +116,7 @@ impl Default for JobActionPayload {
 
 #[derive(Serialize, Deserialize, Default)]
 struct EvacuateJobPayload {
-    from_shark: String,
+    from_shark: MantaObjectShark,
     domain_name: Option<String>,
     max_objects: Option<String>,
 }
@@ -258,10 +258,13 @@ impl Handler for JobCreateHandler {
 
                 // TODO: We are temporarily faking a shark for
                 // testing
+                let shark = evac_payload.from_shark;
+                /*
                 let shark = MantaObjectShark {
                     manta_storage_id: evac_payload.from_shark.clone(),
                     datacenter: String::from("Somefakedc"),
                 };
+                */
                 /*
                 let shark moray_client::get_manta_object_shark (
                     &evac_payload.from_shark,
@@ -366,7 +369,10 @@ mod tests {
         let test_server = TestServer::new(router()).unwrap();
         let action_payload = EvacuateJobPayload {
             domain_name: Some(String::from("fake.joyent.us")),
-            from_shark: String::from("fake_shark"),
+            from_shark: MantaObjectShark {
+                manta_storage_id: String::from("fake_storage_id"),
+                datacenter: String::from("fake_datacenter"),
+            },
             max_objects: None,
         };
 
@@ -395,8 +401,5 @@ mod tests {
         }
         let ret = response.read_utf8_body().unwrap();
         println!("{:#?}", ret);
-
-        //let pretty_response: String = serde_json::from_slice(&ret).unwrap();
-        //println!("{:#?}", pretty_response);
     }
 }
