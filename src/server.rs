@@ -8,8 +8,6 @@ use std::collections::HashMap;
 
 use remora::config;
 use remora::jobs::{self, JobAction};
-use remora::moray_client;
-use remora::util;
 
 use crossbeam_channel;
 use futures::{future, Future, Stream};
@@ -85,19 +83,6 @@ fn list_jobs(state: State) -> (State, JobList) {
     (state, response)
 }
 
-/*
-fn create_job(mut state: State) -> (State, String) {
-    let request = Body::take_from(&mut state);
-
-
-    config::Config::parse_config(None)
-
-    (state, Uuid::new_v4().to_string())
-
-}
-*/
-
-// TODO this needs to change to be more accomodating for future jobs.
 #[derive(Serialize, Deserialize, Default)]
 struct JobPayload {
     action: JobActionPayload,
@@ -134,86 +119,6 @@ impl NewHandler for JobCreateHandler {
     }
 }
 
-/*
-impl Handler for JobCreateHandler {
-    fn handle(self, mut state: State) -> Box<HandlerFuture> {
-        // TODO:  config parsing should be done when the process starts
-        let config = config::Config::parse_config(None).expect("Config parse");
-        let mut job = jobs::Job::new(config.clone());
-        let job_uuid = job.get_id().to_string();
-
-        let f = Body::take_from(&mut state)
-            .concat2()
-            .then(move |body| match body {
-                Ok(valid_body) => {
-                    let payload:JobPayload = serde_json::from_slice(&valid_body
-                        .into_bytes()).expect("Bad Payload");
-
-                    match payload.action {
-                        JobActionPayload::Evacuate(evac_payload) => {
-                            let domain_name = evac_payload.domain_name
-                                .unwrap_or(config.domain_name.clone());
-                            let max_objects = match evac_payload.max_objects {
-                                Some(str_val) => {
-
-                                    // TODO
-                                    let val: u32 = str_val.parse().expect
-                                    ("max obj parse");
-
-                                    if val == 0 {
-                                        None
-                                    } else {
-                                        Some(val)
-                                    }
-                                },
-                                None => {
-                                    Some(10) // Default
-                                }
-                            };
-
-                            // TODO: We are temporarily faking a shark for
-                            // testing
-                            let shark = MantaObjectShark {
-                                manta_storage_id: evac_payload
-                                    .from_shark.clone(),
-                                datacenter: String::from
-                                    ("Somefakedc")
-
-                            };
-                            /*
-                            let shark moray_client::get_manta_object_shark (
-                                &evac_payload.from_shark,
-                                &domain_name).expect("get shark");
-                            */
-
-                            let job_action = JobAction::Evacuate(
-                                Box::new(EvacuateJob::new(
-
-                                    shark,
-                                    &domain_name,
-                                    &job_uuid,
-                                    max_objects,
-                                )));
-
-                            job.add_action(job_action);
-                            self.tx.send(job).expect("Send job to threadpool");
-                            let res = create_response(
-                                &state,
-                                StatusCode::OK,
-                                mime::APPLICATION_JSON,
-                                job_uuid
-                            );
-                            future::ok((state, res))
-                        }
-                    }
-                },
-                Err(e) => future::err((state, e.into_handler_error())),
-            });
-        Box::new(f)
-    }
-}
-*/
-
 impl Handler for JobCreateHandler {
     fn handle(self, mut state: State) -> Box<HandlerFuture> {
         // TODO:  config parsing should be done when the process starts
@@ -239,7 +144,7 @@ impl Handler for JobCreateHandler {
             JobActionPayload::Evacuate(evac_payload) => {
                 let domain_name = evac_payload
                     .domain_name
-                    .unwrap_or(config.domain_name.clone());
+                    .unwrap_or_else(|| config.domain_name.clone());
                 let max_objects = match evac_payload.max_objects {
                     Some(str_val) => {
                         // TODO
@@ -256,24 +161,10 @@ impl Handler for JobCreateHandler {
                     }
                 };
 
-                // TODO: We are temporarily faking a shark for
-                // testing
-                let shark = evac_payload.from_shark;
-                /*
-                let shark = MantaObjectShark {
-                    manta_storage_id: evac_payload.from_shark.clone(),
-                    datacenter: String::from("Somefakedc"),
-                };
-                */
-                /*
-                let shark moray_client::get_manta_object_shark (
-                    &evac_payload.from_shark,
-                    &domain_name).expect("get shark");
-                */
-
+                let from_shark = evac_payload.from_shark;
                 let job_action =
                     JobAction::Evacuate(Box::new(EvacuateJob::new(
-                        shark,
+                        from_shark,
                         &domain_name,
                         &job_uuid,
                         max_objects,
@@ -298,7 +189,6 @@ fn router() -> Router {
     let (tx, rx) = crossbeam_channel::bounded(5);
     let job_create_handler = JobCreateHandler { tx };
 
-    //job_thread_pool(rx);
     let pool = ThreadPool::new(THREAD_COUNT);
     for _ in 0..THREAD_COUNT {
         let thread_rx = rx.clone();
@@ -336,6 +226,7 @@ fn main() {
 mod tests {
     use super::*;
     use gotham::test::TestServer;
+    use remora::util;
 
     #[test]
     fn basic() {
@@ -395,10 +286,7 @@ mod tests {
             .perform()
             .unwrap();
 
-        if response.status() != StatusCode::OK {
-            println!("CHECK ME");
-            return;
-        }
+        assert_eq!(response.status(), StatusCode::OK);
         let ret = response.read_utf8_body().unwrap();
         println!("{:#?}", ret);
     }
