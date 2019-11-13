@@ -929,17 +929,26 @@ mod tests {
         // Generate a uuid to accompany the assignment that we are about to
         // send to the agent.
         let uuid = Uuid::new_v4().to_hyphenated().to_string();
-        send_assignment_impl(tasks, &uuid, StatusCode::OK);
+        send_assignment_impl(
+            tasks,
+            &uuid,
+            &TEST_SERVER.lock().unwrap(),
+            StatusCode::OK,
+        );
         uuid
     }
 
     // Utility that actually forms the request, sends it off to the test
     // server and verifies that it was received as intended.  Upon success,
     // return the uuid of the assignment which we will use to monitor progress.
-    fn send_assignment_impl(tasks: &Vec<Task>, id: &str, status: StatusCode) {
+    fn send_assignment_impl(
+        tasks: &Vec<Task>,
+        id: &str,
+        test_server: &TestServer,
+        status: StatusCode,
+    ) {
         let uuid = id.to_string();
         let obj: (String, Vec<Task>) = (uuid.clone(), tasks.to_vec());
-        let test_server = TEST_SERVER.lock().unwrap();
 
         // Finally, serialize the entire HashMap before stuffing it in the
         // message body.
@@ -1194,6 +1203,11 @@ mod tests {
         // Send the exact same assignment again and send it, although this time,
         // we will reuse our first uuid. We expect to receive a status code of
         // StatusCode::CONFLICT (409) from the server this time.
-        send_assignment_impl(&assignment, &uuid, StatusCode::CONFLICT);
+        send_assignment_impl(
+            &assignment,
+            &uuid,
+            &TEST_SERVER.lock().unwrap(),
+            StatusCode::CONFLICT,
+        );
     }
 }
