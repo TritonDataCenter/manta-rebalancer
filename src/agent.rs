@@ -999,8 +999,7 @@ mod tests {
     // likely be called repeatedly for a particular assignment until it is
     // observed that the number of tasks completed is equal to the total number
     // of tasks in the assignment.
-    fn get_progress(uuid: &str) -> Assignment {
-        let test_server = TEST_SERVER.lock().unwrap();
+    fn get_progress(uuid: &str, test_server: &TestServer) -> Assignment {
         let url = format!("http://localhost/assignments/{}", uuid);
         let response = test_server.client().get(url).perform().unwrap();
 
@@ -1024,7 +1023,7 @@ mod tests {
     // indefinitely with the assumption that the agent is not hung.
     fn monitor_progress(uuid: &str) -> Assignment {
         loop {
-            let assignment = get_progress(uuid);
+            let assignment = get_progress(uuid, &TEST_SERVER.lock().unwrap());
             thread::sleep(time::Duration::from_secs(10));
 
             // If we have finished processing all tasks, return the assignment
