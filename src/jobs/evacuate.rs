@@ -2382,10 +2382,11 @@ mod tests {
 
     fn generate_storage_node(local: bool) -> StorageNode {
         let mut rng = rand::thread_rng();
+        let mut g = StdThreadGen::new(100);
         let available_mb: u64 = rng.gen();
         let percent_used: u8 = rng.gen_range(0, 101);
-        let filesystem = util::test::random_string(rng.gen_range(1, 20));
-        let datacenter = util::test::random_string(rng.gen_range(1, 20));
+        let filesystem = random_string(&mut g, rng.gen_range(1, 20));
+        let datacenter = random_string(&mut g, rng.gen_range(1, 20));
         let manta_storage_id = match local {
             true => String::from("localhost"),
             false => format!("{}.stor.joyent.us", rng.gen_range(1, 100)),
@@ -2456,6 +2457,7 @@ mod tests {
 
         impl SharkSource for NoSkipPicker {
             fn choose(&self, _: &PickerAlgorithm) -> Option<Vec<StorageNode>> {
+                let mut g = StdThreadGen::new(100);
                 let mut sharks = vec![];
                 for i in 1..10 {
                     let mut shark: StorageNode = generate_storage_node(true);
@@ -2463,7 +2465,7 @@ mod tests {
                     shark.manta_storage_id = format!("{}.stor.domain", i);
                     if i % 3 == 0 {
                         let str_len = rand::thread_rng().gen_range(1, 50);
-                        shark.datacenter = util::test::random_string(str_len);
+                        shark.datacenter = random_string(&mut g, str_len);
                     } else {
                         shark.datacenter = String::from("foo");
                     }

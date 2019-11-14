@@ -102,16 +102,7 @@ pub mod test {
     use crate::agent::Assignment;
     use crate::jobs::Task;
     use gotham::test::TestServer;
-    use rand::{distributions::Alphanumeric, Rng};
     use reqwest::StatusCode;
-
-    // Used in test
-    pub fn random_string(len: usize) -> String {
-        rand::thread_rng()
-            .sample_iter(&Alphanumeric)
-            .take(len)
-            .collect()
-    }
 
     // Utility that actually forms the request, sends it off to the test
     // server and verifies that it was received as intended.  Upon success,
