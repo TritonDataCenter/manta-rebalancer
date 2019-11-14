@@ -94,7 +94,7 @@ impl Agent {
 
     pub fn run(addr: &'static str) {
         info!("Listening for requests at {}", addr);
-        gotham::start(addr, router());
+        gotham::start(addr, router(process_task));
     }
 
     // Given an assignment uuid, check for its presence in both the "scheduled"
@@ -657,6 +657,13 @@ fn download(
     }
 }
 
+// As soon as the test code in the rebalancer zone uses the Gotham API to
+// create a TestServer, the desired function for processing tasks can be
+// passed in as an argument to router() and the agent can be run on a separate
+// thread within the same process as the actual test code in the zone.  Until
+// then, it relies on an external agent running in a separate process, built
+// with the alway_pass feature enabled.  Once we move to a model where it
+// uses TestSever though, this function can go away.
 #[cfg(feature = "always_pass")]
 fn process_task(task: &mut Task) {
     task.set_status(TaskStatus::Complete);
@@ -731,7 +738,11 @@ fn assignment_get(
 // intention of modifying it and further, the same thread invoking this function
 // is the only one that will clean up the assignment when we have finished
 // processing it, by calling `assignment_complete()'.
-fn process_assignment(assignments: Arc<Mutex<Assignments>>, uuid: String) {
+fn process_assignment(
+    assignments: Arc<Mutex<Assignments>>,
+    uuid: String,
+    f: fn(&mut Task),
+) {
     // If we are unsuccessful in loading the assignment from disk, there is
     // nothing left to do here, other than return.
     if let Err(e) = load_saved_assignment(&assignments, &uuid) {
@@ -765,7 +776,7 @@ fn process_assignment(assignments: Arc<Mutex<Assignments>>, uuid: String) {
         };
 
         // Process it.
-        process_task(&mut t);
+        f(&mut t);
 
         // Grab the write lock on the assignment.  It will only be held until
         // the end of the loop (which is not for very long).
@@ -800,8 +811,9 @@ fn process_assignment(assignments: Arc<Mutex<Assignments>>, uuid: String) {
     assignment_complete(assignments, uuid);
 }
 
-/// Create a `Router`
-fn router() -> Router {
+// Create a `Router`.  This function is public because it will have external
+// consumers, namely the rebalancer zone test framework.
+pub fn router(f: fn(&mut Task)) -> Router {
     build_simple_router(|route| {
         let (w, r): (mpsc::Sender<String>, mpsc::Receiver<String>) =
             mpsc::channel();
@@ -824,7 +836,7 @@ fn router() -> Router {
                         return;
                     }
                 };
-                process_assignment(Arc::clone(&assignments), uuid);
+                process_assignment(Arc::clone(&assignments), uuid, f);
             });
         }
 
@@ -849,6 +861,7 @@ fn create_dir(dirname: &str) {
 mod tests {
     use super::*;
     use crate::util;
+    use crate::util::test::{get_progress, send_assignment_impl};
     use gotham::handler::assets::FileOptions;
     use gotham::router::builder::{
         build_simple_router, DefineSingleRoute, DrawRoutes,
@@ -862,7 +875,7 @@ mod tests {
     lazy_static! {
         static ref INITIALIZED: Mutex<bool> = Mutex::new(false);
         static ref TEST_SERVER: Mutex<TestServer> =
-            Mutex::new(TestServer::new(router()).unwrap());
+            Mutex::new(TestServer::new(router(process_task)).unwrap());
     }
 
     // Very basic web server used to serve out files upon request.  This is
@@ -918,81 +931,13 @@ mod tests {
         // Generate a uuid to accompany the assignment that we are about to
         // send to the agent.
         let uuid = Uuid::new_v4().to_hyphenated().to_string();
-        send_assignment_impl(tasks, &uuid, StatusCode::OK);
+        send_assignment_impl(
+            tasks,
+            &uuid,
+            &TEST_SERVER.lock().unwrap(),
+            StatusCode::OK,
+        );
         uuid
-    }
-
-    // Utility that actually forms the request, sends it off to the test
-    // server and verifies that it was received as intended.  Upon success,
-    // return the uuid of the assignment which we will use to monitor progress.
-    fn send_assignment_impl(tasks: &Vec<Task>, id: &str, status: StatusCode) {
-        let uuid = id.to_string();
-        let obj: (String, Vec<Task>) = (uuid.clone(), tasks.to_vec());
-        let test_server = TEST_SERVER.lock().unwrap();
-
-        // Finally, serialize the entire HashMap before stuffing it in the
-        // message body.
-        let body: Vec<u8> =
-            serde_json::to_vec(&obj).expect("Serialized payload");
-
-        let response = test_server
-            .client()
-            .post(
-                "http://localhost/assignments",
-                hyper::Body::from(body),
-                mime::APPLICATION_JSON,
-            )
-            .perform()
-            .unwrap();
-
-        // Fail immediately if the status code returned to us from the server
-        // is not what we expect.
-        assert_eq!(response.status(), status);
-
-        // If we are here, then we received the status code from the server
-        // that we expected.  That is, things are proceeding how we hoped they
-        // would.  If we are expecting a status code of anything other than
-        // StatusCode::OK, then the test ends here as a success.  There is no
-        // need to parse the message body or monitor progress later on as this
-        // assignment is not being processed by the agent.
-        if status != StatusCode::OK {
-            return;
-        }
-
-        let body = response.read_body().unwrap();
-        let data = String::from_utf8(body.to_vec()).unwrap();
-        let resp_uuid: String = match serde_json::from_str(&data) {
-            Ok(s) => s,
-            Err(e) => panic!(format!("Error: {}", e)),
-        };
-
-        info!("Response: {:?}", resp_uuid);
-
-        // Perhaps it is overkill, but check to ensure that the uuid given
-        // back to us matches what we actually sent.
-        assert_eq!(uuid, resp_uuid);
-    }
-
-    // Send a request to get the latest information on an assignment.  This
-    // information is used by the test automation to determine how far along
-    // the agent is in processing the assignment.  During testing, this will
-    // likely be called repeatedly for a particular assignment until it is
-    // observed that the number of tasks completed is equal to the total number
-    // of tasks in the assignment.
-    fn get_progress(uuid: &str) -> Assignment {
-        let test_server = TEST_SERVER.lock().unwrap();
-        let url = format!("http://localhost/assignments/{}", uuid);
-        let response = test_server.client().get(url).perform().unwrap();
-
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = response.read_body().unwrap();
-        let data = String::from_utf8(body.to_vec()).unwrap();
-        let assignment: Assignment = match serde_json::from_str(&data) {
-            Ok(a) => a,
-            Err(e) => panic!(format!("Failed to deserialize: {}", e)),
-        };
-
-        assignment
     }
 
     // Poll the server indefinitely on the status of a given assignment until
@@ -1004,7 +949,7 @@ mod tests {
     // indefinitely with the assumption that the agent is not hung.
     fn monitor_progress(uuid: &str) -> Assignment {
         loop {
-            let assignment = get_progress(uuid);
+            let assignment = get_progress(uuid, &TEST_SERVER.lock().unwrap());
             thread::sleep(time::Duration::from_secs(10));
 
             // If we have finished processing all tasks, return the assignment
@@ -1183,6 +1128,11 @@ mod tests {
         // Send the exact same assignment again and send it, although this time,
         // we will reuse our first uuid. We expect to receive a status code of
         // StatusCode::CONFLICT (409) from the server this time.
-        send_assignment_impl(&assignment, &uuid, StatusCode::CONFLICT);
+        send_assignment_impl(
+            &assignment,
+            &uuid,
+            &TEST_SERVER.lock().unwrap(),
+            StatusCode::CONFLICT,
+        );
     }
 }
