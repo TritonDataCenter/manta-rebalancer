@@ -12,59 +12,62 @@ use super::evacuate::EvacuateObjectStatus;
 use crate::error::Error;
 use crate::pg_db;
 
+use std::collections::HashMap;
 use std::str::FromStr;
+use std::string::ToString;
 
 use diesel::prelude::*;
 use inflector::cases::titlecase::to_title_case;
 use strum::IntoEnumIterator;
 use uuid::Uuid;
 
-pub fn get_status(uuid: Uuid) -> Result<String, String> {
+#[derive(Debug, EnumString)]
+pub enum StatusError {
+    DBExists,
+    LookupError,
+}
+
+pub fn get_status(uuid: Uuid) -> Result<HashMap<String, usize>, StatusError> {
     use super::evacuate::evacuateobjects::dsl::*;
     let db_name = uuid.to_string();
     let mut total_count = 0;
-    let mut ret = String::new();
+    let mut ret = HashMap::new();
 
     let conn = match pg_db::connect_db(&db_name) {
         Ok(c) => c,
-        Err(e) => {
-            return Err(format!(
-                "Error connecting to database ({}).  Is this a valid Job \
-                 UUID: {}?",
-                e, db_name
-            ));
+        Err(_) => {
+            return Err(StatusError::DBExists);
         }
     };
 
-    let status_vec: Vec<EvacuateObjectStatus> = evacuateobjects
-        .select(status)
-        .get_results(&conn)
-        .expect("DB select error");
+    let status_vec: Vec<EvacuateObjectStatus> =
+        match evacuateobjects.select(status).get_results(&conn) {
+            Ok(res) => res,
+            Err(_) => {
+                return Err(StatusError::LookupError);
+            }
+        };
 
     for status_value in EvacuateObjectStatus::iter() {
         let count = status_vec.iter().filter(|s| *s == &status_value).count();
+        let status_str = to_title_case(&status_value.to_string());
 
-        ret = format!("{}{}: {}\n",
-            ret,
-            to_title_case(&status_value.to_string()),
-            count
-        );
-
+        ret.insert(status_str, count);
         total_count += count;
     }
 
-    ret = format!("{}Total: {}\n", ret, total_count);
+    ret.insert("Total".into(), total_count);
 
     Ok(ret)
 }
 
-pub fn list_jobs() -> Result<String, Error> {
+pub fn list_jobs() -> Result<Vec<String>, Error> {
     let db_list = pg_db::list_databases()?;
-    let mut ret = String::new();
+    let mut ret = vec![];
 
     for db in db_list {
         if let Ok(job_id) = Uuid::from_str(&db) {
-            ret = format!("{}{}\n", ret, job_id);
+            ret.push(job_id.to_string());
         }
     }
 

@@ -11,7 +11,7 @@
 use remora::agent::Agent;
 use remora::config::{Command, SubCommand};
 use remora::error::Error;
-use remora::jobs::status;
+use remora::jobs::status::{self, StatusError};
 use remora::util;
 
 fn main() -> Result<(), Error> {
@@ -26,19 +26,30 @@ fn main() -> Result<(), Error> {
         SubCommand::DoJob(job) => job.run(),
         SubCommand::Status(uuid) => match status::get_status(uuid) {
             Ok(status_report) => {
-                println!("{}", status_report);
+                for (status, count) in status_report.iter() {
+                    println!("{}: {}", status, count);
+                }
                 Ok(())
-            },
+            }
             Err(e) => {
-                println!("{}", e);
+                match e {
+                    StatusError::DBExists => {
+                        println!("Could not find Job UUID {}", uuid);
+                    }
+                    StatusError::LookupError => {
+                        println!("Internal Job Database Error");
+                    }
+                }
                 std::process::exit(1);
             }
         },
         SubCommand::JobList => match status::list_jobs() {
             Ok(list) => {
-                println!("{}", list);
+                for job in list {
+                    println!("{}", job);
+                }
                 Ok(())
-            },
+            }
             Err(e) => {
                 println!("{}", e);
                 std::process::exit(1);
