@@ -50,8 +50,8 @@ fn main() -> Result<(), Error> {
                 }
                 Ok(())
             }
-            Err(e) => {
-                println!("{}", e);
+            Err(_) => {
+                println!("Internal Job List Error");
                 std::process::exit(1);
             }
         },

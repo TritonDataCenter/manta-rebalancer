@@ -72,8 +72,15 @@ pub fn get_status(uuid: Uuid) -> Result<HashMap<String, usize>, StatusError> {
     Ok(ret)
 }
 
-pub fn list_jobs() -> Result<Vec<String>, Error> {
-    let db_list = pg_db::list_databases()?;
+pub fn list_jobs() -> Result<Vec<String>, StatusError> {
+    let db_list = match pg_db::list_databases() {
+        Ok(list) => list,
+        Err(e) => {
+            error!("Error listing jobs: {}", e);
+            return Err(StatusError::Unknown);
+        }
+    };
+
     let mut ret = vec![];
 
     for db in db_list {
