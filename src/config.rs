@@ -14,12 +14,12 @@ use clap::{App, AppSettings, Arg, ArgMatches, SubCommand as ClapSubCommand};
 use serde::Deserialize;
 use std::fs::File;
 use std::io::BufReader;
-use std::process;
 
 use crate::error::Error;
 use crate::jobs::{evacuate::EvacuateJob, Job, JobAction};
 use crate::moray_client;
 use crate::util;
+use uuid::Uuid;
 
 #[derive(Deserialize, Default, Debug, Clone)]
 pub struct Shard {
@@ -65,6 +65,8 @@ pub enum SubCommand {
     Server, // Start the server
     Agent,
     DoJob(Box<Job>),
+    Status(Uuid),
+    JobList,
 }
 
 pub struct Command {
@@ -80,6 +82,7 @@ impl Command {
 
         Ok(config)
     }
+
     pub fn new() -> Result<Command, Error> {
         let mut subcommand = SubCommand::Server;
 
@@ -115,10 +118,22 @@ impl Command {
                     .about("Job Management")
                     .version("0.1.0")
                     .setting(AppSettings::ArgRequiredElseHelp)
-                    // TODO:
-                    // remora job create [options]
-                    // remora job get <uuid>
-                    // remora job list
+                    .subcommand(
+                        ClapSubCommand::with_name("list")
+                            .about("Get list of rebalancer jobs")
+                            .version("0.1.0")
+                    )
+                    .subcommand(
+                        ClapSubCommand::with_name("status")
+                            .about("Get the status of a rebalancer job")
+                            .version("0.1.0")
+                            .setting(AppSettings::ArgRequiredElseHelp)
+                            .arg(Arg::with_name("JOB_ID")
+                                .help("UUID of job")
+                                .required(true)
+                                .index(1)
+                            )
+                    )
                     .subcommand(
                         ClapSubCommand::with_name("create")
                             .about("Create a rebalancer Job")
@@ -196,14 +211,35 @@ impl Command {
 
         // TODO: There must be a better way.  YAML perhaps?
         if let Some(sub_matches) = matches.subcommand_matches("job") {
-            if let Some(job_matches) = sub_matches.subcommand_matches("create")
+            // Job
+            if let Some(create_matches) =
+                sub_matches.subcommand_matches("create")
             {
-                if let Some(create_matches) =
-                    job_matches.subcommand_matches("evacuate")
+                // Job Create
+                if let Some(evacuate_matches) =
+                    create_matches.subcommand_matches("evacuate")
                 {
-                    subcommand =
-                        job_subcommand_handler(create_matches, config.clone())?;
+                    subcommand = job_create_subcommand_handler(
+                        evacuate_matches,
+                        config.clone(),
+                    )?;
                 }
+            } else if let Some(status_matches) =
+                sub_matches.subcommand_matches("status")
+            {
+                let uuid: Uuid =
+                    Uuid::parse_str(status_matches.value_of("JOB_ID").unwrap())
+                        .unwrap_or_else(|e| {
+                            println!(
+                                "Error parsing Job ID: {}\nJOB_ID must \
+                                 be a valid v4 UUID",
+                                e
+                            );
+                            std::process::exit(1);
+                        });
+                subcommand = SubCommand::Status(uuid);
+            } else if sub_matches.subcommand_matches("list").is_some() {
+                subcommand = SubCommand::JobList;
             }
         }
 
@@ -216,32 +252,31 @@ impl Command {
 // 1. Command::new() handling override of domain_name from config file
 // 2. Job::new() taking all args necessary to create new Job Action (e.g.
 // EvacuateJob)
-fn job_subcommand_handler(
+fn job_create_subcommand_handler(
     matches: &ArgMatches,
     config: Config,
 ) -> Result<SubCommand, Error> {
     let shark_id = matches.value_of("from_shark").unwrap_or("").to_string();
-    let domain_name = matches.value_of("domain").unwrap_or(&config.domain_name);
+    let domain_name = matches
+        .value_of("domain")
+        .unwrap_or(&config.domain_name)
+        .to_owned();
     let max: u32 = matches.value_of("max_objects").unwrap_or("10").parse()?;
 
     let max_objects = if max == 0 { None } else { Some(max) };
-
     let shark_id = format!("{}.{}", shark_id, domain_name);
-
     let from_shark =
-        moray_client::get_manta_object_shark(&shark_id, domain_name)
+        moray_client::get_manta_object_shark(&shark_id, &domain_name)
             .map_err(Error::from)?;
-    // TODO: This should probably be based on the Job UUID and not the pid as
-    // we plan to have a server mode that will generate multiple jobs in a
-    // single process.
-    let db_url = format!("{}.{}", &config.database_url, process::id());
+
+    let mut job = Job::new(config);
     let job_action = JobAction::Evacuate(Box::new(EvacuateJob::new(
         from_shark,
-        domain_name,
-        &db_url,
+        &domain_name,
+        &job.get_id().to_string(),
         max_objects,
     )));
-    let job = Job::new(job_action, config);
+    job.add_action(job_action);
 
     Ok(SubCommand::DoJob(Box::new(job)))
 }

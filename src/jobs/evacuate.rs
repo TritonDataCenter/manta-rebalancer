@@ -16,7 +16,9 @@ use crate::jobs::{
     ObjectSkippedReason, StorageId, Task, TaskStatus,
 };
 use crate::moray_client;
+use crate::pg_db;
 use crate::picker::{self as mod_picker, SharkSource, StorageNode};
+use crate::util::{MAX_HTTP_STATUS_CODE, MIN_HTTP_STATUS_CODE};
 
 use std::collections::hash_map::Entry::{Occupied, Vacant};
 use std::collections::HashMap;
@@ -35,17 +37,19 @@ use crossbeam_channel::TryRecvError;
 use crossbeam_deque::{Injector, Steal};
 use libmanta::moray::{MantaObject, MantaObjectShark};
 use moray::client::MorayClient;
+use quickcheck::{Arbitrary, Gen};
+use quickcheck_helpers::random::string as random_string;
 use reqwest;
 use threadpool::ThreadPool;
+use uuid::Uuid;
 
 // --- Diesel Stuff, TODO This should be refactored --- //
 
-use diesel::backend;
 use diesel::deserialize::{self, FromSql};
+use diesel::pg::{Pg, PgConnection, PgValue};
 use diesel::prelude::*;
 use diesel::serialize::{self, IsNull, Output, ToSql};
 use diesel::sql_types;
-use diesel::sqlite::Sqlite;
 
 // Note: The ordering of the fields in this table must match the ordering of
 // the fields in 'struct EvacuateObject'
@@ -74,6 +78,7 @@ struct UpdateEvacuateObject<'a> {
     Display,
     EnumString,
     EnumVariantNames,
+    EnumIter,
     Debug,
     Clone,
     Copy,
@@ -92,23 +97,26 @@ pub enum EvacuateObjectStatus {
     Complete,       // Object has been fully rebalanced.
 }
 
-impl ToSql<sql_types::Text, Sqlite> for EvacuateObjectStatus {
-    fn to_sql<W: Write>(
-        &self,
-        out: &mut Output<W, Sqlite>,
-    ) -> serialize::Result {
+impl Arbitrary for EvacuateObjectStatus {
+    fn arbitrary<G: Gen>(g: &mut G) -> EvacuateObjectStatus {
+        let i: usize = g.next_u32() as usize % Self::iter().count();
+        Self::iter().nth(i).unwrap()
+    }
+}
+
+impl ToSql<sql_types::Text, Pg> for EvacuateObjectStatus {
+    fn to_sql<W: Write>(&self, out: &mut Output<W, Pg>) -> serialize::Result {
         let s = self.to_string();
         out.write_all(s.as_bytes())?;
         Ok(IsNull::No)
     }
 }
 
-impl FromSql<sql_types::Text, Sqlite> for EvacuateObjectStatus {
-    fn from_sql(
-        bytes: Option<backend::RawValue<Sqlite>>,
-    ) -> deserialize::Result<Self> {
-        let t = not_none!(bytes).read_text();
-        Self::from_str(t).map_err(std::convert::Into::into)
+impl FromSql<sql_types::Text, Pg> for EvacuateObjectStatus {
+    fn from_sql(bytes: Option<PgValue<'_>>) -> deserialize::Result<Self> {
+        let t: PgValue = not_none!(bytes);
+        let t_str = String::from_utf8_lossy(t.as_bytes());
+        Self::from_str(&t_str).map_err(std::convert::Into::into)
     }
 }
 
@@ -116,6 +124,7 @@ impl FromSql<sql_types::Text, Sqlite> for EvacuateObjectStatus {
     Display,
     EnumString,
     EnumVariantNames,
+    EnumIter,
     Debug,
     Clone,
     Copy,
@@ -133,27 +142,88 @@ pub enum EvacuateObjectError {
     MetadataUpdateFailed,
 }
 
+impl Arbitrary for EvacuateObjectError {
+    fn arbitrary<G: Gen>(g: &mut G) -> EvacuateObjectError {
+        let i: usize = g.next_u32() as usize % Self::iter().count();
+        Self::iter().nth(i).unwrap()
+    }
+}
+
 // Evacuate Object Error
-impl ToSql<sql_types::Text, Sqlite> for EvacuateObjectError {
-    fn to_sql<W: Write>(
-        &self,
-        out: &mut Output<W, Sqlite>,
-    ) -> serialize::Result {
+impl ToSql<sql_types::Text, Pg> for EvacuateObjectError {
+    fn to_sql<W: Write>(&self, out: &mut Output<W, Pg>) -> serialize::Result {
         let s = self.to_string();
         out.write_all(s.as_bytes())?;
         Ok(IsNull::No)
     }
 }
 
-impl FromSql<sql_types::Text, Sqlite> for EvacuateObjectError {
-    fn from_sql(
-        bytes: Option<backend::RawValue<Sqlite>>,
-    ) -> deserialize::Result<Self> {
-        let t = not_none!(bytes).read_text();
-        Self::from_str(t).map_err(std::convert::Into::into)
+impl FromSql<sql_types::Text, Pg> for EvacuateObjectError {
+    fn from_sql(bytes: Option<PgValue<'_>>) -> deserialize::Result<Self> {
+        let t: PgValue = not_none!(bytes);
+        let t_str = String::from_utf8_lossy(t.as_bytes());
+        Self::from_str(&t_str).map_err(std::convert::Into::into)
     }
 }
 
+pub fn create_evacuateobjects_table(
+    conn: &PgConnection,
+) -> Result<usize, Error> {
+    let status_strings = EvacuateObjectStatus::variants();
+    let error_strings = EvacuateObjectError::variants();
+    let mut skipped_strings: Vec<String> = vec![];
+
+    for reason in ObjectSkippedReason::iter() {
+        match reason {
+            ObjectSkippedReason::HTTPStatusCode(_) => continue,
+            _ => {
+                skipped_strings.push(reason.to_string());
+            }
+        }
+    }
+
+    for code in MIN_HTTP_STATUS_CODE..MAX_HTTP_STATUS_CODE {
+        let reason = format!(
+            "{{{}:{}}}",
+            // This value doesn't matter.  The to_string() method only
+            // returns the variant name.
+            ObjectSkippedReason::HTTPStatusCode(0).to_string(),
+            code
+        );
+
+        skipped_strings.push(reason);
+    }
+
+    let status_check = format!("'{}'", status_strings.join("', '"));
+    let error_check = format!("'{}'", error_strings.join("', '"));
+    let skipped_check = format!("'{}'", skipped_strings.join("', '"));
+
+    // TODO: check if table exists first and if so issue warning.  We may
+    // need to handle this a bit more gracefully in the future for
+    // restarting jobs...
+    conn.execute(r#"DROP TABLE evacuateobjects"#)
+        .unwrap_or_else(|e| {
+            debug!("Table doesn't exist: {}", e);
+            0
+        });
+
+    let create_query = format!(
+        "
+            CREATE TABLE evacuateobjects(
+                id TEXT PRIMARY KEY,
+                assignment_id TEXT,
+                object TEXT,
+                shard Integer,
+                dest_shark TEXT,
+                etag TEXT,
+                status TEXT CHECK(status IN ({})) NOT NULL,
+                skipped_reason TEXT CHECK(skipped_reason IN ({})),
+                error TEXT CHECK(error IN ({}))
+            );",
+        status_check, skipped_check, error_check
+    );
+    conn.execute(&create_query).map_err(Error::from)
+}
 // --- END Diesel Stuff --- //
 
 struct FiniMsg;
@@ -178,6 +248,7 @@ impl Default for EvacuateObjectStatus {
     Queryable,
     Identifiable,
     AsChangeset,
+    AsExpression,
     Debug,
     Default,
     Clone,
@@ -206,6 +277,39 @@ pub struct EvacuateObject {
     // None).
     // Alternatively we could simply expand the skipped_reasons or errors to
     // be more specific.
+}
+
+impl Arbitrary for EvacuateObject {
+    fn arbitrary<G: Gen>(g: &mut G) -> EvacuateObject {
+        let manta_object = MantaObject::arbitrary(g);
+        let status = EvacuateObjectStatus::arbitrary(g);
+        let mut skipped_reason = None;
+        let mut error = None;
+        let shard = g.next_u32() as i32 % 100;
+        let dest_shark = random_string(g, 100);
+
+        match status {
+            EvacuateObjectStatus::Skipped => {
+                skipped_reason = Some(ObjectSkippedReason::arbitrary(g));
+            }
+            EvacuateObjectStatus::Error => {
+                error = Some(EvacuateObjectError::arbitrary(g));
+            }
+            _ => (),
+        }
+
+        EvacuateObject {
+            id: Uuid::new_v4().to_string(),
+            assignment_id: Uuid::new_v4().to_string(),
+            object: manta_object.clone(),
+            shard,
+            etag: manta_object.etag.clone(),
+            dest_shark,
+            status,
+            skipped_reason,
+            error,
+        }
+    }
 }
 
 impl EvacuateObject {
@@ -254,8 +358,7 @@ pub struct EvacuateJob {
     // TODO: Maximum total size of objects to include in a single assignment.
 
     // TODO: max number of shark threads
-    /// SqliteConnection to local database.
-    pub conn: Mutex<SqliteConnection>,
+    pub conn: Mutex<PgConnection>,
 
     /// domain_name of manta deployment
     pub domain_name: String,
@@ -269,15 +372,20 @@ pub struct EvacuateJob {
 
 impl EvacuateJob {
     /// Create a new EvacauteJob instance.
-    /// As part of this initialization also create a new SqliteConnection.
+    /// As part of this initialization also create a new PgConnection.
     pub fn new(
         from_shark: MantaObjectShark,
         domain_name: &str,
-        db_url: &str,
+        db_name: &str,
         max_objects: Option<u32>,
     ) -> Self {
-        let conn = SqliteConnection::establish(db_url)
-            .unwrap_or_else(|_| panic!("Error connecting to {}", db_url));
+        let conn = match pg_db::create_and_connect_db(db_name) {
+            Ok(c) => c,
+            Err(e) => {
+                println!("Error creating Evacuate Job: {}", e);
+                std::process::exit(1);
+            }
+        };
 
         Self {
             min_avail_mb: Some(1000),             // TODO: config
@@ -293,62 +401,8 @@ impl EvacuateJob {
     }
 
     fn create_table(&self) -> Result<usize, Error> {
-        let status_strings = EvacuateObjectStatus::variants();
-        let error_strings = EvacuateObjectError::variants();
-        let mut skipped_strings: Vec<String> = vec![];
-
-        for reason in ObjectSkippedReason::iter() {
-            match reason {
-                ObjectSkippedReason::HTTPStatusCode(_) => continue,
-                _ => {
-                    skipped_strings.push(reason.to_string());
-                }
-            }
-        }
-
-        for code in 100..600 {
-            let reason = format!(
-                "{{{}:{}}}",
-                // This value doesn't matter.  The to_string() method only
-                // returns the variant name.
-                ObjectSkippedReason::HTTPStatusCode(0).to_string(),
-                code
-            );
-
-            skipped_strings.push(reason);
-        }
-
-        let status_check = format!("'{}'", status_strings.join("', '"));
-        let error_check = format!("'{}'", error_strings.join("', '"));
-        let skipped_check = format!("'{}'", skipped_strings.join("', '"));
-
-        // TODO: check if table exists first and if so issue warning.  We may
-        // need to handle this a bit more gracefully in the future for
-        // restarting jobs...
-
         let conn = self.conn.lock().expect("DB conn lock");
-        conn.execute(r#"DROP TABLE evacuateobjects"#)
-            .unwrap_or_else(|e| {
-                debug!("Table doesn't exist: {}", e);
-                0
-            });
-
-        let create_query = format!(
-            "
-            CREATE TABLE evacuateobjects(
-                id TEXT PRIMARY KEY,
-                assignment_id TEXT,
-                object TEXT,
-                shard Integer,
-                dest_shark TEXT,
-                etag TEXT,
-                status TEXT CHECK(status IN ({})) NOT NULL,
-                skipped_reason TEXT CHECK(skipped_reason IN ({})),
-                error TEXT CHECK(error IN ({}))
-            );",
-            status_check, skipped_check, error_check
-        );
-        conn.execute(&create_query).map_err(Error::from)
+        create_evacuateobjects_table(&*conn)
     }
 
     pub fn run(self, config: &Config) -> Result<(), Error> {
@@ -655,7 +709,7 @@ impl EvacuateJob {
     ) -> Result<usize, Error> {
         use self::evacuateobjects::dsl::*;
 
-        let locked_conn = self.conn.lock().expect("db conn lock");
+        let locked_conn = self.conn.lock().expect("DB conn lock");
         let now = std::time::Instant::now();
         // TODO: consider checking record count to ensure update success
         let ret = diesel::insert_into(evacuateobjects)
@@ -2484,7 +2538,7 @@ mod tests {
         let job_action = EvacuateJob::new(
             from_shark,
             "fakedomain.us",
-            "no_skip_test.db",
+            &Uuid::new_v4().to_string(),
             Some(100),
         );
         assert!(job_action.create_table().is_ok());
@@ -2671,7 +2725,7 @@ mod tests {
         let job_action = EvacuateJob::new(
             MantaObjectShark::default(),
             "fakedomain.us",
-            "assignment_processing_test.db",
+            &Uuid::new_v4().to_string(),
             None,
         );
 
@@ -2797,7 +2851,7 @@ mod tests {
         let job_action = EvacuateJob::new(
             MantaObjectShark::default(),
             "fakedomain.us",
-            "empty_picker_test.db",
+            &Uuid::new_v4().to_string(),
             None,
         );
         let job_action = Arc::new(job_action);
@@ -2922,7 +2976,7 @@ mod tests {
         let job_action = EvacuateJob::new(
             MantaObjectShark::default(),
             "region.fakedomain.us",
-            "full_test.db",
+            &Uuid::new_v4().to_string(),
             None,
         );
 

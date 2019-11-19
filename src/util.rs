@@ -13,7 +13,11 @@ use std::sync::Mutex;
 use std::thread;
 
 use clap::{crate_name, crate_version};
+
 use slog::{o, Drain, Logger};
+
+pub static MIN_HTTP_STATUS_CODE: u16 = 100;
+pub static MAX_HTTP_STATUS_CODE: u16 = 600;
 
 pub fn create_bunyan_logger<W>(io: W) -> Logger
 where

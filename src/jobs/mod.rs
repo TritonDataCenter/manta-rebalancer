@@ -9,6 +9,7 @@
  */
 
 pub mod evacuate;
+pub mod status;
 
 use crate::config::Config;
 use crate::error::Error;
@@ -19,11 +20,10 @@ use std::fmt;
 use std::io::Write;
 use std::str::FromStr;
 
-use diesel::backend;
 use diesel::deserialize::{self, FromSql};
+use diesel::pg::{Pg, PgValue};
 use diesel::serialize::{self, IsNull, Output, ToSql};
 use diesel::sql_types;
-use diesel::sqlite::Sqlite;
 use evacuate::EvacuateJob;
 use libmanta::moray::MantaObjectShark;
 use md5::{Digest, Md5};
@@ -200,17 +200,6 @@ impl Arbitrary for TaskStatus {
     }
 }
 
-impl Default for Job {
-    fn default() -> Self {
-        Self {
-            action: JobAction::default(),
-            state: JobState::default(),
-            id: Uuid::new_v4(),
-            config: Config::default(),
-        }
-    }
-}
-
 //
 // There are many reasons why an object may fail on a rebalance job.  This
 // enum of reasons is meant to be shared between both the agent and the
@@ -289,6 +278,35 @@ pub enum ObjectSkippedReason {
     HTTPStatusCode(HttpStatusCode),
 }
 
+fn _osr_from_sql(ts: String) -> deserialize::Result<ObjectSkippedReason> {
+    if ts.starts_with('{') && ts.ends_with('}') {
+        // Start with:
+        //      "{skipped_reason:status_code}"
+        let matches: &[_] = &['{', '}'];
+
+        // trim_matches:
+        //      "skipped_reason:status_code"
+        //
+        // split().collect():
+        //      ["skipped_reason", "status_code"]
+        let sr_sc: Vec<&str> = ts.trim_matches(matches).split(':').collect();
+        assert_eq!(sr_sc.len(), 2);
+
+        // ["skipped_reason", "status_code"]
+        let reason = ObjectSkippedReason::from_str(&sr_sc[0])?;
+        match reason {
+            ObjectSkippedReason::HTTPStatusCode(_) => {
+                Ok(ObjectSkippedReason::HTTPStatusCode(sr_sc[1].parse()?))
+            }
+            _ => {
+                panic!("variant with value not found");
+            }
+        }
+    } else {
+        ObjectSkippedReason::from_str(&ts).map_err(std::convert::Into::into)
+    }
+}
+
 impl ObjectSkippedReason {
     // The "Strum" crate already provides a "to_string()" method which we
     // want to use here.  This is for handling the special case of variants
@@ -320,11 +338,8 @@ impl Arbitrary for ObjectSkippedReason {
     }
 }
 
-impl ToSql<sql_types::Text, Sqlite> for ObjectSkippedReason {
-    fn to_sql<W: Write>(
-        &self,
-        out: &mut Output<W, Sqlite>,
-    ) -> serialize::Result {
+impl ToSql<sql_types::Text, Pg> for ObjectSkippedReason {
+    fn to_sql<W: Write>(&self, out: &mut Output<W, Pg>) -> serialize::Result {
         let sr = self.into_string();
         out.write_all(sr.as_bytes())?;
 
@@ -332,45 +347,29 @@ impl ToSql<sql_types::Text, Sqlite> for ObjectSkippedReason {
     }
 }
 
-impl FromSql<sql_types::Text, Sqlite> for ObjectSkippedReason {
-    fn from_sql(
-        bytes: Option<backend::RawValue<Sqlite>>,
-    ) -> deserialize::Result<Self> {
-        let t = not_none!(bytes).read_text();
-        let ts: String = t.to_string();
-        if ts.starts_with('{') && ts.ends_with('}') {
-            // "{skipped_reason:status_code}"
-            let matches: &[_] = &['{', '}'];
-
-            // trim_matches: "skipped_reason:status_code"
-            // split().collect(): ["skipped_reason", "status_code"]
-            let sr_sc: Vec<&str> =
-                ts.trim_matches(matches).split(':').collect();
-            assert_eq!(sr_sc.len(), 2);
-
-            // ["skipped_reason", "status_code"]
-            let reason = ObjectSkippedReason::from_str(&sr_sc[0])?;
-            match reason {
-                ObjectSkippedReason::HTTPStatusCode(_) => {
-                    Ok(ObjectSkippedReason::HTTPStatusCode(sr_sc[1].parse()?))
-                }
-                _ => {
-                    panic!("variant with value not found");
-                }
-            }
-        } else {
-            Self::from_str(t).map_err(std::convert::Into::into)
-        }
+impl FromSql<sql_types::Text, Pg> for ObjectSkippedReason {
+    fn from_sql(bytes: Option<PgValue<'_>>) -> deserialize::Result<Self> {
+        let t: PgValue = not_none!(bytes);
+        let t_str = String::from_utf8_lossy(t.as_bytes());
+        let ts: String = t_str.to_string();
+        _osr_from_sql(ts)
     }
 }
 
 impl Job {
-    pub fn new(action: JobAction, config: Config) -> Self {
+    pub fn new(config: Config) -> Self {
         Job {
-            action,
             config,
             ..Default::default()
         }
+    }
+
+    pub fn get_id(&self) -> Uuid {
+        self.id
+    }
+
+    pub fn add_action(&mut self, action: JobAction) {
+        self.action = action;
     }
 
     // The goal here is to eventually have a run method for all JobActions.
@@ -393,5 +392,16 @@ impl Default for JobAction {
 impl Default for JobState {
     fn default() -> Self {
         JobState::Init
+    }
+}
+
+impl Default for Job {
+    fn default() -> Self {
+        Self {
+            action: JobAction::default(),
+            state: JobState::default(),
+            id: Uuid::new_v4(),
+            config: Config::default(),
+        }
     }
 }

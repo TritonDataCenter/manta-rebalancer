@@ -42,6 +42,20 @@ SUBCOMMANDS:
 
 ```
 
+```
+Get the status of a rebalancer job
+
+USAGE:
+    remora job status <JOB_ID>
+
+FLAGS:
+    -h, --help       Prints help information
+    -V, --version    Prints version information
+
+ARGS:
+    <JOB_ID>    UUID of job
+```
+
 ## Configuration Parameters
 The remora zone leverages configuration parameters in `src/config.json`.  This
 file is populated by the config-agent using `src/config.json.in` as a template.

@@ -24,4 +24,5 @@ pub mod config;
 pub mod error;
 pub mod jobs;
 pub(crate) mod moray_client;
+pub mod pg_db;
 pub mod picker;
