@@ -36,8 +36,8 @@ fn main() -> Result<(), Error> {
                     StatusError::DBExists => {
                         println!("Could not find Job UUID {}", uuid);
                     }
-                    StatusError::LookupError => {
-                        println!("Internal Job Database Error");
+                    StatusError::LookupError | StatusError::Unknown => {
+                        println!("Internal Lookup Error");
                     }
                 }
                 std::process::exit(1);

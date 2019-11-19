@@ -17,6 +17,7 @@ use std::str::FromStr;
 use std::string::ToString;
 
 use diesel::prelude::*;
+use diesel::result::ConnectionError;
 use inflector::cases::titlecase::to_title_case;
 use strum::IntoEnumIterator;
 use uuid::Uuid;
@@ -25,6 +26,7 @@ use uuid::Uuid;
 pub enum StatusError {
     DBExists,
     LookupError,
+    Unknown,
 }
 
 pub fn get_status(uuid: Uuid) -> Result<HashMap<String, usize>, StatusError> {
@@ -35,15 +37,24 @@ pub fn get_status(uuid: Uuid) -> Result<HashMap<String, usize>, StatusError> {
 
     let conn = match pg_db::connect_db(&db_name) {
         Ok(c) => c,
-        Err(_) => {
-            return Err(StatusError::DBExists);
+        Err(e) => {
+            if let Error::DieselConnection(conn_err) = &e {
+                if let ConnectionError::BadConnection(err) = conn_err {
+                    error!("Status DB connection: {}", err);
+                    return Err(StatusError::DBExists);
+                }
+            }
+
+            error!("Unknown status DB connection error: {}", e);
+            return Err(StatusError::Unknown);
         }
     };
 
     let status_vec: Vec<EvacuateObjectStatus> =
         match evacuateobjects.select(status).get_results(&conn) {
             Ok(res) => res,
-            Err(_) => {
+            Err(e) => {
+                error!("Status DB query: {}", e);
                 return Err(StatusError::LookupError);
             }
         };
