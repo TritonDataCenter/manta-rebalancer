@@ -72,6 +72,27 @@ number of records.
 
 ## Development
 
+### Install Postgres
+* Install Postgres
+```
+pkgin install postgresql10
+```
+
+* Authentication configuration:
+Optionally add the following line to your `/var/pgsql/data/pg_hba.conf`
+```
+# TYPE  DATABASE        USER            ADDRESS                 METHOD
+local   all             postgres                                trust
+```
+or leave the default password of `postgres` in place.
+
+* Start Postgres
+```
+svcadm enable -s postgresql
+```
+
+
+### Pre-integration
 Before integration run `fmt`, `check`, `test`, and
 [clippy](https://github.com/rust-lang/rust-clippy):
 ```
