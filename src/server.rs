@@ -75,6 +75,7 @@ fn get_job(mut state: State) -> (State, Response<Body>) {
         Ok(s) => s,
         Err(e) => {
             let ret: Response<Body>;
+            remora::error!("Get Status error: {:?}", e);
             match e {
                 StatusError::DBExists => {
                     ret = bad_request(
@@ -82,10 +83,10 @@ fn get_job(mut state: State) -> (State, Response<Body>) {
                         format!("Could not find job UUID: {}", uuid),
                     );
                 }
-                StatusError::LookupError => {
+                StatusError::LookupError | StatusError::Unknown => {
                     ret = invalid_server_error(
                         &state,
-                        String::from("Job Database Error"),
+                        String::from("Internal Lookup Error"),
                     );
                 }
             }
@@ -132,7 +133,7 @@ fn list_jobs(state: State) -> (State, Response<Body>) {
             )
         }
         Err(e) => {
-            let msg = format!("Error Getting Job List: {}", e);
+            let msg = format!("Error Getting Job List: {:#?}", e);
             let ret = invalid_server_error(&state, msg);
             return (state, ret);
         }
