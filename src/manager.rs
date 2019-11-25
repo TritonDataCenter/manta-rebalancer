@@ -14,7 +14,7 @@ use remora::jobs::{self, JobAction};
 use crossbeam_channel;
 use futures::{future, Future, Stream};
 use gotham::handler::{Handler, HandlerFuture, IntoHandlerError, NewHandler};
-use gotham::helpers::http::response::{create_empty_response, create_response};
+use gotham::helpers::http::response::create_response;
 use gotham::router::builder::{
     build_simple_router, DefineSingleRoute, DrawRoutes,
 };
@@ -59,7 +59,17 @@ fn invalid_server_error(state: &State, msg: String) -> Response<Body> {
     )
 }
 
-fn get_job(mut state: State) -> (State, Response<Body>) {
+type GetJobFuture =
+    Box<dyn Future<Item = HashMap<String, usize>, Error = StatusError> + Send>;
+
+fn get_status(uuid: Uuid) -> GetJobFuture {
+    Box::new(match jobs::status::get_status(uuid) {
+        Ok(status) => future::ok(status),
+        Err(e) => future::err(e),
+    })
+}
+
+fn get_job(mut state: State) -> Box<HandlerFuture> {
     info!("Get Job Request");
     let get_job_params = GetJobParams::take_from(&mut state);
     let uuid = match Uuid::parse_str(&get_job_params.uuid) {
@@ -67,79 +77,96 @@ fn get_job(mut state: State) -> (State, Response<Body>) {
         Err(e) => {
             let msg = format!("Invalid UUID: {}", e);
             let ret = bad_request(&state, msg);
-            return (state, ret);
+            return Box::new(future::ok((state, ret)));
         }
     };
 
-    let status = match jobs::status::get_status(uuid) {
-        Ok(s) => s,
-        Err(e) => {
-            let ret: Response<Body>;
-            remora::error!("Get Status error: {:?}", e);
-            match e {
-                StatusError::DBExists => {
-                    ret = bad_request(
+    Box::new(get_status(uuid).then(move |result| {
+        match result {
+            Ok(job_status) => {
+                let ret = match serde_json::to_string(&job_status) {
+                    Ok(status) => create_response(
                         &state,
-                        format!("Could not find job UUID: {}", uuid),
-                    );
-                }
-                StatusError::LookupError | StatusError::Unknown => {
-                    ret = invalid_server_error(
-                        &state,
-                        String::from("Internal Lookup Error"),
-                    );
-                }
+                        StatusCode::OK,
+                        mime::APPLICATION_JSON,
+                        status,
+                    ),
+                    Err(e) => {
+                        let msg = format!("Error Getting Job Status: {}", e);
+                        invalid_server_error(&state, msg)
+                    }
+                };
+                future::ok((state, ret))
             }
-            return (state, ret);
+            Err(e) => {
+                let ret: Response<Body>;
+                remora::error!("Get Status error: {:?}", e);
+                match e {
+                    StatusError::DBExists => {
+                        ret = bad_request(
+                            &state,
+                            format!("Could not find job UUID: {}", uuid),
+                        );
+                    }
+                    // TODO: We want to eventually have a master DB that list
+                    // all the Jobs and their states.  For now we simply
+                    // create a new DB for each job.  The trouble is, while
+                    // the Job is still initializing its table may not have
+                    // been created yet as the tables are unique to the Job
+                    // Action.
+                    StatusError::LookupError | StatusError::Unknown => {
+                        ret = invalid_server_error(
+                            &state,
+                            String::from(
+                                "Internal Lookup Error.  Job may be \
+                                 in the Init state.\n",
+                            ),
+                        );
+                    }
+                }
+                future::ok((state, ret))
+            }
         }
-    };
-
-    let job_status = JobStatus { status };
-
-    let response = match serde_json::to_string(&job_status) {
-        Ok(status) => create_response(
-            &state,
-            StatusCode::OK,
-            mime::APPLICATION_JSON,
-            status,
-        ),
-        Err(e) => {
-            let msg = format!("Error Getting Job Status: {}", e);
-            invalid_server_error(&state, msg)
-        }
-    };
-
-    (state, response)
+    }))
 }
 
-fn list_jobs(state: State) -> (State, Response<Body>) {
+type JobListFuture =
+    Box<dyn Future<Item = Vec<String>, Error = StatusError> + Send>;
+
+fn get_job_list() -> JobListFuture {
+    Box::new(match jobs::status::list_jobs() {
+        Ok(list) => future::ok(list),
+        Err(e) => future::err(e),
+    })
+}
+
+fn list_jobs(state: State) -> Box<HandlerFuture> {
     info!("List Jobs Request");
-    let response = match jobs::status::list_jobs() {
+    let job_list_future = get_job_list();
+    Box::new(job_list_future.then(move |result| match result {
         Ok(list) => {
-            let job_list = JobList { jobs: list };
-            let jobs = match serde_json::to_string(&job_list) {
+            let jobs = match serde_json::to_string(&list) {
                 Ok(j) => j,
                 Err(e) => {
                     let msg = format!("Error Getting Job List: {}", e);
                     let ret = invalid_server_error(&state, msg);
-                    return (state, ret);
+                    return future::ok((state, ret));
                 }
             };
-            create_response(
+            let res = create_response(
                 &state,
                 StatusCode::OK,
                 mime::APPLICATION_JSON,
                 jobs,
-            )
+            );
+            future::ok((state, res))
         }
         Err(e) => {
             let msg = format!("Error Getting Job List: {:#?}", e);
             let ret = invalid_server_error(&state, msg);
-            return (state, ret);
+            future::ok((state, ret))
         }
-    };
-
-    (state, response)
+    }))
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -162,7 +189,8 @@ impl Default for JobActionPayload {
 struct EvacuateJobPayload {
     from_shark: MantaObjectShark,
     domain_name: Option<String>,
-    max_objects: Option<String>,
+    //max_objects: Option<String>,
+    max_objects: Option<u32>,
 }
 
 #[derive(Clone)]
@@ -213,19 +241,7 @@ impl Handler for JobCreateHandler {
                     .domain_name
                     .unwrap_or_else(|| self.config.domain_name.clone());
                 let max_objects = match evac_payload.max_objects {
-                    Some(str_val) => {
-                        // TODO
-                        let val: u32 = match str_val.parse() {
-                            Ok(v) => v,
-                            Err(_) => {
-                                let ret = create_empty_response(
-                                    &state,
-                                    StatusCode::UNPROCESSABLE_ENTITY,
-                                );
-                                return Box::new(future::ok((state, ret)));
-                            }
-                        };
-
+                    Some(val) => {
                         if val == 0 {
                             None
                         } else {
@@ -237,10 +253,9 @@ impl Handler for JobCreateHandler {
                     }
                 };
 
-                let from_shark = evac_payload.from_shark.clone();
                 let job_action =
                     JobAction::Evacuate(Box::new(EvacuateJob::new(
-                        from_shark,
+                        evac_payload.from_shark.clone(),
                         &domain_name,
                         &job_uuid,
                         max_objects,
@@ -335,7 +350,9 @@ mod tests {
 
         thread::spawn(move || {
             let _guard = util::init_global_logger();
-            loop {}
+            loop {
+                std::thread::sleep(std::time::Duration::from_millis(1))
+            }
         });
 
         *init = true;
@@ -345,6 +362,24 @@ mod tests {
     fn basic() {
         unit_test_init();
         let config = Config::parse_config(Some("src/config.json")).unwrap();
+
+        // Create a Job manually so that we know one exists regardless of the
+        // ability of this API to create one, or the order in which tests are
+        // run.
+        let new_job = remora::jobs::Job::new(config.clone());
+        let job_id = new_job.get_id().to_string();
+        let job_action = remora::jobs::evacuate::EvacuateJob::new(
+            MantaObjectShark {
+                manta_storage_id: String::from("fake_storage_id"),
+                datacenter: String::from("fake_datacenter"),
+            },
+            "fake.joyent.us",
+            &job_id,
+            None,
+        );
+
+        job_action.create_table().unwrap();
+
         let test_server = TestServer::new(router(config)).unwrap();
 
         let response = test_server
@@ -353,19 +388,22 @@ mod tests {
             .perform()
             .unwrap();
 
+        assert_eq!(response.status(), StatusCode::OK);
+
         let jobs_ret = response.read_body().unwrap();
-        let job_list: JobList = serde_json::from_slice(&jobs_ret).unwrap();
+        let job_list: Vec<String> = serde_json::from_slice(&jobs_ret).unwrap();
 
-        println!("Retun value: {:#?}", job_list);
+        assert!(job_list.len() > 0);
+        println!("Return value: {:#?}", job_list);
 
-        let get_this_job = job_list.jobs[0].clone();
-        let get_job_uri =
-            format!("http://localhost:8888/jobs/{}", get_this_job);
-
+        let get_job_uri = format!("http://localhost:8888/jobs/{}", job_id);
         let response = test_server.client().get(get_job_uri).perform().unwrap();
 
-        let ret = response.read_body().unwrap();
-        let pretty_response: JobStatus = serde_json::from_slice(&ret).unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let ret = response.read_utf8_body().unwrap();
+        let pretty_response: HashMap<String, usize> =
+            serde_json::from_str(&ret).expect("job status hash");
         println!("{:#?}", pretty_response);
     }
 
@@ -380,7 +418,7 @@ mod tests {
                 manta_storage_id: String::from("fake_storage_id"),
                 datacenter: String::from("fake_datacenter"),
             },
-            max_objects: None,
+            max_objects: Some(10),
         };
 
         let job_payload = JobPayload {
@@ -389,9 +427,6 @@ mod tests {
 
         let payload = serde_json::to_string(&job_payload).unwrap();
 
-        println!("===========================");
-        println!("{}", payload);
-        println!("===========================");
         let response = test_server
             .client()
             .post(
@@ -403,7 +438,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
+
         let ret = response.read_utf8_body().unwrap();
+        assert!(Uuid::parse_str(&ret).is_ok());
+
         println!("{:#?}", ret);
     }
 }

@@ -400,7 +400,7 @@ impl EvacuateJob {
         }
     }
 
-    fn create_table(&self) -> Result<usize, Error> {
+    pub fn create_table(&self) -> Result<usize, Error> {
         let conn = self.conn.lock().expect("DB conn lock");
         create_evacuateobjects_table(&*conn)
     }

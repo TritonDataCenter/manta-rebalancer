@@ -69,5 +69,5 @@ diesel = { git = 'https://github.com/diesel-rs/diesel' }
 diesel_derives = { git = "https://github.com/diesel-rs/diesel" }
 
 [[bin]]
-name = "server"
-path = "src/server.rs"
+name = "rebalancer-manager"
+path = "src/manager.rs"
