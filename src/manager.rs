@@ -189,7 +189,6 @@ impl Default for JobActionPayload {
 struct EvacuateJobPayload {
     from_shark: MantaObjectShark,
     domain_name: Option<String>,
-    //max_objects: Option<String>,
     max_objects: Option<u32>,
 }
 
