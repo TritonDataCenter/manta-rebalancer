@@ -1,7 +1,6 @@
 # remora 
 The [Manta](https://github.com/joyent/manta) object rebalancer manager and agent.
 
-
 ## Build
 ```
 make
@@ -97,4 +96,3 @@ passed to the compiled to enable the feature:
 cargo build --features "always_pass"
 ```
 
-Note: By default, this feature will never be enabled.
