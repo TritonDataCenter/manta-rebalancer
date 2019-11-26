@@ -29,7 +29,7 @@ comprised of the following:
 | Param           | Type           | Description                     |
 | --------------- | -------------- | ------------------------------- |
 | Assignment uuid | String         | Unique identifier of assignment |
-| Task list       | Array of Tasks | Array of [Tasks] (https://github.com/joyent/manta-rebalancer/blob/77a5d01f182261f9842cb00134bd55ef1e280afc/src/jobs/mod.rs#L140) |
+| Task list       | Array of Tasks | Array of [Tasks](https://github.com/joyent/manta-rebalancer/blob/77a5d01f182261f9842cb00134bd55ef1e280afc/src/jobs/mod.rs#L139-L148) |
 
 ### Responses
 | Code | Description                                            |
