@@ -96,7 +96,7 @@ Note: The above should only be used for debugging purposes as relocating an
 object to a new storage node also necessitates an update to the metadata tier
 which is not done by the agent, but by the rebalancer manager.
 
-## Get Assignment (GET /assignments/<uuid>)
+## Get Assignment (GET /assignments/uuid)
 Returns JSON object representing an assignment as seen by the agent.
 
 ### Responses
@@ -166,7 +166,7 @@ As you can see in the above response, the assignment
 fail.  The failure suggests that downloading account/object
 `d50c4fc4-f408-492f-b8bc-a0dd7c73683f/7f3ee78a-2e64-4f3d-829f-a31c7c2c2b03`
 failed and the reason supplied in the status block is a `MD5Mismatch`, that is
-the object downloaded failued checksum verification.  This is not to be confused
+the object downloaded failed checksum verification.  This is not to be confused
 with the overall status code of the GET request which was 200 since the
 assignment by the supplied uuid was indeed located.
 
