@@ -165,7 +165,7 @@ As you can see in the above response, the assignment
 `f10460aa-b142-444f-8a97-54bcbdc73bc6` contains a single task which happened to
 fail.  The failure suggests that downloading account/object
 `d50c4fc4-f408-492f-b8bc-a0dd7c73683f/7f3ee78a-2e64-4f3d-829f-a31c7c2c2b03`
-failed and the reason supplied in the status block is a `MD5Mismatch`, that is
+failed and the reason supplied in the status block is `MD5Mismatch`, that is
 the object downloaded failed checksum verification.  This is not to be confused
 with the overall status code of the GET request which was 200 since the
 assignment by the supplied uuid was indeed located.
