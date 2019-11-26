@@ -102,6 +102,7 @@ cargo clippy
 cargo test
 ```
 
+
 ## Testing
 
 There is a certain flavor of the rebalancer agent that allow for more convenient
@@ -119,3 +120,15 @@ cargo build --features "always_pass"
 ```
 
 Note: By default, this feature will never be enabled.
+
+### Testing certain modules
+* To test only a certain module (including all of its submodules:
+```
+cargo test <module name>
+```
+
+* To test only the REST API server:
+```
+cargo test --bin server
+```
+
