@@ -26,10 +26,10 @@ the order in which they are received.  An assignment posted to the agent is
 comprised of the following:
 
 ### Inputs
-| Param           | Type           | Description                     |
-| --------------- | -------------- | ------------------------------- |
-| Assignment uuid | String         | Unique identifier of assignment |
-| Task list       | Array of Tasks | Array of [Tasks](https://github.com/joyent/manta-rebalancer/blob/77a5d01f182261f9842cb00134bd55ef1e280afc/src/jobs/mod.rs#L139-L148) |
+| Param           | Type   | Description                     |
+| --------------- | ------ | ------------------------------- |
+| Assignment uuid | String | Unique identifier of assignment |
+| Task list       | Array  | Array of [Tasks](https://github.com/joyent/manta-rebalancer/blob/77a5d01f182261f9842cb00134bd55ef1e280afc/src/jobs/mod.rs#L139-L148) |
 
 ### Responses
 | Code | Description                                            |
@@ -50,7 +50,7 @@ POST /assignments -d '[
   [
     {
       "object_id": "7f3ee78a-2e64-4f3d-829f-a31c7c2c2b03",
-      "owner": d50c4fc4-f408-492f-b8bc-a0dd7c73683f",
+      "owner": "d50c4fc4-f408-492f-b8bc-a0dd7c73683f",
       "md5sum": "QXBlX0QFcscVIwptkUaI8g==",
       "source": {
         "datacenter": "robert-dc",
@@ -79,12 +79,12 @@ curl --header "Content-Type: application/json" --request POST \
   "463ec933-1d31-41f9-8e76-0db3191f6346",
   [
     {
-      "object_id": "area_codes_by_state.csv",
-      "owner": "rebalancer",
+      "object_id": "7f3ee78a-2e64-4f3d-829f-a31c7c2c2b03",
+      "owner": "d50c4fc4-f408-492f-b8bc-a0dd7c73683f",
       "md5sum": "QXBlX0QFcscVIwptkUaI8g==",
       "source": {
         "datacenter": "dc",
-        "manta_storage_id": "localhost:8080"
+        "manta_storage_id": "3.stor.us-west.joyent.us"
       },
       "status": "Pending"
     }
@@ -92,9 +92,84 @@ curl --header "Content-Type: application/json" --request POST \
 ]' http://localhost:7878/assignments
 ```
 
-Note: The above should only be used for debuggig purposes as relocating an
+Note: The above should only be used for debugging purposes as relocating an
 object to a new storage node also necessitates an update to the metadata tier
-which is not done by the agent, but by the rebalancer zone.
+which is not done by the agent, but by the rebalancer manager.
+
+## Get Assignment (GET /assignments/<uuid>)
+Returns JSON object representing an assignment as seen by the agent.
+
+### Responses
+| Code | Description                                               |
+| ---- | --------------------------------------------------------- |
+| 200  | A valid assignment with the uuid supplied has been found  |
+| 400  | Invalid request:  Correct end point, but mal-formed uuid  |
+| 404  | Assignment not found at the requested location            |
+
+### Examples
+GET /assignments/77ed8169-a59f-4d0b-a9e8-1af8a3a3c4cf
+
+Where `77ed8169-a59f-4d0b-a9e8-1af8a3a3c4cf` sustained no failures, would look
+something like this:
+
+```
+{
+  "uuid": "77ed8169-a59f-4d0b-a9e8-1af8a3a3c4ce",
+  "stats": {
+    "state": {
+      "Complete": null
+    },
+    "failed": 0,
+    "complete": 1,
+    "total": 1
+  }
+}
+```
+
+In the above example, we can see that the assignment contained a total of 1
+task and that in the course of processing the assignment, 0 failures were
+sustained.  If (for some reason) a particular task that is part of an assignment
+fails, the object and reason associated with the failure will be described in
+the information returned in the response to the GET request:
+
+```
+{
+  "uuid": "fd45e70b-5435-457e-a371-93fcb8215e0d",
+  "stats": {
+    "state": {
+      "Complete": [
+        {
+          "object_id": "7f3ee78a-2e64-4f3d-829f-a31c7c2c2b03",
+          "owner": "d50c4fc4-f408-492f-b8bc-a0dd7c73683f",
+          "md5sum": "QXBlX0QFcscVIwptkUaI8g==",
+          "source": {
+            "datacenter": "dc",
+            "manta_storage_id": "3.stor.us-west.joyent.us"
+          },
+          "status": {
+            "Failed": {
+              "Failed": "MD5Mismatch"
+            }
+          }
+        }
+      ]
+    },
+    "failed": 1,
+    "complete": 1,
+    "total": 1
+  }
+}
+```
+
+As you can see in the above response, the assignment
+`f10460aa-b142-444f-8a97-54bcbdc73bc6` contains a single task which happened to
+fail.  The failure suggests that downloading account/object
+`d50c4fc4-f408-492f-b8bc-a0dd7c73683f/7f3ee78a-2e64-4f3d-829f-a31c7c2c2b03`
+failed and the reason supplied in the status block is a `MD5Mismatch`, that is
+the object downloaded failued checksum verification.  This is not to be confused
+with the overall status code of the GET request which was 200 since the
+assignment by the supplied uuid was indeed located.
+
 
 ## Build
 ```
