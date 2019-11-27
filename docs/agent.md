@@ -177,6 +177,9 @@ POST /assignments -d '[
 ]'
 ```
 
+Note: The `status` property of each task is optional when posting and will
+default to `"Pending"`.
+
 The assignment above has an id of `463ec933-1d31-41f9-8e76-0db3191f6346` and a
 list containing only one task representing a single object that the agent should
 download and store locally under the directory
