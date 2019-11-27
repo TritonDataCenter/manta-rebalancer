@@ -287,3 +287,24 @@ failed and the reason supplied in the status block is `MD5Mismatch`, that is
 the object downloaded failed checksum verification.  This is not to be confused
 with the overall status code of the GET request which was 200 since the
 assignment by the supplied uuid was indeed located.
+
+
+## Task Status
+The agent processes tasks within a given assignment sequentially.  There are
+several different states that a task can be in during the course of processing
+an overall assignment.  Below is a table detailing each:
+
+| Value    | Description                                               |
+| -------- | --------------------------------------------------------- |
+| Pending  | The task has not been processed yet                       |
+| Running  | The task is currently being processed                     |
+| Complete | The agent finished processing the task *successfully*     |
+| Failed   | The agent finished processing the task but it *failed*    |
+
+In the case of tasks that have failed, the agent will report all failures in
+the body of the response to a `GET` request, detailing the owner, object,
+storage node, checksum information and finally, the specific reason for the
+failure.  Depending on the reason for the failure, the rebalancer manager may
+elect to retry the task as part of another assignment, or require operator
+intervention in a situation where retrying is not programmatically possible
+right now.
