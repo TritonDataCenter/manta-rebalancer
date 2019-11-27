@@ -9,7 +9,10 @@
 -->
 
 # Agent
-The [Manta](https://github.com/joyent/manta) object rebalancer agent.
+The [Manta](https://github.com/joyent/manta) object rebalancer agent is a
+subsystem within the
+[Rebalancer project](https://github.com/joyent/manta-rebalancer) which is
+orchestrated by the rebalancer manager.
 
 # Overview
 The rebalancer agent is a service which runs on every storage node in a Manta
