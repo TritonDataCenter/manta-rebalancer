@@ -18,6 +18,121 @@ as the rebalancer "manager".  Its primary role is to handle requests containing
 an assignment posted by the manager.  The following interfaces are currently
 supported by the agent.
 
+## Build
+```
+make
+```
+
+## Usage
+```
+rebalancer-agent
+
+USAGE:
+    rebalancer-agent [FLAGS]
+
+FLAGS:
+    -h, --help       Prints help information
+    -V, --version    Prints version information
+
+```
+
+```
+Job Management
+
+FLAGS:
+    -h, --help       Prints help information
+    -V, --version    Prints version information
+
+```
+
+## Configuration Parameters
+Currently, the rebalancer agent does not require any configuration parameters.
+
+## Development
+
+Before integration run `fmt`, `check`, `test`, and
+[clippy](https://github.com/rust-lang/rust-clippy):
+```
+cargo fmt
+cargo check
+cargo clippy
+cargo test agent -- --nocapture | bunyan
+```
+
+## Testing
+
+### Execution
+As discussed in the development section above, anytime that a change is made to
+the agent code (or any subsystem that it diretly consumes), at a minimum, a
+clean test run of all agent tests is necessary.
+
+Current sanity checks include:
+* Download an object (without any problems).
+* Replace an existing object.
+* Attempt to download an object that is not present on the source.
+* Downloaded object fails checksum verification.
+* Attempt to send the agent an assignment which it has already received.
+
+Note: It is worth mentioning that when the agent unit test suite is started,
+all tests actually run in parallel.  All existing tests use the same instance
+of the rebalancer agent which is declared (lazy static, guarded by a mutex),
+accessible to all threads running a test.  It is possible for individual threads
+to create additional instances of an agent, accessible only to that thread, if
+the agent that is globally accessible does not meet the needs of the test.  The
+primary reason for having additional agents would be if the developer wanted an
+agent that processed tasks in a different way than the way it would in
+production.  For example, an agent that blindly always fails tasks might be
+necessary if we are testing how the agent (or a client of the agent handles
+failure scenarios).
+
+### Development
+When developing test automation for the agent (or for the rebalancer zone, where
+an instance of an agent is required), there is an easy way to create of an
+agent, running within the same process as the test code itself:
+
+```rust
+use crate::util::test::{get_progress, send_assignment_impl};
+use gotham::test::TestServer;
+
+// Function that treats all tasks as being successful.
+fn always_pass(task: &mut Task) {
+    task.set_status(TaskStatus::Complete);
+    return;
+}
+
+// test_server is a variable of type TestServer, returned by router()
+let test_server = router(always_pass);
+
+// Now to send an assignment to the newly created agent.
+let uuid = Uuid::new_v4().to_hyphenated().to_string();
+let mut tasks = Vec::new();
+
+// Populate the vector (tasks) with as many tasks as you'd like.
+[..]
+
+// Send the assignment to the agent
+send_assignment_impl(&tasks, &uuid, &test_server, StatusCode::OK);
+
+[..]
+//wait some period of time
+[..]
+
+// Ask the agent for a status update.  This is basically the same thing as issuing
+// a GET to http://<shark>/assignments/<uuid>.
+let assignment = get_progress(uuid, &test_server);
+```
+
+Note: The above example will create a version of an agent that will declare
+all tasks in an assignment that it receives as having passed.  To create an
+instance of an agent where it processes tasks the it would in production, it
+is a simple matter of supplying a different function for `process_task()`:
+
+```rust
+let test_server = router(crate::agent::process_task);
+```
+
+For more examples of how agent tests are currently implemented, see the unit
+test section in `src/agent.rs`.
 
 ## Send assignment (POST /assignments)
 
@@ -169,120 +284,3 @@ failed and the reason supplied in the status block is `MD5Mismatch`, that is
 the object downloaded failed checksum verification.  This is not to be confused
 with the overall status code of the GET request which was 200 since the
 assignment by the supplied uuid was indeed located.
-
-
-## Build
-```
-make
-```
-
-## Usage
-```
-rebalancer-agent
-
-USAGE:
-    rebalancer-agent [FLAGS]
-
-FLAGS:
-    -h, --help       Prints help information
-    -V, --version    Prints version information
-
-```
-
-```
-Job Management
-
-FLAGS:
-    -h, --help       Prints help information
-    -V, --version    Prints version information
-
-```
-
-## Configuration Parameters
-Currently, the rebalancer agent does not require any configuration parameters.
-
-## Development
-
-Before integration run `fmt`, `check`, `test`, and
-[clippy](https://github.com/rust-lang/rust-clippy):
-```
-cargo fmt
-cargo check
-cargo clippy
-cargo test agent -- --nocapture | bunyan
-```
-
-## Testing
-
-### Execution
-As discussed in the development section above, anytime that a change is made to
-the agent code (or any subsystem that it diretly consumes), at a minimum, a
-clean test run of all agent tests is necessary.
-
-Current sanity checks include:
-* Download an object (without any problems).
-* Replace an existing object.
-* Attempt to download an object that is not present on the source.
-* Downloaded object fails checksum verification.
-* Attempt to send the agent an assignment which it has already received.
-
-Note: It is worth mentioning that when the agent unit test suite is started,
-all tests actually run in parallel.  All existing tests use the same instance
-of the rebalancer agent which is declared (lazy static, guarded by a mutex),
-accessible to all threads running a test.  It is possible for individual threads
-to create additional instances of an agent, accessible only to that thread, if
-the agent that is globally accessible does not meet the needs of the test.  The
-primary reason for having additional agents would be if the developer wanted an
-agent that processed tasks in a different way than the way it would in
-production.  For example, an agent that blindly always fails tasks might be
-necessary if we are testing how the agent (or a client of the agent handles
-failure scenarios).
-
-### Development
-When developing test automation for the agent (or for the rebalancer zone, where
-an instance of an agent is required), there is an easy way to create of an
-agent, running within the same process as the test code itself:
-
-```rust
-use crate::util::test::{get_progress, send_assignment_impl};
-use gotham::test::TestServer;
-
-// Function that treats all tasks as being successful.
-fn always_pass(task: &mut Task) {
-    task.set_status(TaskStatus::Complete);
-    return;
-}
-
-// test_server is a variable of type TestServer, returned by router()
-let test_server = router(always_pass);
-
-// Now to send an assignment to the newly created agent.
-let uuid = Uuid::new_v4().to_hyphenated().to_string();
-let mut tasks = Vec::new();
-
-// Populate the vector (tasks) with as many tasks as you'd like.
-[..]
-
-// Send the assignment to the agent
-send_assignment_impl(&tasks, &uuid, &test_server, StatusCode::OK);
-
-[..]
-//wait some period of time
-[..]
-
-// Ask the agent for a status update.  This is basically the same thing as issuing
-// a GET to http://<shark>/assignments/<uuid>.
-let assignment = get_progress(uuid, &test_server);
-```
-
-Note: The above example will create a version of an agent that will declare
-all tasks in an assignment that it receives as having passed.  To create an
-instance of an agent where it processes tasks the it would in production, it
-is a simple matter of supplying a different function for `process_task()`:
-
-```rust
-let test_server = router(crate::agent::process_task);
-```
-
-For more examples of how agent tests are currently implemented, see the unit
-test section in `src/agent.rs`.
