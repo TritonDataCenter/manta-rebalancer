@@ -18,8 +18,7 @@ orchestrated by the rebalancer manager.
 The rebalancer agent is a service which runs on every storage node in a Manta
 deployment and its actions are orchestrated by a per-region manager referred to
 as the rebalancer "manager".  Its primary role is to handle requests containing
-an assignment posted by the manager.  The following interfaces are currently
-supported by the agent.
+an assignment posted by the manager.
 
 ## Build
 ```
@@ -32,15 +31,6 @@ rebalancer-agent
 
 USAGE:
     rebalancer-agent [FLAGS]
-
-FLAGS:
-    -h, --help       Prints help information
-    -V, --version    Prints version information
-
-```
-
-```
-Job Management
 
 FLAGS:
     -h, --help       Prints help information
@@ -66,7 +56,7 @@ cargo test agent -- --nocapture | bunyan
 
 ### Execution
 As discussed in the development section above, anytime that a change is made to
-the agent code (or any subsystem that it diretly consumes), at a minimum, a
+the agent code (or any subsystem that it directly consumes), at a minimum, a
 clean test run of all agent tests is necessary.
 
 Current sanity checks include:
@@ -89,8 +79,8 @@ necessary if we are testing how the agent (or a client of the agent handles
 failure scenarios).
 
 ### Development
-When developing test automation for the agent (or for the rebalancer zone, where
-an instance of an agent is required), there is an easy way to create of an
+When developing test automation for the agent (or for the rebalancer manager,
+where an instance of an agent is required), there is an easy way to create of an
 agent, running within the same process as the test code itself:
 
 ```rust
@@ -158,7 +148,7 @@ comprised of the following:
 
 
 ### Example
-Below is a sample of the payload supplied in a request by the zone to post an
+Below is a sample of the payload supplied in a request by the manager to post an
 assignment to the agent:
 
 
