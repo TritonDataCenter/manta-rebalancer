@@ -74,7 +74,6 @@ impl Config {
 
 pub enum SubCommand {
     Server, // Start the server
-    Agent,
     DoJob(Box<Job>),
     Status(Uuid),
     JobList,
@@ -99,12 +98,6 @@ impl Command {
                     .short("s")
                     .long("server")
                     .help("Run in server mode"),
-            )
-            .arg(
-                Arg::with_name("agent")
-                    .short("a")
-                    .long("agent")
-                    .help("Run in agent mode"),
             )
             .arg(
                 Arg::with_name("config_file")
@@ -208,10 +201,6 @@ impl Command {
             subcommand = SubCommand::Server;
         }
 
-        if matches.is_present("agent") {
-            subcommand = SubCommand::Agent;
-        }
-
         // TODO: There must be a better way.  YAML perhaps?
         if let Some(sub_matches) = matches.subcommand_matches("job") {
             // Job
@@ -282,4 +271,10 @@ fn job_create_subcommand_handler(
     job.add_action(job_action);
 
     Ok(SubCommand::DoJob(Box::new(job)))
+}
+
+pub fn print_version() {
+    let version = env!("CARGO_PKG_VERSION");
+    let name = env!("CARGO_PKG_NAME");
+    println!("{} {}", name, version);
 }

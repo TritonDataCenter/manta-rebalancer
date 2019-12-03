@@ -8,7 +8,6 @@
  * Copyright 2019, Joyent, Inc.
  */
 
-use remora::agent::Agent;
 use remora::config::{Command, SubCommand};
 use remora::error::Error;
 use remora::jobs::status::{self, StatusError};
@@ -55,14 +54,5 @@ fn main() -> Result<(), Error> {
                 std::process::exit(1);
             }
         },
-        SubCommand::Agent => {
-            // We should only be using 0.0.0.0 (INADDR_ANY) temporarily.  In
-            // production we will be supply an ip address that is obtained from
-            // the config file that we process which will dictate the network
-            // on which to listen.  It is worth mentioning that this will likely
-            // also be the case for the agent port.
-            Agent::run("0.0.0.0:7878");
-            Ok(())
-        }
     }
 }

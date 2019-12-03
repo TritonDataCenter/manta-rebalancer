@@ -75,3 +75,7 @@ diesel_derives = { git = "https://github.com/diesel-rs/diesel" }
 [[bin]]
 name = "rebalancer-manager"
 path = "src/manager.rs"
+
+[[bin]]
+name = "rebalancer-agent"
+path = "src/agent-main.rs"
