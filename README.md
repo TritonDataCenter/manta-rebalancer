@@ -25,7 +25,6 @@ USAGE:
     remora [FLAGS] [SUBCOMMAND]
 
 FLAGS:
-    -a, --agent      Run in agent mode
     -h, --help       Prints help information
     -s, --server     Run in server mode
     -V, --version    Prints version information
