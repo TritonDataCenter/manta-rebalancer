@@ -41,6 +41,7 @@ use std::time::Duration;
 use crossbeam_channel as crossbeam;
 use crossbeam_channel::TryRecvError;
 use crossbeam_deque::{Injector, Steal};
+use field_count::FieldCount;
 use libmanta::moray::{MantaObject, MantaObjectShark};
 use moray::client::MorayClient;
 use quickcheck::{Arbitrary, Gen};
@@ -293,6 +294,8 @@ impl Default for EvacuateObjectStatus {
     Default,
     Clone,
     PartialEq,
+    Associations,
+    FieldCount,
 )]
 #[table_name = "evacuateobjects"]
 #[changeset_options(treat_none_as_null = "true")]
@@ -812,17 +815,31 @@ impl EvacuateJob {
     ) -> Result<usize, Error> {
         use self::evacuateobjects::dsl::*;
 
+        let mut total_count = 0;
         let locked_conn = self.conn.lock().expect("DB conn lock");
+
+        // Postgres has a maximum of 65535 bind parameters, and each field
+        // has the potential of being a single bind parameter so we split
+        // inserts into sub vectors each having no greater than 65535 /
+        // field_count EvacuateObject elements.
+        let chunk_size = 65535 / EvacuateObject::field_count();
+        let insert_vecs: Vec<&[EvacuateObject]> = vec_objs.chunks(chunk_size)
+            .collect();
+
         let now = std::time::Instant::now();
+
         // TODO: consider checking record count to ensure update success
-        let ret = diesel::insert_into(evacuateobjects)
-            .values(vec_objs)
-            .execute(&*locked_conn)
-            .unwrap_or_else(|e| {
-                let msg = format!("Error inserting object into DB: {}", e);
-                error!("{}", msg);
-                panic!(msg);
-            });
+        for sub_vec in insert_vecs {
+            let ret = diesel::insert_into(evacuateobjects)
+                .values(sub_vec)
+                .execute(&*locked_conn)
+                .unwrap_or_else(|e| {
+                    let msg = format!("Error inserting object into DB: {}", e);
+                    error!("{}", msg);
+                    panic!(msg);
+                });
+            total_count += ret;
+        }
 
         // TODO: remove.
         // Leave this in here for now so that we can use the functionality
@@ -830,7 +847,7 @@ impl EvacuateJob {
         let mut total_time = self.total_db_time.lock().expect("DB time lock");
         *total_time += now.elapsed().as_millis();
 
-        Ok(ret)
+        Ok(total_count)
     }
 
     // There are other possible approaches here, and we should check to see which one performs the
@@ -2754,7 +2771,7 @@ mod tests {
     use crate::metrics::{metrics_error_inc, metrics_init, metrics_object_inc};
     use crate::storinfo::ChooseAlgorithm;
     use lazy_static::lazy_static;
-    use quickcheck::{Arbitrary, StdThreadGen};
+    use quickcheck::{Arbitrary, StdThreadGen, RngCore};
     use quickcheck_helpers::random::string as random_string;
     use rand::Rng;
     use rebalancer::libagent::{
@@ -2805,6 +2822,11 @@ mod tests {
         task.set_status(TaskStatus::Complete);
     }
 
+    lazy_static! {
+        static ref INITIALIZED: Mutex<bool> = Mutex::new(false);
+    }
+
+
     fn generate_storage_node(local: bool) -> StorageNode {
         let mut rng = rand::thread_rng();
         let mut g = StdThreadGen::new(100);
@@ -2839,6 +2861,16 @@ mod tests {
 
     struct MockStorinfo;
 
+    fn fake_evacuate_job() -> EvacuateJob {
+        EvacuateJob::new(
+            MantaObjectShark::default(),
+            "region.fakedomain.us",
+            &Uuid::new_v4().to_string(),
+            None,
+        )
+    }
+
+
     impl MockStorinfo {
         fn new() -> Self {
             MockStorinfo {}
@@ -2867,11 +2899,34 @@ mod tests {
     }
 
     #[test]
+    fn insert_big_list() {
+        unit_test_init();
+
+        let mut g = StdThreadGen::new(10);
+        let mut obj_vec = vec![];
+        let job_action = fake_evacuate_job();
+
+        // At least 65535, but not too big.  This is going to take a while
+        // anyway.
+        let object_count = (g.next_u32() % 100_000) + 65535;
+
+        assert!(job_action.create_table().is_ok());
+        for _ in 0..object_count {
+            obj_vec.push(EvacuateObject::arbitrary(&mut g));
+        }
+        assert_eq!(
+            job_action.insert_many_into_db(&obj_vec).unwrap(),
+            object_count as usize
+        );
+    }
+
+    #[test]
     fn no_skip() {
         use super::*;
         use rand::Rng;
 
         unit_test_init();
+
         struct NoSkipStorinfo;
         impl NoSkipStorinfo {
             fn new() -> Self {
@@ -2900,15 +2955,9 @@ mod tests {
             }
         }
 
-        let from_shark = String::from("1.stor.domain");
-        let job_action = EvacuateJob::new(
-            from_shark,
-            "fakedomain.us",
-            &Uuid::new_v4().to_string(),
-            ConfigOptions::default(),
-            Some(100),
-        )
-        .expect("initialize evacuate job");
+        let mut job_action = fake_evacuate_job();
+        job_action.max_objects = Some(100);
+
         assert!(job_action.create_table().is_ok());
 
         let job_action = Arc::new(job_action);
@@ -3095,14 +3144,7 @@ mod tests {
     fn assignment_processing_test() {
         unit_test_init();
         let mut g = StdThreadGen::new(10);
-        let job_action = EvacuateJob::new(
-            String::new(),
-            "fakedomain.us",
-            &Uuid::new_v4().to_string(),
-            ConfigOptions::default(),
-            None,
-        )
-        .expect("initialize evacuate job");
+        let job_action = fake_evacuate_job();
 
         // Create the database table
         assert!(job_action.create_table().is_ok());
@@ -3226,14 +3268,7 @@ mod tests {
 
         // These tests are run locally and don't go out over the network so any properly formatted
         // host/domain name is valid here.
-        let job_action = EvacuateJob::new(
-            String::new(),
-            "fakedomain.us",
-            &Uuid::new_v4().to_string(),
-            ConfigOptions::default(),
-            None,
-        )
-        .expect("initialize evacuate job");
+        let job_action = fake_evacuate_job();
         let job_action = Arc::new(job_action);
 
         let assignment_manager_handle = match start_assignment_manager(
@@ -3266,17 +3301,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn skip_object_test() {
-        // TODO: add test that includes skipped objects
-        unit_test_init();
-    }
-
-    #[test]
-    fn duplicate_object_id_test() {
-        // TODO: add test that includes duplicate object IDs
-        unit_test_init();
-    }
+    // TODO: add test that includes skipped objects
+    // TODO: add test that includes duplicate object IDs
 
     #[test]
     fn validate_destination_test() {
@@ -3346,6 +3372,7 @@ mod tests {
     #[test]
     fn full_test() {
         unit_test_init();
+
         let now = std::time::Instant::now();
         let storinfo = MockStorinfo::new();
         let storinfo = Arc::new(storinfo);
@@ -3357,14 +3384,7 @@ mod tests {
 
         // These tests are run locally and don't go out over the network so any properly formatted
         // host/domain name is valid here.
-        let job_action = EvacuateJob::new(
-            String::new(),
-            "region.fakedomain.us",
-            &Uuid::new_v4().to_string(),
-            ConfigOptions::default(),
-            None,
-        )
-        .expect("initialize evacuate job");
+        let job_action = fake_evacuate_job();
 
         // Create the database table
         assert!(job_action.create_table().is_ok());
