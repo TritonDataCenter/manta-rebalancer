@@ -110,14 +110,75 @@ pub struct ObjectAndStatus {
     reason: String
 }
 
-pub fn list_objects_and_status(uuid: Uuid)
-    -> Result<Vec<ObjectAndStatus>, StatusError>
+fn list_objects_and_status_unbounded(
+    uuid: Uuid
+) -> Result<Vec<ObjectAndStatus>, StatusError>
+{
+    Ok(vec![ObjectAndStatus {
+        uuid: Uuid::new_v4().to_string(),
+        status: EvacuateObjectStatus::default(),
+        reason: String::from("test")
+    }])
+}
+
+fn list_objects_and_status_offset(
+    uuid: Uuid,
+    offset: i64,
+    limit: i64
+) -> Result<Vec<ObjectAndStatus>, StatusError>
+{
+    Ok(vec![ObjectAndStatus {
+        uuid: Uuid::new_v4().to_string(),
+        status: EvacuateObjectStatus::default(),
+        reason: String::from("test")
+    }])
+
+}
+use diesel::associations::HasTable;
+use diesel::{sql_query, debug_query};
+use diesel::pg::Pg;
+use crate::pagination::*;
+
+/*
+pub fn list_objects_and_status(
+    uuid: Uuid,
+    offset: Option<i64>,
+    limit: Option<i64>
+) -> Result<Vec<ObjectAndStatus>, StatusError>
 {
     use super::evacuate::evacuateobjects::dsl::*;
     let conn = status_db_conn(uuid)?;
     let mut ret = vec![];
 
-    let objs = evacuateobjects.load::<EvacuateObject>(&conn).expect("todo");
+
+    if let Some(off) = offset {
+        let lim = -1;
+        match limit {
+            Some(l) => {
+                match list_objects_and_status_offset(uuid, off, lim) {
+                    Ok(result) => result,
+                    Err(e) => {
+                        return Err(e);
+                    }
+                }
+            },
+            None => ()
+        }
+
+    }
+    let mut query = evacuateobjects
+        .select(evacuateobjects::all_columns())
+        .paginate(2)
+        .limit(2);
+
+    let sql = debug_query::<Pg, _>(&query).to_string();
+    dbg!(sql);
+
+    let result = query.load_and_count_pages::<EvacuateObject>(&conn).unwrap();
+    dbg!(&result.0);
+    dbg!(&result.1);
+
+    let objs = result.0;
 
     for obj in objs {
         let reason = match obj.status {
@@ -139,6 +200,7 @@ pub fn list_objects_and_status(uuid: Uuid)
 
     Ok(ret)
 }
+*/
 
 
 
@@ -185,13 +247,14 @@ mod tests {
         use diesel::pg::Pg;
         use crate::pagination::*;
         let mut query = evacuateobjects.select(evacuateobjects::all_columns()
-        ).paginate(5).per_page(100);
+        ).paginate(2).limit(2);
 
         let sql = debug_query::<Pg, _>(&query).to_string();
         dbg!(sql);
 
         let ret = query.load_and_count_pages::<EvacuateObject>(&conn).unwrap();
-        dbg!(ret);
+        dbg!(ret.0);
+        dbg!(ret.1);
         //////////////
 
         /*
@@ -210,7 +273,7 @@ mod tests {
         */
 
 
-        list_objects_and_status(uuid).unwrap();
+        list_objects_and_status(uuid, Some(20), Some(10)).unwrap();
         /*
         if let Err(_) = list_objects_and_status(uuid) {
             return false;
