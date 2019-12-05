@@ -10,11 +10,10 @@
 use std::env;
 
 use remora::agent::Agent;
-use remora::config;
 use remora::util;
 
 fn usage() {
-    config::print_version();
+    util::print_version();
     println!("Usage:");
     println!(" The options are:");
     println!("  -h, --help       Display this information");
@@ -34,7 +33,7 @@ fn main() {
                 return;
             }
             "-V" | "--version" => {
-                config::print_version();
+                util::print_version();
                 return;
             }
             _ => {

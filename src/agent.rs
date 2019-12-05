@@ -28,7 +28,7 @@ use hyper::{Body, Chunk, Method};
 use joyent_rust_utils::file::calculate_md5;
 use libmanta::moray::MantaObjectShark;
 
-use crate::jobs::{AssignmentPayload, ObjectSkippedReason, Task, TaskStatus};
+use crate::common::{AssignmentPayload, ObjectSkippedReason, Task, TaskStatus};
 
 use reqwest::StatusCode;
 use rusqlite;

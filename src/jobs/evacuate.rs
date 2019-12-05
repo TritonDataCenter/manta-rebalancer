@@ -12,9 +12,9 @@ use crate::agent::{AgentAssignmentState, Assignment as AgentAssignment};
 use crate::config::Config;
 use crate::error::{CrossbeamError, Error, InternalError, InternalErrorCode};
 use crate::jobs::{
-    Assignment, AssignmentId, AssignmentPayload, AssignmentState, ObjectId,
-    ObjectSkippedReason, StorageId, Task, TaskStatus,
+    Assignment, AssignmentId, AssignmentState, ObjectId, StorageId,
 };
+use crate::common::{AssignmentPayload, ObjectSkippedReason, Task, TaskStatus};
 use crate::moray_client;
 use crate::pg_db;
 use crate::picker::{self as mod_picker, SharkSource, StorageNode};
