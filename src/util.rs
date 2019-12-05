@@ -104,7 +104,7 @@ pub fn shard_host2num(shard_host: &str) -> u32 {
 #[cfg(test)]
 pub mod test {
     use crate::agent::Assignment;
-    use crate::jobs::Task;
+    use crate::common::Task;
     use gotham::test::TestServer;
     use reqwest::StatusCode;
 
