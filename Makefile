@@ -1,3 +1,13 @@
+#
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at http://mozilla.org/MPL/2.0/.
+#
+
+#
+# Copyright 2019, Joyent, Inc.
+#
+
 all: check doc test
 	cargo build --bin rebalancer-agent
 	cargo build --bin rebalancer-manager --features "postgres"
@@ -10,7 +20,7 @@ manager:
 	cargo build --bin rebalancer-manager --features "postgres"
        
 doc:
-	cargo doc --features
+	cargo doc --features "postgres"
 
 clean:
 	cargo clean 
@@ -20,7 +30,9 @@ check:
 	cargo check --features "postgres"
 
 jobtests:
-	cargo test job -- --test-threads=1
+	RUST_LOG=remora=trace cargo test job --features "postgres" -- --test-threads=1
 
-test:
-	RUST_LOG=remora=trace cargo test -- --nocapture
+agenttests:
+	RUST_LOG=remora=trace cargo test agent --features "postgres"
+
+test: agenttests jobtests
