@@ -10,7 +10,7 @@ manager:
 	cargo build --bin rebalancer-manager --features "postgres"
        
 doc:
-	cargo doc
+	cargo doc --features
 
 clean:
 	cargo clean 
