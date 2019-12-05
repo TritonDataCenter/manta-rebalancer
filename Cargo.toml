@@ -19,12 +19,10 @@ always_pass = []
 [dependencies]
 base64 = "0.10.1"
 uuid = { version = "0.7.4", features = ["v4"] }
-libmanta = { git = "https://github.com/joyent/rust-libmanta", branch = "feature_branch" }
-# libmanta = { git = "https://github.com/joyent/rust-libmanta", tag = "v0.5.0" }
+libmanta = { git = "https://github.com/joyent/rust-libmanta", tag = "v0.6.0" }
 
 clap = "2.33.0"
-sharkspotter = { git = "https://github.com/joyent/rust-sharkspotter", branch = "feature_branch" }
-# sharkspotter = { git = "https://github.com/joyent/rust-sharkspotter", tag = "v0.6.0" }
+sharkspotter = { git = "https://github.com/joyent/rust-sharkspotter", tag = "v0.7.0" }
 crossbeam-channel = "0.3.8"
 crossbeam-deque = "0.7.1"
 serde = { version = "1.0.91", features = ["derive"] }
@@ -37,8 +35,7 @@ joyent-rust-utils = { git = "https://github.com/joyent/rust-utils" }
 Inflector = "0.11.4"
 lazy_static = "1.4.0"
 mime = "0.3.13"
-moray = { git = "https://github.com/joyent/rust-moray", branch = "feature_branch" }
-# moray = { git = "https://github.com/joyent/rust-moray", tag = "v0.7.0" }
+moray = { git = "https://github.com/joyent/rust-moray", tag = "v0.8.0" }
 futures = "0.1.27"
 trust-dns-resolver = "0.11.1"
 threadpool = "1.7.1"
