@@ -10,6 +10,7 @@ panic = "abort"
 [features]
 # No features by default
 default = []
+postgres = ["libmanta/postgres", "sharkspotter/postgres", "moray/postgres", "diesel/postgres"]
 
 # Always mark a task as complete without attempting to even download the object
 # within it.  This is for TESTING PURPOSES ONLY!
@@ -18,9 +19,10 @@ always_pass = []
 [dependencies]
 base64 = "0.10.1"
 uuid = { version = "0.7.4", features = ["v4"] }
-libmanta = { git = "https://github.com/joyent/rust-libmanta", tag = "v0.5.0" }
+libmanta = { git = "https://github.com/joyent/rust-libmanta", tag = "v0.6.0" }
+
 clap = "2.33.0"
-sharkspotter = { git = "https://github.com/joyent/rust-sharkspotter", tag = "v0.6.0" }
+sharkspotter = { git = "https://github.com/joyent/rust-sharkspotter", tag = "v0.7.0" }
 crossbeam-channel = "0.3.8"
 crossbeam-deque = "0.7.1"
 serde = { version = "1.0.91", features = ["derive"] }
@@ -33,7 +35,7 @@ joyent-rust-utils = { git = "https://github.com/joyent/rust-utils" }
 Inflector = "0.11.4"
 lazy_static = "1.4.0"
 mime = "0.3.13"
-moray = { git = "https://github.com/joyent/rust-moray", tag = "v0.7.0" }
+moray = { git = "https://github.com/joyent/rust-moray", tag = "v0.8.0" }
 futures = "0.1.27"
 trust-dns-resolver = "0.11.1"
 threadpool = "1.7.1"
@@ -56,7 +58,7 @@ strum_macros = "0.16.0"
 # that is not compatible with rust 1.35.
 unicode-normalization = "=0.1.5"
 
-diesel = {version = "1.4.2", features = ["sqlite", "postgres"]}
+diesel = {version = "1.4.2", features = ["sqlite"]}
 
 slog = "2.5.2"
 slog-bunyan = { git = "https://github.com/slog-rs/bunyan" }
@@ -66,7 +68,6 @@ slog-scope = "4.1.2"
 slog-term = "2.4.1"
 crc = "1.8.1"
 unescape = "0.1.0"
-
 
 [patch.crates-io]
 diesel = { git = 'https://github.com/diesel-rs/diesel' }

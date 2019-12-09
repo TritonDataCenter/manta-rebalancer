@@ -104,7 +104,7 @@ pub fn shard_host2num(shard_host: &str) -> u32 {
 #[cfg(test)]
 pub mod test {
     use crate::agent::Assignment;
-    use crate::jobs::Task;
+    use crate::common::Task;
     use gotham::test::TestServer;
     use reqwest::StatusCode;
 
@@ -183,4 +183,10 @@ pub mod test {
 
         assignment
     }
+}
+
+pub fn print_version() {
+    let version = env!("CARGO_PKG_VERSION");
+    let name = env!("CARGO_PKG_NAME");
+    println!("{} {}", name, version);
 }

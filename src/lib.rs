@@ -19,10 +19,22 @@ extern crate strum_macros;
 #[macro_use]
 pub mod util;
 
+pub mod common;
 pub mod agent;
+
+#[cfg(feature = "postgres")]
 pub mod config;
+
 pub mod error;
+
+#[cfg(feature = "postgres")]
 pub mod jobs;
+
+#[cfg(feature = "postgres")]
 pub mod moray_client;
+
+#[cfg(feature = "postgres")]
 pub mod pg_db;
+
+#[cfg(feature = "postgres")]
 pub mod picker;
