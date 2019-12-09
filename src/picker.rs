@@ -13,7 +13,6 @@ use quickcheck::{Arbitrary, Gen};
 use quickcheck_helpers::random::string as random_string;
 use reqwest;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Mutex,
@@ -57,7 +56,7 @@ pub struct Picker {
     sharks: Arc<Mutex<Option<Vec<StorageNode>>>>,
     handle: Mutex<Option<JoinHandle<()>>>,
     running: Arc<AtomicBool>,
-    address: String,
+    host: String,
 }
 
 ///
@@ -108,22 +107,21 @@ impl DefaultPickerAlgorithm {
 impl Picker {
     pub fn new(domain: &str) -> Result<Self, Error> {
         let picker_domain_name = format!("picker.{}", domain);
-        let address = format!("http://{}/poll", picker_domain_name);
         Ok(Picker {
             running: Arc::new(AtomicBool::new(true)),
             handle: Mutex::new(None),
             sharks: Arc::new(Mutex::new(Some(vec![]))),
-            address,
+            host: picker_domain_name,
         })
     }
 
     /// Populate the picker's sharks field, and start the picker updater thread.
     pub fn start(&mut self) -> Result<(), Error> {
         let mut locked_sharks = self.sharks.lock().unwrap();
-        *locked_sharks = Some(fetch_sharks(&self.address));
+        *locked_sharks = Some(fetch_sharks(&self.host));
 
         let handle = Self::updater(
-            self.address.clone(),
+            self.host.clone(),
             Arc::clone(&self.sharks),
             Arc::clone(&self.running),
         );
@@ -148,7 +146,7 @@ impl Picker {
     }
 
     fn updater(
-        address: String,
+        host: String,
         sharks: Arc<Mutex<Option<Vec<StorageNode>>>>,
         running: Arc<AtomicBool>,
     ) -> JoinHandle<()> {
@@ -160,7 +158,7 @@ impl Picker {
             while keep_running.load(Ordering::Relaxed) {
                 thread::sleep(sleep_time);
 
-                let mut new_sharks = fetch_sharks(&address);
+                let mut new_sharks = fetch_sharks(&host);
                 new_sharks.sort_by(|a, b| a.available_mb.cmp(&b.available_mb));
 
                 let mut old_sharks = updater_sharks.lock().unwrap();
@@ -189,22 +187,39 @@ pub trait SharkSource: Sync + Send {
 // Use our prototype picker zone for now.  Might change this to a shard 1 moray
 // client in the future.
 // TODO: MANTA-4555
-fn fetch_sharks(address: &str) -> Vec<StorageNode> {
-    let mut ret = reqwest::get(address).unwrap();
-    let result = ret.json::<HashMap<String, Vec<StorageNode>>>().unwrap();
+fn fetch_sharks(host: &str) -> Vec<StorageNode> {
+    let base_url = format!("http://{}/poll", host);
     let mut new_sharks = vec![];
+    let mut done = false;
+    let limit = 100;
+    let mut after_id = String::new();
 
-    for (dc, sharks) in result.clone() {
-        let s = sharks.clone();
-        new_sharks.extend(s);
+    // Continue to request sharks until we encounter an error or the number
+    // of sharks returned is less than the number requested via the 'limit' arg.
+    while !done {
+        let url = format!("{}?limit={}&after_id={}", base_url, limit, after_id);
+        let mut response = match reqwest::get(&url) {
+            Ok(r) => r,
+            Err(e) => {
+                error!("Error fetching sharks: {}", e);
+                break;
+            }
+        };
 
-        for shark in sharks {
-            info!(
-                "{}: {} ({}%)",
-                dc, shark.manta_storage_id, shark.percent_used
-            );
+        let result: Vec<StorageNode> =
+            response.json().expect("picker response format");
+
+        match result.last() {
+            Some(r) => after_id = r.manta_storage_id.clone(),
+            None => break,
         }
+
+        if result.len() < limit {
+            done = true;
+        }
+        new_sharks.extend(result);
     }
+
     debug!("picker updated with new sharks: {:?}", new_sharks);
     new_sharks
 }

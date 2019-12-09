@@ -2306,20 +2306,20 @@ fn metadata_update_worker(
 
             info!("Assignment Complete: {}", &assignment.id);
 
-            if job_action
+            let removal = job_action
                 .assignments
                 .write()
                 .expect("assignments write")
-                .remove(&assignment.id)
-                .is_none()
-            {
-                let msg = format!(
+                .remove(&assignment.id);
+
+            if removal.is_none() {
+                warn!(
                     "Attempt to remove assignment not in hash: {}",
                     &assignment.id
                 );
-                warn!("{}", msg);
-                debug_assert!(false, msg);
             }
+
+            debug_assert!(removal.is_some(), "Remove assignment not in hash");
 
             // TODO: check for DB insert error
             job_action.mark_many_objects(
