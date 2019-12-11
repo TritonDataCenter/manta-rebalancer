@@ -8,7 +8,7 @@
 # Copyright 2019, Joyent, Inc.
 #
 
-all: check doc test
+all: check doc
 	cargo build --bin rebalancer-agent
 	cargo build --bin rebalancer-manager --features "postgres"
 	cp src/config.json target/debug/
