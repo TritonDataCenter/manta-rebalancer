@@ -104,6 +104,33 @@ impl DefaultPickerAlgorithm {
     }
 }
 
+fn get_max_utilization_percentage() -> Result<u8, std::error::Error>{
+
+    let log = slog_scope::logger();
+    // MUSKIE_MAX_UTILIZATION_PCT
+    let sapi_url= format!("http://sapi.{}", domain);
+    let client = sapi::SAPI::new(
+        sapi_url,
+        60,
+        log.clone());
+
+    let mut picker_svc = client.get_service_by_name("picker")?;
+
+    assert_eq!(sapi_svc.len(), 1);
+
+    let picker_svc_data = sapi_svc.pop()?;
+    let picker_instances = client.list_service_instances(picker_svc_data.uuid)?;
+
+    if picker_instances.len() > 1 {
+        warn!("Found more than one picker instance")
+    }
+
+
+    let service_name = sapi_metadata["SERVICE_NAME"].clone();
+
+
+
+}
 impl Picker {
     pub fn new(domain: &str) -> Result<Self, Error> {
         let picker_domain_name = format!("picker.{}", domain);
