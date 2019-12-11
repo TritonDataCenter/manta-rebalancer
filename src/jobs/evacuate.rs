@@ -1318,7 +1318,7 @@ fn start_sharkspotter(
                 count += 1;
                 // while testing, limit the number of objects processed for now
                 if let Some(max) = max_objects {
-                    if count >= max {
+                    if count > max {
                         return Err(std::io::Error::new(
                             ErrorKind::Other,
                             "Just stop already",
