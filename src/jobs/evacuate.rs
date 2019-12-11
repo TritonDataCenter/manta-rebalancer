@@ -1321,7 +1321,7 @@ fn start_sharkspotter(
                     if count > max {
                         return Err(std::io::Error::new(
                             ErrorKind::Other,
-                            "Just stop already",
+                            "Max Objects Limit Reached",
                         ));
                     }
                 }
