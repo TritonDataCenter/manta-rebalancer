@@ -2252,7 +2252,7 @@ fn metadata_update_worker(
                                     &obj.id,
                                     EvacuateObjectError::BadMorayClient,
                                 );
-                                format!(
+                                error!(
                                     "MD Update Worker: failed to get moray \
                                      client for shard number {}. Cannot update \
                                      metadata for {:#?}\n{}",
@@ -2277,12 +2277,62 @@ fn metadata_update_worker(
                 {
                     Ok(o) => o,
                     Err(e) => {
-                        error!(
+                        warn!(
                             "MD Update worker: Error updating \n\n{:#?}, with \
-                             dest_shark {:?}\n\n{}",
+                             dest_shark {:?}\n\n({}).  Retrying...",
                             &obj.object, dest_shark, e
                         );
-                        continue;
+
+
+                        // In testing we have seen this fail only due to
+                        // connection issues with rust-cueball / rust-fast.
+                        // There also does not seem to be a good way to check
+                        // if the connection is in a good state before trying
+                        // this reconnect and re-update.  So for now we
+                        // blindly try to reconnect and re-update the object.
+                        // MANTA-4630
+
+                        let rmobj = obj.object.clone();
+                        let retag = obj.etag.clone();
+                        let mut rclient = match moray_client::create_client(
+                            shard,
+                            &job_action.domain_name,
+                        ) {
+                            Ok(client) => client,
+                            Err(e) => {
+                                error!(
+                                    "(on retry)MD Update Worker: failed to \
+                                    get moray client for shard number {}. \
+                                    Cannot update metadata for {:#?}\n{}",
+                                    shard, rmobj, e
+                                );
+                                continue;
+                            }
+                        };
+                        let robj = match job_action
+                            .update_object_shark(rmobj, dest_shark, retag,
+                                                 &mut rclient) {
+                            Ok(robj) => robj,
+                            Err(e) => {
+                                error!(
+                                    "(on retry) MD Update worker: Error \
+                                    updating \n\n{:#?}, with dest_shark \
+                                    {:?}\n\n{}",
+                                    &obj.object, dest_shark, e
+                                );
+                                continue;
+                            }
+                        };
+
+                        // Implicitly drop the returned client which is
+                        // (probably) bad
+                        client_hash.insert(shard, rclient);
+
+                        // Initially the object was marked as error.
+                        // Returning the retried object here will allow it to
+                        // be added to the 'updated_objects' Vec and later
+                        // marked 'Complete' in the database.
+                        robj
                     }
                 };
 
