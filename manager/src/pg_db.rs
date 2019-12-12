@@ -13,6 +13,7 @@ use rebalancer::error::Error;
 use diesel::pg::PgConnection;
 use diesel::prelude::*;
 use diesel::sql_query;
+use diesel::result::ConnectionError;
 
 static DB_URL: &str = "postgres://postgres:postgres@";
 
@@ -55,3 +56,22 @@ pub fn create_and_connect_db(db_name: &str) -> Result<PgConnection, Error> {
     create_db(db_name)?;
     connect_db(db_name)
 }
+
+pub fn connect_or_create_db(db_name: &str) -> Result<PgConnection, Error> {
+    match connect_db(db_name) {
+        Ok(conn) => Ok(conn),
+        Err(err) => {
+            if let Error::DieselConnection(derr) = err {
+                if let ConnectionError::BadConnection(_) = derr {
+                    create_and_connect_db(db_name)
+                } else {
+                    Err(Error::from(derr))
+                }
+            } else {
+                Err(err)
+            }
+        }
+    }
+}
+
+

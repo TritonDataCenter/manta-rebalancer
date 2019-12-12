@@ -13,19 +13,30 @@ pub mod status;
 
 use crate::config::Config;
 use crate::storinfo::StorageNode;
+use crate::pg_db::connect_or_create_db;
 use rebalancer::common::{ObjectId, Task};
 use rebalancer::error::Error;
 
 use std::collections::HashMap;
 use std::fmt;
 
+use diesel::deserialize::{self, FromSql};
+use diesel::pg::{Pg, PgConnection, PgValue};
+use diesel::prelude::*;
+use diesel::serialize::{self, IsNull, Output, ToSql};
+use diesel::sql_types;
+use diesel::Expression;
 use evacuate::EvacuateJob;
 use serde::{Deserialize, Serialize};
+use std::io::Write;
+use std::str::FromStr;
+
 use uuid::Uuid;
 
 pub type StorageId = String; // Hostname
 pub type AssignmentId = String; // UUID
 pub type HttpStatusCode = u16;
+
 
 pub struct Job {
     id: Uuid,
@@ -34,7 +45,35 @@ pub struct Job {
     config: Config,
 }
 
-#[derive(Debug, Clone)]
+// https://github.com/diesel-rs/diesel/issues/860
+#[derive(Insertable, Queryable, Identifiable, AsChangeset, AsExpression,
+PartialEq)]
+#[table_name = "jobs"]
+struct JobDbEntry {
+    id: String,
+    action: String,
+    state: String,
+
+}
+/*
+    action: JobActionDbEntry,
+    state: JobState,
+}
+*/
+
+table! {
+    use diesel::sql_types::Text;
+    jobs (id) {
+        id -> Text,
+        action -> Text,
+        state -> Text,
+    }
+}
+
+#[derive(Display, EnumString, EnumVariantNames, Debug, FromSqlRow,
+AsExpression,)]
+#[strum(serialize_all = "snake_case")]
+//#[sql_type = "sql_types::Text"]
 pub enum JobState {
     Init,
     Setup,
@@ -44,10 +83,45 @@ pub enum JobState {
     Failed,
 }
 
+
 pub enum JobAction {
     Evacuate(Box<EvacuateJob>),
     None,
 }
+
+impl JobAction {
+    fn to_db_entry(&self) -> JobActionDbEntry {
+        match self {
+            JobAction::Evacuate(_) => JobActionDbEntry::Evacuate,
+            _ => JobActionDbEntry::None,
+        }
+    }
+}
+
+#[derive(Debug, Display, EnumString)]
+#[strum(serialize_all = "snake_case")]
+//#[sql_type = "sql_types::Text"]
+enum JobActionDbEntry {
+    Evacuate,
+    None
+}
+
+impl ToSql<sql_types::Text, Pg> for JobActionDbEntry {
+    fn to_sql<W: Write>(&self, out: &mut Output<W, Pg>) -> serialize::Result {
+        let action = self.to_string();
+        out.write_all(action.as_bytes())?;
+        Ok(IsNull::No)
+    }
+}
+
+impl FromSql<sql_types::Text, Pg> for JobActionDbEntry {
+    fn from_sql(bytes: Option<PgValue<'_>>) -> deserialize::Result<Self> {
+        let t: PgValue = not_none!(bytes);
+        let t_str = String::from_utf8_lossy(t.as_bytes());
+        Self::from_str(&t_str).map_err(std::convert::Into::into)
+    }
+}
+
 
 impl fmt::Debug for Job {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -112,12 +186,24 @@ impl Assignment {
     }
 }
 
+
 impl Job {
-    pub fn new(config: Config) -> Self {
-        Job {
+    pub fn new(config: Config) -> Result<Self, Error> {
+        let conn = match connect_or_create_db("rebalancer") {
+            Ok(conn) => conn,
+            Err(e) => {
+                return Err(e.into());
+            }
+        };
+
+        let job = Job {
             config,
             ..Default::default()
-        }
+        };
+
+        Ok(job)
+
+
     }
 
     pub fn get_id(&self) -> Uuid {

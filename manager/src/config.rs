@@ -259,7 +259,7 @@ fn job_create_subcommand_handler(
         moray_client::get_manta_object_shark(&shark_id, &domain_name)
             .map_err(Error::from)?;
 
-    let mut job = Job::new(config);
+    let mut job = Job::new(config)?;
     let job_action = JobAction::Evacuate(Box::new(EvacuateJob::new(
         from_shark,
         &domain_name,
