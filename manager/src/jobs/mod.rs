@@ -84,6 +84,8 @@ pub enum JobState {
     Failed,
 }
 
+// This exact impl occurs for at least 2 other enums.  We should consider
+// making this a custom derive
 impl ToSql<sql_types::Text, Pg> for JobState {
     fn to_sql<W: Write>(&self, out: &mut Output<W, Pg>) -> serialize::Result {
         let action = self.to_string();
