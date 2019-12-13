@@ -38,6 +38,8 @@ pub type AssignmentId = String; // UUID
 pub type HttpStatusCode = u16;
 
 
+static REBALANCER_DB: &str = "rebalancer";
+
 pub struct Job {
     id: Uuid,
     action: JobAction,
@@ -45,21 +47,17 @@ pub struct Job {
     config: Config,
 }
 
+// This is not ideal, but it is along the lines of what the crate
+// developers recommend.
 // https://github.com/diesel-rs/diesel/issues/860
 #[derive(Insertable, Queryable, Identifiable, AsChangeset, AsExpression,
 PartialEq)]
 #[table_name = "jobs"]
 struct JobDbEntry {
     id: String,
-    action: String,
-    state: String,
-
-}
-/*
     action: JobActionDbEntry,
     state: JobState,
 }
-*/
 
 table! {
     use diesel::sql_types::Text;
@@ -70,10 +68,13 @@ table! {
     }
 }
 
-#[derive(Display, EnumString, EnumVariantNames, Debug, FromSqlRow,
-AsExpression,)]
-#[strum(serialize_all = "snake_case")]
+//#[derive(Display, EnumString, EnumVariantNames, Debug, FromSqlRow, AsExpression,)]
+//#[strum(serialize_all = "snake_case")]
 //#[sql_type = "sql_types::Text"]
+#[sql_type = "sql_types::Text"]
+#[derive(Debug, Display, Clone, EnumString, FromSqlRow, AsExpression,
+PartialEq)]
+#[strum(serialize_all = "snake_case")]
 pub enum JobState {
     Init,
     Setup,
@@ -83,6 +84,21 @@ pub enum JobState {
     Failed,
 }
 
+impl ToSql<sql_types::Text, Pg> for JobState {
+    fn to_sql<W: Write>(&self, out: &mut Output<W, Pg>) -> serialize::Result {
+        let action = self.to_string();
+        out.write_all(action.as_bytes())?;
+        Ok(IsNull::No)
+    }
+}
+
+impl FromSql<sql_types::Text, Pg> for JobState {
+    fn from_sql(bytes: Option<PgValue<'_>>) -> deserialize::Result<Self> {
+        let t: PgValue = not_none!(bytes);
+        let t_str = String::from_utf8_lossy(t.as_bytes());
+        Self::from_str(&t_str).map_err(std::convert::Into::into)
+    }
+}
 
 pub enum JobAction {
     Evacuate(Box<EvacuateJob>),
@@ -98,9 +114,9 @@ impl JobAction {
     }
 }
 
-#[derive(Debug, Display, EnumString)]
+#[sql_type = "sql_types::Text"]
+#[derive(Debug, Display, EnumString, FromSqlRow, AsExpression, PartialEq)]
 #[strum(serialize_all = "snake_case")]
-//#[sql_type = "sql_types::Text"]
 enum JobActionDbEntry {
     Evacuate,
     None
@@ -189,12 +205,6 @@ impl Assignment {
 
 impl Job {
     pub fn new(config: Config) -> Result<Self, Error> {
-        let conn = match connect_or_create_db("rebalancer") {
-            Ok(conn) => conn,
-            Err(e) => {
-                return Err(e.into());
-            }
-        };
 
         let job = Job {
             config,
@@ -222,6 +232,30 @@ impl Job {
             JobAction::Evacuate(job_action) => job_action.run(&self.config),
             _ => Ok(()),
         }
+    }
+
+    fn to_db_entry(&self) -> JobDbEntry {
+        JobDbEntry {
+            id: self.id.to_string(),
+            action: self.action.to_db_entry(),
+            state: self.state.clone(),
+        }
+    }
+
+    fn insert_into_db(&self) -> Result<usize, Error> {
+        use self::jobs::dsl::*;
+
+        let db_ent = self.to_db_entry();
+        let conn = match connect_or_create_db("rebalancer") {
+            Ok(conn) => conn,
+            Err(e) => {
+                return Err(e.into());
+            }
+        };
+
+        diesel::insert_into(jobs)
+            .values(&db_ent)
+            .execute(&conn).map_err(Error::from)
     }
 }
 
