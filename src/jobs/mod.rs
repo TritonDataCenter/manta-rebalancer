@@ -11,10 +11,10 @@
 pub mod evacuate;
 pub mod status;
 
+use crate::common::Task;
 use crate::config::Config;
 use crate::error::Error;
 use crate::picker::StorageNode;
-use crate::common::Task;
 
 use std::collections::HashMap;
 use std::fmt;
