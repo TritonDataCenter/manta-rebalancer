@@ -19,7 +19,7 @@ use rebalancer::libagent::{
 };
 use rebalancer::util::{MAX_HTTP_STATUS_CODE, MIN_HTTP_STATUS_CODE};
 
-use crate::config::Config;
+use crate::config::{Config, ConfigOptions};
 use crate::jobs::{Assignment, AssignmentId, AssignmentState, StorageId};
 use crate::moray_client;
 use crate::pg_db;
@@ -409,6 +409,9 @@ pub struct EvacuateJob {
     /// Accumulator for total time spent on DB inserts. (test/dev)
     pub total_db_time: Mutex<u128>,
 
+    /// Tunable options
+    pub options: ConfigOptions,
+
     /// TESTING ONLY
     pub max_objects: Option<u32>,
 }
@@ -420,6 +423,7 @@ impl EvacuateJob {
         storage_id: String,
         domain_name: &str,
         db_name: &str,
+        config_options: ConfigOptions,
         max_objects: Option<u32>,
     ) -> Result<Self, Error> {
         let mut from_shark = MantaObjectShark::default();
@@ -443,6 +447,7 @@ impl EvacuateJob {
             conn: Mutex::new(conn),
             total_db_time: Mutex::new(0),
             domain_name: domain_name.to_string(),
+            options: config_options,
             max_objects,
         })
     }
@@ -1692,6 +1697,9 @@ where
                 blacklist: vec![],
             };
 
+            let max_sharks = job_action.options.max_sharks;
+            let max_assignment_size = job_action.options.max_assignment_size;
+
             let mut shark_hash: HashMap<StorageId, SharkHashEntry> =
                 HashMap::new();
             let mut done = false;
@@ -1706,7 +1714,7 @@ where
 
                 // TODO: file ticket, tunable number of sharks which implies
                 // number of threads.
-                shark_list.truncate(5);
+                shark_list.truncate(max_sharks);
 
                 // For any active sharks that are not in the list remove them
                 // from the hash, send the stop command, join the associated
@@ -1762,7 +1770,7 @@ where
                 //      * send object to that shark's thread
                 // end loop
                 // TODO: file ticket, max number of outstanding objects
-                for _ in 0..50 {
+                for _ in 0..max_assignment_size {
                     // Get an object
                     let mut eobj = match obj_rx.recv() {
                         Ok(obj) => {
@@ -2651,8 +2659,8 @@ fn start_metadata_update_broker(
     job_action: Arc<EvacuateJob>,
     md_update_rx: crossbeam::Receiver<Assignment>,
 ) -> Result<thread::JoinHandle<Result<(), Error>>, Error> {
-    // TODO: tunable
-    let pool = ThreadPool::new(3);
+    let max_md_threads = job_action.options.max_metadata_update_threads;
+    let pool = ThreadPool::new(max_md_threads);
     let queue = Arc::new(Injector::<Assignment>::new());
     let queue_back = Arc::clone(&queue);
 
