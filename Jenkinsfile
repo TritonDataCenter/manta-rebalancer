@@ -17,18 +17,17 @@ pipeline {
                 sh('make check')
             }
         }
-        // Not yet ready for eng.git image builds.
-        // stage('build image and upload') {
-        //    steps {
-        //        joyBuildImageAndUpload()
-        //    }
-        // }
+        stage('build image and upload') {
+           steps {
+               joyBuildImageAndUpload()
+           }
+        }
     }
 
     post {
         always {
             joyMattermostNotification(channel: 'jenkins')
-            joyMattermostNotification(channel: 'rebalancer')
+            // joyMattermostNotification(channel: 'rebalancer')
         }
     }
 }

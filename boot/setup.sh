@@ -9,118 +9,28 @@
 # Copyright 2019 Joyent, Inc.
 #
 
-# XXX timf mostly just a placeholder for now, cribbed from boray
-
 export PS4='[\D{%FT%TZ}] ${BASH_SOURCE}:${LINENO}: ${FUNCNAME[0]:+${FUNCNAME[0]}(): }'
 set -o xtrace
+# XXX Manta boot/setup.sh scripts don't typically have errexit? Can we get away with it?
+#set -o errexit
 
-SOURCE="${BASH_SOURCE[0]}"
-if [[ -h $SOURCE ]]; then
-    SOURCE="$(readlink "$SOURCE")"
-fi
-DIR="$( cd -P "$( dirname "$SOURCE" )" && pwd )"
-PROFILE=/root/.bashrc
-SVC_ROOT=/opt/smartdc/rebalancer
-ZONE_UUID=$(/usr/bin/zonename)
-SAPI_CONFIG=
-SAPI_URL=$(mdata-get SAPI_URL)
-[[ -n $SAPI_URL ]] || fatal "no SAPI_URL found"
+source /opt/smartdc/boot/scripts/util.sh
+source /opt/smartdc/boot/scripts/services.sh
 
-export PATH=$SVC_ROOT/bin:$SVC_ROOT/build/node/bin:/opt/local/bin:/usr/sbin/:/usr/bin:$PATH
+#XXX not sure this is necessary
+export PATH=/opt/smartdc/rebalancer/bin:/opt/local/bin:/usr/sbin:/usr/bin:$PATH
 
-function get_sapi_config {
-    local sapi_res
-    local err
-    #
-    # Load the zone's full config object from SAPI. If this request fails, it
-    # will be retried until the smf(5) method timeout expires for the
-    # "mdata:execute" service.
-    #
-    # We do this because we need to access SAPI config variables in this script,
-    # and it's more difficult to get them from the boray config toml file.
-    #
-    while :; do
-        if ! sapi_res=$(curl --max-time 60 --ipv4 -sSf \
-          -H 'Accept: application/json' -H 'Content-Type: application/json' \
-          "${SAPI_URL}/configs/${ZONE_UUID}"); then
-            printf 'WARNING: could not download SAPI config (retrying)\n' >&2
-            sleep 2
-            continue
-        fi
 
-        SAPI_CONFIG=$(json -H <<< "${sapi_res}")
+# ---- mainline
 
-        err=$(json 'code' <<< "${SAPI_CONFIG}")
-        if [[ -n "${err}" ]]; then
-            printf 'WARNING: error parsing SAPI config (%s) (retrying)\n' >&2
-            sleep 2
-            continue
-        fi
-        break
-    done
-}
-
-function setup_boray {
-    local port
-    local RTPL
-
-    #
-    # The default port value here must be kept in sync with the default value of
-    # BORAY_SERVER_PORT in sapi_manifests/boray/template and the Makefile.
-    #
-    port=$(json metadata.BORAY_SERVER_PORT <<< "${SAPI_CONFIG}")
-    [[ -n "${port}" ]] || port='2030'
-
-    #
-    # Regenerate the registrar config with the real port included
-    # (the bootstrap one just includes 2030, the default value)
-    #
-    RTPL=$SVC_ROOT/sapi_manifests/registrar/template
-    sed -e "s/@@PORTS@@/${port}/g" ${RTPL}.in > ${RTPL}
-
-    #
-    # Wait until config-agent updates registrar's config before restarting
-    # registrar.
-    #
-    svcadm disable -s config-agent
-    svcadm enable -s config-agent
-    svcadm restart registrar
-
-    svccfg import /opt/smartdc/boray/smf/manifests/boray.xml
-    svcadm enable boray || fatal "unable to start boray"
-}
-
-#
-# manta_setup_boray_schemas: run the schema-manager to define the boray
-# schemas on the associated shards if they do not yet exist.
-#
-function manta_setup_boray_schemas {
-    if [[ -x /opt/smartdc/boray/bin/schema-manager ]] ; then
-        echo "Setting up boray schemas"
-        /opt/smartdc/boray/bin/schema-manager || echo "unable to set up boray schemas"
-    else
-        fatal "schema-manager executable not found."
-    fi
-}
-
-source ${DIR}/scripts/util.sh
-source ${DIR}/scripts/services.sh
-
-echo "Running common setup scripts"
 manta_common_presetup
-
-echo "Adding local manifest directories"
 manta_add_manifest_dir "/opt/smartdc/rebalancer"
+manta_common2_setup "rebalancer-manager"
 
-# manta_common_setup "boray" 0
+echo "Setting up rebalancer-manager"
+/usr/sbin/svccfg import /opt/smartdc/rebalancer/smf/manifests/rebalancer-manager.xml
 
-# manta_ensure_zk
-
-echo "Setting up Rebalancer"
-get_sapi_config
-#setup_boray
-#manta_setup_boray_schemas
-
-manta_common_setup_end
+manta_common2_setup_log_rotation "rebalancer-manager"
+manta_common2_setup_end
 
 exit 0
