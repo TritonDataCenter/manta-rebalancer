@@ -10,8 +10,8 @@
     Copyright 2019 Joyent, Inc.
 -->
 
-<service_bundle type="manifest" name="rebalancer">
-    <service name="manta/application/rebalancer" type="service" version="1">
+<service_bundle type="manifest" name="rebalancer-manager">
+    <service name="manta/application/rebalancer-manager" type="service" version="1">
 
         <dependency name="network" grouping="require_all" restart_on="error" type="service">
             <service_fmri value="svc:/network/physical" />
@@ -20,7 +20,7 @@
             <service_fmri value="svc:/system/filesystem/local" />
         </dependency>
 
-	<exec_method type="method" name="start" exec="@@PREFIX@@/XXXtimf wrongbuild/node/bin/node @@PREFIX@@/main.js -f @@PREFIX@@/etc/config.json &amp;" timeout_seconds="30" />
+        <exec_method type="method" name="start" exec="/opt/smartdc/rebalancer/bin/rebalancer-manager &amp;" timeout_seconds="30" />
         <exec_method type="method" name="stop" exec=":kill" timeout_seconds="30" />
 
         <instance name="default" enabled="true" />
