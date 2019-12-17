@@ -16,8 +16,7 @@ ENGBLD_REQUIRE       := $(shell git submodule update --init deps/eng)
 include ./deps/eng/tools/mk/Makefile.defs
 TOP ?= $(error Unable to access eng.git submodule Makefiles.)
 
-# XXX timf this manifest is all wrong, still a copy/pasted node service
-SMF_MANIFESTS =        smf/manifests/rebalancer.xml
+SMF_MANIFESTS =        smf/manifests/rebalancer-manager.xml
 
 RELEASE_TARBALL      := $(NAME)-pkg-$(STAMP).tar.gz
 RELSTAGEDIR          := /tmp/$(NAME)-$(STAMP)
