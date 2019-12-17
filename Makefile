@@ -20,24 +20,19 @@ SMF_MANIFESTS =        smf/manifests/rebalancer-manager.xml
 
 RELEASE_TARBALL      := $(NAME)-pkg-$(STAMP).tar.gz
 RELSTAGEDIR          := /tmp/$(NAME)-$(STAMP)
-    
-# Needed for the amon-agent to use python2.x
-# XXX timf just discovered this isn't enough, so
-# we might need to hack up a tempdir that symlinks
-# 'python' -> /opt/local/bin/python2 and add that
-# to the top of $PATH. An engbld-common target that
-# does that might be useful in the future
-# XXX trentm trying without amon to start, can add it separately
-#PYTHON = /opt/local/bin/python2
 
 # This image is triton-origin-x86_64-19.2.0
 BASE_IMAGE_UUID = a0d5f456-ba0f-4b13-bfdc-5e9323837ca7
 BUILDIMAGE_NAME = mantav2-rebalancer
 BUILDIMAGE_DESC = Manta Rebalancer
-AGENTS          = config registrar
+AGENTS          = amon config registrar
 BUILDIMAGE_PKGSRC = postgresql11-client
 
 ENGBLD_USE_BUILDIMAGE   = true
+# XXX timf for now, make agent builds look for a 'rebalancer-build' branch
+# before falling back $(BRANCH), 'master', etc.
+AGENT_PREBUILT_AGENT_BRANCH	= rebalancer-build
+AMON_PREBUILT_AGENT_ENV = ENGBLD_PATH=$(TOP)/build/agent-python
 
 RUST_CLIPPY_ARGS ?= --features "postgres"
 
@@ -64,24 +59,24 @@ debug:
 
 .PHONY: release
 release: all deps/manta-scripts/.git $(SMF_MANIFESTS)
-	    @echo "Building $(RELEASE_TARBALL)"
-		# application dir
-	    @mkdir -p $(RELSTAGEDIR)/root/opt/smartdc/$(NAME)/bin
-	    cp -R \
-	        $(TOP)/smf \
-	        $(RELSTAGEDIR)/root/opt/smartdc/$(NAME)/
-	    cp \
-			target/debug/rebalancer-manager \
-			$(RELSTAGEDIR)/root/opt/smartdc/$(NAME)/bin/
-		# boot
-	    @mkdir -p $(RELSTAGEDIR)/root/opt/smartdc/boot/scripts
-	    cp -R $(TOP)/deps/manta-scripts/*.sh \
-	        $(RELSTAGEDIR)/root/opt/smartdc/boot/scripts/
-	    cp -R $(TOP)/boot/* \
-	        $(RELSTAGEDIR)/root/opt/smartdc/boot/
-		# package it up
-	    cd $(RELSTAGEDIR) && $(TAR) -I pigz -cf $(TOP)/$(RELEASE_TARBALL) root
-	    @rm -rf $(RELSTAGEDIR)
+	@echo "Building $(RELEASE_TARBALL)"
+	# application dir
+	@mkdir -p $(RELSTAGEDIR)/root/opt/smartdc/$(NAME)/bin
+	cp -R \
+	    $(TOP)/smf \
+	    $(RELSTAGEDIR)/root/opt/smartdc/$(NAME)/
+	cp \
+	    target/debug/rebalancer-manager \
+	    $(RELSTAGEDIR)/root/opt/smartdc/$(NAME)/bin/
+	# boot
+	@mkdir -p $(RELSTAGEDIR)/root/opt/smartdc/boot/scripts
+	cp -R $(TOP)/deps/manta-scripts/*.sh \
+	    $(RELSTAGEDIR)/root/opt/smartdc/boot/scripts/
+	cp -R $(TOP)/boot/* \
+	    $(RELSTAGEDIR)/root/opt/smartdc/boot/
+	# package it up
+	cd $(RELSTAGEDIR) && $(TAR) -I pigz -cf $(TOP)/$(RELEASE_TARBALL) root
+	@rm -rf $(RELSTAGEDIR)
 
 
 .PHONY: publish
@@ -120,6 +115,7 @@ test: agenttests jobtests
 include ./deps/eng/tools/mk/Makefile.deps
 ifeq ($(shell uname -s),SunOS)
     include ./deps/eng/tools/mk/Makefile.agent_prebuilt.targ
+release: python2-symlink
 endif
 include ./deps/eng/tools/mk/Makefile.smf.targ
 include ./deps/eng/tools/mk/Makefile.targ
