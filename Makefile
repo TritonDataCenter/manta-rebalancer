@@ -44,11 +44,10 @@ include ./deps/eng/tools/mk/Makefile.smf.defs
 # Repo-specific targets
 #
 
-all: check doc
+all:
 	cargo build --bin rebalancer-agent --release
 	cargo build --bin rebalancer-manager --features "postgres" --release
 	cargo build --bin rebalancer-adm --features "postgres" --release
-	cp src/config.json target/release/
 
 debug:
 	cargo build --bin rebalancer-agent
@@ -63,9 +62,11 @@ release: all deps/manta-scripts/.git $(SMF_MANIFESTS)
 	@mkdir -p $(RELSTAGEDIR)/root/opt/smartdc/$(NAME)/bin
 	cp -R \
 	    $(TOP)/smf \
+	    $(TOP)/sapi_manifests \
 	    $(RELSTAGEDIR)/root/opt/smartdc/$(NAME)/
 	cp \
-	    target/debug/rebalancer-manager \
+	    target/release/rebalancer-manager \
+	    target/release/rebalancer-adm \
 	    $(RELSTAGEDIR)/root/opt/smartdc/$(NAME)/bin/
 	# boot
 	@mkdir -p $(RELSTAGEDIR)/root/opt/smartdc/boot/scripts

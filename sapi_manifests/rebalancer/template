@@ -1,22 +1,13 @@
 {
-    "manta_storage_id": "{{MANTA_STORAGE_ID}}",
-    "moray": {
-        "connectTimeout": 2000,
-        "host": "{{ELECTRIC_MORAY}}",
-        "port": 2020
-    },
-    "manta": {
-        "url": "{{MANTA_URL}}",
-        "user": "{{ADMIN_USERNAME}}",
-        "sign": {
-            "key": "/root/.ssh/id_rsa",
-            "keyId": "{{ADMIN_KEY_ID}}"
-        },
-        "retry": {
-            "attempts": 5,
-            "minTimeout": 1000
-        },
-        "connectTimeout": 1000,
-        "rejectUnauthorized": {{MANTA_REJECT_UNAUTHORIZED}}
-    }
+    "sapi_url": "XXX I don't think this is needed, drop it from code.",
+    "domain_name": "{{DOMAIN_NAME}}",
+
+    "shards": [{{#INDEX_MORAY_SHARDS}}
+        {
+            "host": "{{host}}"
+        }{{^last}},{{/last}}{{/INDEX_MORAY_SHARDS}}
+    ],
+
+    "database_url": "rebalancer.sqlite",
+    "database_buffer_size": 100
 }
