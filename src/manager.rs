@@ -11,6 +11,7 @@ use std::string::ToString;
 use remora::config::{self, Config};
 use remora::jobs::{self, JobAction};
 
+use clap::{App, Arg, ArgMatches};
 use crossbeam_channel;
 use futures::{future, Future, Stream};
 use gotham::handler::{Handler, HandlerFuture, IntoHandlerError, NewHandler};
@@ -320,7 +321,22 @@ fn main() {
     let _guard = util::init_global_logger();
     let addr = "0.0.0.0:8888";
 
-    let config = config::Config::parse_config(None)
+    let matches: ArgMatches = App::new("rebalancer")
+        .version("0.1.0")
+        .about("Rebalancer")
+        .arg(
+            Arg::with_name("config_file")
+                .short("c")
+                .long("config_file")
+                .takes_value(true)
+                .value_name("CONFIG_FILE")
+                .help("Specify the location of the config file"),
+        )
+        .get_matches();
+
+    let config_file = matches.value_of("config_file");
+
+    let config = config::Config::parse_config(config_file)
         .map_err(|e| {
             remora::error!("Error parsing config: {}", e);
             std::process::exit(1);
