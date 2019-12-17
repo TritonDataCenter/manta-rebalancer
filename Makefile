@@ -32,7 +32,6 @@ ENGBLD_USE_BUILDIMAGE   = true
 # XXX timf for now, make agent builds look for a 'rebalancer-build' branch
 # before falling back $(BRANCH), 'master', etc.
 AGENT_PREBUILT_AGENT_BRANCH	= rebalancer-build
-AMON_PREBUILT_AGENT_ENV = ENGBLD_PATH=$(TOP)/build/agent-python
 
 RUST_CLIPPY_ARGS ?= --features "postgres"
 
@@ -78,7 +77,6 @@ release: all deps/manta-scripts/.git $(SMF_MANIFESTS)
 	cd $(RELSTAGEDIR) && $(TAR) -I pigz -cf $(TOP)/$(RELEASE_TARBALL) root
 	@rm -rf $(RELSTAGEDIR)
 
-
 .PHONY: publish
 publish: release
 	mkdir -p $(ENGBLD_BITS_DIR)/$(NAME)
@@ -115,7 +113,6 @@ test: agenttests jobtests
 include ./deps/eng/tools/mk/Makefile.deps
 ifeq ($(shell uname -s),SunOS)
     include ./deps/eng/tools/mk/Makefile.agent_prebuilt.targ
-release: python2-symlink
 endif
 include ./deps/eng/tools/mk/Makefile.smf.targ
 include ./deps/eng/tools/mk/Makefile.targ
