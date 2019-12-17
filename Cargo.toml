@@ -80,3 +80,7 @@ path = "src/manager.rs"
 [[bin]]
 name = "rebalancer-agent"
 path = "src/agent-main.rs"
+
+[[bin]]
+name = "rebalancer-adm"
+path = "src/main.rs"

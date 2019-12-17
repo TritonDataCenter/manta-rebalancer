@@ -9,16 +9,17 @@
 #
 
 all: check doc
+	cargo build --bin rebalancer-agent --release
+	cargo build --bin rebalancer-manager --features "postgres" --release
+	cargo build --bin rebalancer-adm --features "postgres" --release
+	cp src/config.json target/release/
+
+debug:
 	cargo build --bin rebalancer-agent
 	cargo build --bin rebalancer-manager --features "postgres"
+	cargo build --bin rebalancer-adm --features "postgres"
 	cp src/config.json target/debug/
 
-agent:
-	cargo build --bin rebalancer-agent
-
-manager:
-	cargo build --bin rebalancer-manager --features "postgres"
-       
 doc:
 	cargo doc --features "postgres"
 
