@@ -40,7 +40,6 @@ use moray::client::MorayClient;
 use quickcheck::{Arbitrary, Gen};
 use quickcheck_helpers::random::string as random_string;
 use reqwest;
-use threadpool::ThreadPool;
 use uuid::Uuid;
 
 // --- Diesel Stuff, TODO This should be refactored --- //
@@ -2276,9 +2275,10 @@ fn metadata_update_worker(
                     // continue to next object.
                     panic!("Cannot have a negative shard {:#?}", obj);
                 }
-                let shard = obj.shard as u32;
 
+                let shard = obj.shard as u32;
                 trace!("Getting client for shard {}", shard);
+
                 // We can't use or_insert_with() here because in the event
                 // that client creation fails we want to handle that error.
                 let mclient = match client_hash.entry(shard) {
@@ -2439,12 +2439,17 @@ fn metadata_update_worker(
 /// we must be able to restart the job, scan the DB for EvacuatedObjects in
 /// the in the PostProcessing state without having to look them up with
 /// sharkspotter again, and download them onto another shark.
+// This implementation was changed as a workaround for MANTA-4886.  We should
+// be able to revert this change once that is fixed.
+// Also, this is not the cleanest implementation, but I'd rather retain as much
+// of of the current layout as possible, so that if future changes are made they
+// don't interfere too much with the previous (preferred) one when we
+// re-implement it.
 fn start_metadata_update_broker(
     job_action: Arc<EvacuateJob>,
     md_update_rx: crossbeam::Receiver<Assignment>,
 ) -> Result<thread::JoinHandle<Result<(), Error>>, Error> {
     // TODO: tunable
-    let pool = ThreadPool::new(2);
     let queue = Arc::new(Injector::<Option<Assignment>>::new());
     let queue_back = Arc::clone(&queue);
 
@@ -2461,21 +2466,6 @@ fn start_metadata_update_broker(
                 let assignment = match md_update_rx.recv() {
                     Ok(assignment) => assignment,
                     Err(e) => {
-                        // If the queue is empty and there are no active or
-                        // queued threads, kick one off to drain the queue.
-                        /*
-                        if !queue_back.is_empty()
-                            && pool.active_count() == 0
-                            && pool.queued_count() == 0
-                        {
-                            let worker = metadata_update_worker(
-                                Arc::clone(&job_action),
-                                Arc::clone(&queue),
-                            );
-
-                            pool.execute(worker);
-                        }
-                        */
                         error!(
                             "MD Update: Error receiving metadata from \
                              assignment checker thread: {}",
@@ -2488,26 +2478,6 @@ fn start_metadata_update_broker(
 
                 queue_back.push(Some(assignment));
 
-                /*
-                // If all the pools threads are devoted to workers there's
-                // really no reason to queue up a new worker.
-                let total_jobs = pool.active_count() + pool.queued_count();
-                if total_jobs >= pool.max_count() {
-                    trace!(
-                        "Reached max thread count for pool not starting \
-                         new thread"
-                    );
-                    continue;
-                }
-
-                // XXX: async/await candidate?
-                let worker = metadata_update_worker(
-                    Arc::clone(&job_action),
-                    Arc::clone(&queue),
-                );
-
-                pool.execute(worker);
-                */
             }
             worker.join().expect("MD Update Worker join");
             Ok(())
