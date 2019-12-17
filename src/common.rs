@@ -14,12 +14,12 @@ use std::io::Write;
 #[cfg(feature = "postgres")]
 use std::str::FromStr;
 
-use serde::{Deserialize, Serialize};
-use md5::{Digest, Md5};
-use uuid::Uuid;
 use libmanta::moray::MantaObjectShark;
+use md5::{Digest, Md5};
 use quickcheck::{Arbitrary, Gen};
 use quickcheck_helpers::random::string as random_string;
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 #[cfg(feature = "postgres")]
 use diesel::deserialize::{self, FromSql};

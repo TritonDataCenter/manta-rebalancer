@@ -19,8 +19,8 @@ extern crate strum_macros;
 #[macro_use]
 pub mod util;
 
-pub mod common;
 pub mod agent;
+pub mod common;
 
 #[cfg(feature = "postgres")]
 pub mod config;

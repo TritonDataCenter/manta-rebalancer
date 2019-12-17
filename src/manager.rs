@@ -266,11 +266,12 @@ impl Handler for JobCreateHandler {
                     panic!("Tx error: {}", e);
                 }
 
+                let uuid_response = format!("{}\n", job_uuid);
                 create_response(
                     &state,
                     StatusCode::OK,
                     mime::APPLICATION_JSON,
-                    job_uuid,
+                    uuid_response,
                 )
             }
         };

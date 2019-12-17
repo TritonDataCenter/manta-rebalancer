@@ -9,12 +9,12 @@
  */
 
 use crate::agent::{AgentAssignmentState, Assignment as AgentAssignment};
+use crate::common::{AssignmentPayload, ObjectSkippedReason, Task, TaskStatus};
 use crate::config::Config;
 use crate::error::{CrossbeamError, Error, InternalError, InternalErrorCode};
 use crate::jobs::{
     Assignment, AssignmentId, AssignmentState, ObjectId, StorageId,
 };
-use crate::common::{AssignmentPayload, ObjectSkippedReason, Task, TaskStatus};
 use crate::moray_client;
 use crate::pg_db;
 use crate::picker::{self as mod_picker, SharkSource, StorageNode};
@@ -2178,6 +2178,48 @@ fn start_assignment_checker(
         .map_err(Error::from)
 }
 
+fn reconnect_and_reupdate(
+    job_action: &EvacuateJob,
+    mobj: MantaObject,
+    shard: u32,
+    dest_shark: &StorageNode,
+    etag: String,
+) -> Option<(MantaObject, MorayClient)> {
+    let mobj_clone = mobj.clone();
+    let mut rclient =
+        match moray_client::create_client(shard, &job_action.domain_name) {
+            Ok(client) => client,
+            Err(e) => {
+                error!(
+                "(on retry) MD Update Worker: failed to get moray client for \
+                 shard number {}. Cannot update metadata for {:#?}\n{}",
+                shard, mobj, e
+            );
+                return None;
+            }
+        };
+
+    let robj = match job_action.update_object_shark(
+        mobj,
+        dest_shark,
+        etag,
+        &mut rclient,
+    ) {
+        Ok(robj) => robj,
+        Err(e) => {
+            error!(
+                "(on retry) MD Update worker: Error \
+                 updating \n\n{:#?}, with dest_shark \
+                 {:?}\n\n{}",
+                &mobj_clone, dest_shark, e
+            );
+            return None;
+        }
+    };
+
+    Some((robj, rclient))
+}
+
 // This worker continues to run as long as the queue has entries for it to
 // work on.  If, when the worker attempts to "steal" from the queue, the
 // queue is emtpy the worker exits.
@@ -2252,7 +2294,7 @@ fn metadata_update_worker(
                                     &obj.id,
                                     EvacuateObjectError::BadMorayClient,
                                 );
-                                format!(
+                                error!(
                                     "MD Update Worker: failed to get moray \
                                      client for shard number {}. Cannot update \
                                      metadata for {:#?}\n{}",
@@ -2277,12 +2319,45 @@ fn metadata_update_worker(
                 {
                     Ok(o) => o,
                     Err(e) => {
-                        error!(
+                        warn!(
                             "MD Update worker: Error updating \n\n{:#?}, with \
-                             dest_shark {:?}\n\n{}",
+                             dest_shark {:?}\n\n({}).  Retrying...",
                             &obj.object, dest_shark, e
                         );
-                        continue;
+
+                        // In testing we have seen this fail only due to
+                        // connection issues with rust-cueball / rust-fast.
+                        // There also does not seem to be a good way to check
+                        // if the connection is in a good state before trying
+                        // this reconnect and re-update.  So for now we
+                        // blindly try to reconnect and re-update the object.
+                        // MANTA-4630
+
+                        let rmobj = obj.object.clone();
+                        let retag = obj.etag.clone();
+                        match reconnect_and_reupdate(
+                            &job_action,
+                            rmobj,
+                            shard,
+                            dest_shark,
+                            retag,
+                        ) {
+                            Some((robj, rclient)) => {
+                                // Implicitly drop the client returned
+                                // from the hash which is probably bad
+                                client_hash.insert(shard, rclient);
+
+                                // Initially the object was marked as error.
+                                // Returning the retried object here will
+                                // allow it to be added to the 'updated_objects'
+                                // Vec and later marked 'Complete' in the
+                                // database.
+                                robj
+                            }
+                            None => {
+                                continue;
+                            }
+                        }
                     }
                 };
 
