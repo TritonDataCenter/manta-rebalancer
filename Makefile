@@ -26,7 +26,10 @@ BASE_IMAGE_UUID = a0d5f456-ba0f-4b13-bfdc-5e9323837ca7
 BUILDIMAGE_NAME = mantav2-rebalancer
 BUILDIMAGE_DESC = Manta Rebalancer
 AGENTS          = amon config registrar
-BUILDIMAGE_PKGSRC = postgresql11-client
+# Biasing to postgresql v11 over v10 to match the postgresql11-client that
+# is installed in the jenkins-agent build zones for 19.2.0 (per buckets-mdapi's
+# requirements).
+BUILDIMAGE_PKGSRC = postgresql11-server-11.4 postgresql11-client-11.4
 
 ENGBLD_USE_BUILDIMAGE   = true
 # XXX timf for now, make agent builds look for a 'rebalancer-build' branch
