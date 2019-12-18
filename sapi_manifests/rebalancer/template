@@ -1,13 +1,8 @@
 {
-    "sapi_url": "XXX I don't think this is needed, drop it from code.",
     "domain_name": "{{DOMAIN_NAME}}",
-
     "shards": [{{#INDEX_MORAY_SHARDS}}
         {
             "host": "{{host}}"
         }{{^last}},{{/last}}{{/INDEX_MORAY_SHARDS}}
-    ],
-
-    "database_url": "rebalancer.sqlite",
-    "database_buffer_size": 100
+    ]
 }
