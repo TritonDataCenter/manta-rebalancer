@@ -34,9 +34,6 @@ AGENTS          = amon config registrar
 BUILDIMAGE_PKGSRC = postgresql11-server-11.4 postgresql11-client-11.4
 
 ENGBLD_USE_BUILDIMAGE   = true
-# XXX timf for now, make agent builds look for a 'rebalancer-build' branch
-# before falling back $(BRANCH), 'master', etc.
-AGENT_PREBUILT_AGENT_BRANCH	= rebalancer-build
 
 RUST_CLIPPY_ARGS ?= --features "postgres"
 
