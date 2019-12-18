@@ -30,10 +30,8 @@ pub struct Shard {
 
 #[derive(Deserialize, Default, Debug, Clone)]
 pub struct Config {
-    pub sapi_url: String,
     pub domain_name: String,
     pub shards: Vec<Shard>,
-    pub database_url: String,
 }
 
 impl Config {
