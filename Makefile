@@ -45,14 +45,14 @@ include ./deps/eng/tools/mk/Makefile.smf.defs
 #
 
 all:
-	cargo build --bin rebalancer-agent --release
-	cargo build --bin rebalancer-manager --features "postgres" --release
-	cargo build --bin rebalancer-adm --features "postgres" --release
+	$(CARGO) build --bin rebalancer-agent --release
+	$(CARGO) build --bin rebalancer-manager --features "postgres" --release
+	$(CARGO) build --bin rebalancer-adm --features "postgres" --release
 
 debug:
-	cargo build --bin rebalancer-agent
-	cargo build --bin rebalancer-manager --features "postgres"
-	cargo build --bin rebalancer-adm --features "postgres"
+	$(CARGO) build --bin rebalancer-agent
+	$(CARGO) build --bin rebalancer-manager --features "postgres"
+	$(CARGO) build --bin rebalancer-adm --features "postgres"
 	cp src/config.json target/debug/
 
 .PHONY: release
@@ -82,12 +82,6 @@ release: all deps/manta-scripts/.git $(SMF_MANIFESTS)
 publish: release
 	mkdir -p $(ENGBLD_BITS_DIR)/$(NAME)
 	cp $(TOP)/$(RELEASE_TARBALL) $(ENGBLD_BITS_DIR)/$(NAME)/$(RELEASE_TARBALL)
-
-agent:
-	$(CARGO) build --bin rebalancer-agent
-
-manager:
-	$(CARGO) build --bin rebalancer-manager --features "postgres"
 
 doc:
 	$(CARGO) doc --features "postgres"
