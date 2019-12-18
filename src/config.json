@@ -1,8 +1,5 @@
 {
-  "sapi_url": "http://sapi.ruidc.joyent.us",
   "domain_name": "east.joyent.us",
-  "database_url": "rebalancer.sqlite",
-  "database_buffer_size": 100,
   "shards": [
       {
         "host": "2.moray.staging.joyent.us",

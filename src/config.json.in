@@ -1,7 +1,4 @@
 {
-  "sapi_url": "http://sapi.ruidc.joyent.us",
   "domain_name": {{DOMAIN_NAME}},
-  "database_url": "rebalancer.sqlite",
-  "database_buffer_size": 100,
   "shards": {{INDEX_MORAY_SHARDS}}
 }
