@@ -16,10 +16,12 @@ ENGBLD_REQUIRE       := $(shell git submodule update --init deps/eng)
 include ./deps/eng/tools/mk/Makefile.defs
 TOP ?= $(error Unable to access eng.git submodule Makefiles.)
 
-SMF_MANIFESTS =        smf/manifests/rebalancer-manager.xml
+SMF_MANIFESTS =     smf/manifests/rebalancer-manager.xml \
+                    smf/manifests/rebalancer-agent.xml
 
-RELEASE_TARBALL      := $(NAME)-pkg-$(STAMP).tar.gz
-RELSTAGEDIR          := /tmp/$(NAME)-$(STAMP)
+AGENT_TARBALL       := $(NAME)-agent-$(STAMP).tar.gz
+RELEASE_TARBALL     := $(NAME)-pkg-$(STAMP).tar.gz
+RELSTAGEDIR         := /tmp/$(NAME)-$(STAMP)
 
 # This image is triton-origin-x86_64-19.2.0
 BASE_IMAGE_UUID = a0d5f456-ba0f-4b13-bfdc-5e9323837ca7
@@ -91,6 +93,27 @@ doc:
 
 clean::
 	$(CARGO) clean
+
+.PHONY: agent
+agent:
+	$(CARGO) build --bin rebalancer-agent --release
+
+# XXX timf: I don't know what else the agent needs
+.PHONY: pkg_agent
+pkg_agent:
+	@echo "Building $(AGENT_TARBALL)"
+	# agent dir
+	@mkdir -p $(RELSTAGEDIR)/root/opt/smartdc/$(NAME)/bin
+	@mkdir -p $(RELSTAGEDIR)/root/opt/smartdc/$(NAME)/smf/manifests
+	cp -R \
+	    $(TOP)/smf/manifests/rebalancer-agent.xml \
+	    $(RELSTAGEDIR)/root/opt/smartdc/$(NAME)/smf/manifests
+	cp \
+	    target/release/rebalancer-agent \
+	    $(RELSTAGEDIR)/root/opt/smartdc/$(NAME)/bin/
+	# package it up
+	cd $(RELSTAGEDIR) && $(TAR) -I pigz -cf $(TOP)/$(AGENT_TARBALL) root
+	@rm -rf $(RELSTAGEDIR)
 
 # XXX timf, possibly only needed when I tried to build on my mac by mistake
 # need to do a build as a fresh user just to make sure
