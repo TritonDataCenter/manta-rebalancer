@@ -9,12 +9,23 @@
 -->
 
 # Manta Rebalancer 
-The [Manta](https://github.com/joyent/manta) object rebalancer manager and
+
+This repository is part of the Joyent Manta project.  For contribution
+guidelines, issues, and general documentation, visit the main
+[Manta](http://github.com/joyent/manta) project page.
+
+This repository contains sources for the Manta object rebalancer manager and
 [agent](https://github.com/joyent/manta-rebalancer/blob/docs/docs/agent.md).
 
 ## Build
 ```
-make
+make all release publish buildimage
+```
+
+or
+
+```
+make agent pkg_agent
 ```
 
 ## Usage
@@ -74,28 +85,6 @@ file is populated by the config-agent using `src/config.json.in` as a template.
 metadata (`DOMAIN_NAME`).
 number of records.
 * shards<Array>: The first and last shard.  From SAPI application metadata `INDEX_MORAY_SHARDS`.
-
-
-## Development
-
-### Install Postgres
-* Install Postgres
-```
-pkgin install postgresql10
-```
-
-* Authentication configuration:
-Optionally add the following line to your `/var/pgsql/data/pg_hba.conf`
-```
-# TYPE  DATABASE        USER            ADDRESS                 METHOD
-local   all             postgres                                trust
-```
-or leave the default password of `postgres` in place.
-
-* Start Postgres
-```
-svcadm enable -s postgresql
-```
 
 
 ### Pre-integration
