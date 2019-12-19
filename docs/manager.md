@@ -46,7 +46,7 @@ evacuated.
         storage node.     | * Select destination    |  destinations.    +------------------------+
         +-----------------+   storage node(s) from  +------------------>+        Picker          |
         |                 |   list based on space   |                   |                        |
-+-------v-------+         |   and fault domain      | Picker reponds    | Maintains a cache of   |
++-------v-------+         |   and fault domain      | Picker responds    | Maintains a cache of   |
 | Shark Spotter |         |   requirements.         | with most recently| eligible storage nodes |
 +-------+-------+         | * Direct objects to     | obtained list.    | which is periodically  |
         |                 |   sharks based on       +<------------------+ refreshed.             |
@@ -157,18 +157,16 @@ ARGS:
 ```
 
 ## Manager Configuration Parameters
-The rebalaner manager requires certain  service configuration parameters in
-`src/config.json`.  This file is populated by the config-agent using `src/config.json.in` as a template.
+The rebalancer manager requires certain  service configuration parameters in
+`etc/config.json`.  This file is populated by the config-agent using
+`etc/config.json.in` as a template.
 
 ### Service Parameters
 
 | Param                | Type   | Description                        |
 | -------------------- | ------ | ---------------------------------- |
-| sapi_url             | String | The url of the SAPI zone.  Populated by the manta deployment zone. |
 | domain_name          | String | The domain name of the manta deployment.  From SAPI application metadata (`DOMAIN_NAME`). |
-| database_url         | String | Location and name of the zone's local database. |
-| database_buffer_size | Uint   | Writes to the database are buffered by up to this number of records. |
-| shards               | Array  | The first and last shard.  From SAPI application metadata `INDEX_MORAY_SHARDS`. |
+| shards               | Array  | The array of directory-api shards.  From SAPI application metadata `INDEX_MORAY_SHARDS`. |
  
 ## Development
 Currently the rebalancer manager and rebalancer-adm rely on a postgres database
@@ -177,7 +175,11 @@ necessary to install postgres prior to any development and/or testing of the
 rebalancer manager.
 
 ### Install Postgres
-* Install Postgres
+Installing postgres is not necessary if you are deploying a rebalancer image
+as postgres will be setup as part of the image-build process.  If you would
+like to run the rebalancer manager in a development zone with existing projects
+though, installing postgres will be necessary.
+
 ```
 pkgin install postgresql10
 ```
