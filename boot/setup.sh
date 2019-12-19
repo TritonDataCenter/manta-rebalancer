@@ -24,7 +24,7 @@ manta_add_manifest_dir "/opt/smartdc/rebalancer"
 manta_common2_setup "rebalancer-manager"
 
 echo "Setting up rebalancer-manager"
-/usr/sbin/svcadm enable svc:/pkgsrc/postgresql:default
+/usr/sbin/svccfg import /opt/local/lib/svc/manifest/postgresql.xml
 /usr/sbin/svccfg import /opt/smartdc/rebalancer/smf/manifests/rebalancer-manager.xml
 
 manta_common2_setup_log_rotation "rebalancer-manager"
