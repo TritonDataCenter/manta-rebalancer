@@ -88,7 +88,7 @@ review the instructions in their respective pages (listed above).
 
 ### Images
 Information on how to building Triton/Manta components to be deployed within
-an image please see the [Developer Guide for Building Triton and Manta](https://github.com/joyent/triton/blob/master/docs/developer-guide/building.md#building-a-component)
+an image please see the [Developer Guide for Building Triton and Manta](https://github.com/joyent/triton/blob/master/docs/developer-guide/building.md#building-a-component).
 
 
 ### Pre-integration
