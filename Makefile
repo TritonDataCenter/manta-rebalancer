@@ -104,14 +104,14 @@ agent:
 pkg_agent:
 	@echo "Building $(AGENT_TARBALL)"
 	# agent dir
-	@mkdir -p $(RELSTAGEDIR)/root/opt/smartdc/$(NAME)/bin
-	@mkdir -p $(RELSTAGEDIR)/root/opt/smartdc/$(NAME)/smf/manifests
+	@mkdir -p $(RELSTAGEDIR)/root/opt/smartdc/$(NAME)-agent/bin
+	@mkdir -p $(RELSTAGEDIR)/root/opt/smartdc/$(NAME)-agent/smf/manifests
 	cp -R \
 	    $(TOP)/smf/manifests/rebalancer-agent.xml \
-	    $(RELSTAGEDIR)/root/opt/smartdc/$(NAME)/smf/manifests/
+	    $(RELSTAGEDIR)/root/opt/smartdc/$(NAME)-agent/smf/manifests/
 	cp \
 	    target/release/rebalancer-agent \
-	    $(RELSTAGEDIR)/root/opt/smartdc/$(NAME)/bin/
+	    $(RELSTAGEDIR)/root/opt/smartdc/$(NAME)-agent/bin/
 	# package it up
 	cd $(RELSTAGEDIR) && $(TAR) -I pigz -cf $(TOP)/$(AGENT_TARBALL) root
 	@rm -rf $(RELSTAGEDIR)
