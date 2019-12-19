@@ -70,13 +70,13 @@ object locations.      {o1, o2, ..., oN}                   being evacuated.
 
 ## Build
 
-Build release versions of `rebanacer-manager`, `rebalancer-agent`, and
+Build release versions of `rebalancer-manager`, `rebalancer-agent`, and
 `rebalancer-adm`:
 ```
 make all
 ```
 
-Build debug versions of `rebanacer-manager`, `rebalancer-agent`, and
+Build debug versions of `rebalancer-manager`, `rebalancer-agent`, and
 `rebalancer-adm`:
 ```
 make debug
