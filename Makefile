@@ -37,6 +37,8 @@ ENGBLD_USE_BUILDIMAGE   = true
 
 RUST_CLIPPY_ARGS ?= --features "postgres"
 
+CLEAN_FILES += rebalancer-agent-*.tar.gz
+
 ifeq ($(shell uname -s),SunOS)
     include ./deps/eng/tools/mk/Makefile.agent_prebuilt.defs
 endif
