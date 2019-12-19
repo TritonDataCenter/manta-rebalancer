@@ -27,7 +27,7 @@ pipeline {
     post {
         always {
             joyMattermostNotification(channel: 'jenkins')
-            // joyMattermostNotification(channel: 'rebalancer')
+            joyMattermostNotification(channel: 'rebalancer')
         }
     }
 }

@@ -64,14 +64,17 @@ release: all deps/manta-scripts/.git $(SMF_MANIFESTS)
 	@echo "Building $(RELEASE_TARBALL)"
 	# application dir
 	@mkdir -p $(RELSTAGEDIR)/root/opt/smartdc/$(NAME)/bin
+	@mkdir -p $(RELSTAGEDIR)/root/opt/smartdc/$(NAME)/smf/manifests
 	cp -R \
-	    $(TOP)/smf \
 	    $(TOP)/sapi_manifests \
 	    $(RELSTAGEDIR)/root/opt/smartdc/$(NAME)/
 	cp \
 	    target/release/rebalancer-manager \
 	    target/release/rebalancer-adm \
 	    $(RELSTAGEDIR)/root/opt/smartdc/$(NAME)/bin/
+	cp -R \
+	    $(TOP)/smf/manifests/rebalancer-manager.xml \
+	    $(RELSTAGEDIR)/root/opt/smartdc/$(NAME)/smf/manifests/
 	# boot
 	@mkdir -p $(RELSTAGEDIR)/root/opt/smartdc/boot/scripts
 	cp -R $(TOP)/deps/manta-scripts/*.sh \
@@ -97,7 +100,6 @@ clean::
 agent:
 	$(CARGO) build --bin rebalancer-agent --release
 
-# XXX timf: I don't know what else the agent needs
 .PHONY: pkg_agent
 pkg_agent:
 	@echo "Building $(AGENT_TARBALL)"
@@ -106,7 +108,7 @@ pkg_agent:
 	@mkdir -p $(RELSTAGEDIR)/root/opt/smartdc/$(NAME)/smf/manifests
 	cp -R \
 	    $(TOP)/smf/manifests/rebalancer-agent.xml \
-	    $(RELSTAGEDIR)/root/opt/smartdc/$(NAME)/smf/manifests
+	    $(RELSTAGEDIR)/root/opt/smartdc/$(NAME)/smf/manifests/
 	cp \
 	    target/release/rebalancer-agent \
 	    $(RELSTAGEDIR)/root/opt/smartdc/$(NAME)/bin/
@@ -114,8 +116,6 @@ pkg_agent:
 	cd $(RELSTAGEDIR) && $(TAR) -I pigz -cf $(TOP)/$(AGENT_TARBALL) root
 	@rm -rf $(RELSTAGEDIR)
 
-# XXX timf, possibly only needed when I tried to build on my mac by mistake
-# need to do a build as a fresh user just to make sure
 clippy-deps:
 	rustup component add clippy
 
