@@ -70,6 +70,7 @@ object locations.      {o1, o2, ..., oN}                   being evacuated.
 
 ## Build
 
+### Binaries
 Build release versions of `rebalancer-manager`, `rebalancer-agent`, and
 `rebalancer-adm`:
 ```
@@ -84,6 +85,11 @@ make debug
 
 For specific instructions on building individual parts of the project, please
 review the instructions in their respective pages (listed above).
+
+### Images
+Information on how to building Triton/Manta components to be deployed within
+an image please see the [Developer Guide for Building Triton and Manta](https://github.com/joyent/triton/blob/master/docs/developer-guide/building.md#building-a-component)
+
 
 ### Pre-integration
 Before integration of a change to any part of the rebalancer, the following
