@@ -159,7 +159,7 @@ ARGS:
 ## Manager Configuration Parameters
 The rebalancer manager requires certain  service configuration parameters in
 `etc/config.json`.  This file is populated by the config-agent using
-`etc/config.json.in` as a template.
+`sapi_manifests/rebalancer/template` as a template.
 
 ### Service Parameters
 
