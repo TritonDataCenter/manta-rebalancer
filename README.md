@@ -9,132 +9,103 @@
 -->
 
 # Manta Rebalancer 
-The [Manta](https://github.com/joyent/manta) object rebalancer manager and
-[agent](https://github.com/joyent/manta-rebalancer/blob/docs/docs/agent.md).
+This repository is part of the Joyent Manta Project.  For contribution
+guidelines, issues and general documentation, visit the
+[Manta](https://github.com/joyent/manta) project pages.
+
+## Overview
+The Manta Object Rebalancer is comprised of two main parts: a manager and an
+agent.  Currently, the main function of the rebalancer is to evacuate objects
+from an operator specified storage server (i.e. mako).  A rebalancer agent runs
+on every mako in manta, while the rebalancer manager delegates work to various
+agents in the form of something called "assignments".  An assignment is a list
+containing information about objects for a given agent to download.  Through a
+series of agent selections and assignments an entire storage node can be fully
+evacuated.
+
+For information in each piece of the project, please see:
+* [Rebalancer Manager Guide](docs/manager.md)
+* [Rebalancer Agent Guide](docs/agent.md)
+
+## Basic Rebalancer Topology
+```
+                       Manager receives a
+                       request to evacuate
+                       all objects from a
+                       given storage node.
+                               +
+                               |
+                               v
++-----------+            +-----+------+                        +------------+
+| Metadata  |            |            |   Assignment           |Storage Node|
+|   Tier    |            |            |   {o1, o2, ..., oN}    |  +------+  |
+| +-------+ |     +------+  Manager   +----------------------->+  |Agent |  |
+| | Moray | |     |      |            |                        |  +------+  |
+| |Shard 0| +<----+      |            |                        |            |
+| +-------+ |     |      +------------+                        +-+---+---+--+
+|           |     |                                              ^   ^   ^
+| +-------+ |     |                                              |   |   |
+| | Moray | |     |                                +-------------+   |   +-------------+
+| |Shard 1| +<----+                                |o1               |o2               |oN
+| +-------+ |     |                                |                 |                 |
+|     .     |     |      +------------+      +-----+------+    +-----+------+    +-----+------+
+|     .     |     |      |Storage Node|      |Storage Node|    |Storage Node|    |Storage Node|
+| +-------+ |     |      |  +------+  |      |  +------+  |    |  +------+  |    |  +------+  |
+| | Moray | |     |      |  |Agent |  |      |  |Agent |  |    |  |Agent |  |    |  |Agent |  |
+| |Shard M| +<----+      |  +------+  |      |  +------+  |    |  +------+  |    |  +------+  |
+| +-------+ |            |{o1, o2, oN}|      |            |    |            |    |            |
++-----------+            +-----+------+      +------------+    +------------+    +------------+
+      ^                        ^
+      |                        |             +                                                +
+      +                        |             |                                                |
+When all objects in            |             +-----------------------+------------------------+
+an assignent have              |                                     |
+been processed, the            +                                     v
+manager updates the    Storage node to                     Objects in the assignment
+metadata tier to       evacuate contains                   are retrieved from storage
+reflect the new        objects:                            nodes other than the one
+object locations.      {o1, o2, ..., oN}                   being evacuated.
+
+```
 
 ## Build
+
+### Binaries
+Build release versions of `rebalancer-manager`, `rebalancer-agent`, and
+`rebalancer-adm`:
 ```
-make
-```
-
-## Usage
-```
-remora
-
-USAGE:
-    remora [FLAGS] [SUBCOMMAND]
-
-FLAGS:
-    -h, --help       Prints help information
-    -s, --server     Run in server mode
-    -V, --version    Prints version information
-
-SUBCOMMANDS:
-    help    Prints this message or the help of the given subcommand(s)
-    job     Job Management
-
+make all
 ```
 
+Build debug versions of `rebalancer-manager`, `rebalancer-agent`, and
+`rebalancer-adm`:
 ```
-Job Management
-
-USAGE:
-    remora job [SUBCOMMAND]
-
-FLAGS:
-    -h, --help       Prints help information
-    -V, --version    Prints version information
-
-SUBCOMMANDS:
-    create    Create a rebalancer Job
-    help      Prints this message or the help of the given subcommand(s)
-
+make debug
 ```
 
-```
-Get the status of a rebalancer job
+For specific instructions on building individual parts of the project, please
+review the instructions in their respective pages (listed above).
 
-USAGE:
-    remora job status <JOB_ID>
-
-FLAGS:
-    -h, --help       Prints help information
-    -V, --version    Prints version information
-
-ARGS:
-    <JOB_ID>    UUID of job
-```
-
-## Configuration Parameters
-The remora zone leverages configuration parameters in `src/config.json`.  This
-file is populated by the config-agent using `src/config.json.in` as a template.
-
-*Parameters:*
-* domain_name<String>: The domain name of the manta deployment.  From SAPI application
-metadata (`DOMAIN_NAME`).
-number of records.
-* shards<Array>: The first and last shard.  From SAPI application metadata `INDEX_MORAY_SHARDS`.
-
-
-## Development
-
-### Install Postgres
-* Install Postgres
-```
-pkgin install postgresql10
-```
-
-* Authentication configuration:
-Optionally add the following line to your `/var/pgsql/data/pg_hba.conf`
-```
-# TYPE  DATABASE        USER            ADDRESS                 METHOD
-local   all             postgres                                trust
-```
-or leave the default password of `postgres` in place.
-
-* Start Postgres
-```
-svcadm enable -s postgresql
-```
+### Images
+Information on how to building Triton/Manta components to be deployed within
+an image please see the [Developer Guide for Building Triton and Manta](https://github.com/joyent/triton/blob/master/docs/developer-guide/building.md#building-a-component).
 
 
 ### Pre-integration
-Before integration run `fmt`, `check`, `test`, and
+Before integration of a change to any part of the rebalancer, the following
+procedures must run cleanly:run `fmt`, `check`, `test`, and
 [clippy](https://github.com/rust-lang/rust-clippy):
 ```
-cargo fmt
-cargo check
-cargo clippy
-cargo test
+cargo fmt -- --check
+make check
+make test
 ```
 
-
-## Testing
-
-There is a certain flavor of the rebalancer agent that allow for more convenient
-testing of the zone -- namely one that receives a (properly formed) assignment
-and blindly marks all tasks within it as "Complete" instead of actually doing
-the leg work of processing each task.  This is intended for scenarios where
-functional verification of the happy path in the rebalancer zone.  As this
-project evolves, other modes will likely be introduced.
-
-To build the version of the agent described above, a special flag must be
-passed to the compiled to enable the feature:
-
-```
-cargo build --features "always_pass"
-```
-
-Note: By default, this feature will never be enabled.
-
-### Testing certain modules
-* To test only a certain module (including all of its submodules:
-```
-cargo test <module name>
-```
-
-* To test only the REST API server:
-```
-cargo test --bin server
-```
+Note: On the `cargo fmt -- --check`, this will display any lines that *would*
+be impacted by an actual run of `cargo fmt`.  It is recommended to first
+evaluate the scope of the change that format *would* make.  If it's the case
+that the tool catches long standing format errors, it might be desirable to
+address those in a separate change, otherwise a reviewer may have trouble
+determing what is related to a current change and what is cosmetic, historical
+clean up.
 
