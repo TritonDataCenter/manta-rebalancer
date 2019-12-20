@@ -22,7 +22,12 @@ fn main() -> Result<(), Error> {
 
     match command.subcommand {
         SubCommand::Server => Ok(()),
-        SubCommand::DoJob(job) => job.run(),
+        SubCommand::DoJob(_job) => {
+            println!("This function is currently not allowed from the CLI. \
+                Please contact the rebalancer-manager directly to create a \
+                job.");
+            std::process::exit(1);
+        },
         SubCommand::Status(uuid) => match status::get_status(uuid) {
             Ok(status_report) => {
                 for (status, count) in status_report.iter() {
