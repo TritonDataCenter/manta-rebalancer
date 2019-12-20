@@ -1,3 +1,8 @@
+/build
+/bits
+/rebalancer-pkg-*.tar.gz
+/rebalancer-agent-*.tar.gz
+/make_stamps
 /target
 **/*.rs.bk
 .idea/*

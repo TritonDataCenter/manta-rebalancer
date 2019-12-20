@@ -1,0 +1,8 @@
+{
+    "domain_name": "{{DOMAIN_NAME}}",
+    "shards": [{{#INDEX_MORAY_SHARDS}}
+        {
+            "host": "{{host}}"
+        }{{^last}},{{/last}}{{/INDEX_MORAY_SHARDS}}
+    ]
+}
