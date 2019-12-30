@@ -139,6 +139,7 @@ pub enum InternalErrorCode {
     LockError,
     HashNotFound,
     DuplicateShark,
+    BadMantaObject,
 }
 
 impl fmt::Display for InternalError {
