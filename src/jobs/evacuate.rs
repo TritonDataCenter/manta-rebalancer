@@ -1384,12 +1384,11 @@ fn _get_sharks_from_value(
 fn _get_objectId_from_value(manta_object: &Value) -> Result<ObjectId, Error> {
     let id = match manta_object.get("objectId") {
         Some(i) => match serde_json::to_string(i) {
-            Ok(id_str) => id_str,
+            Ok(id_str) => id_str.replace("\"", ""),
             Err(e) => {
                 let msg = format!(
                     "Could not parse objectId from {:#?}\n({})",
-                    manta_object,
-                    e
+                    manta_object, e
                 );
                 error!("{}", msg);
                 return Err(InternalError::new(
@@ -1409,6 +1408,7 @@ fn _get_objectId_from_value(manta_object: &Value) -> Result<ObjectId, Error> {
             .into());
         }
     };
+
     Ok(id)
 }
 
@@ -1481,7 +1481,7 @@ fn start_sharkspotter(
                 // scanning for other objects.
                 let etag = match moray_object.get("_etag") {
                     Some(tag) => match serde_json::to_string(tag) {
-                        Ok(t) => t,
+                        Ok(t) => t.replace("\"", ""),
                         Err(e) => {
                             error!("Cannot convert etag to string: {}", e);
                             _insert_bad_moray_object(
