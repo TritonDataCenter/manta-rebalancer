@@ -4,9 +4,9 @@ use moray::{
     client::MorayClient,
     objects::{Etag, MethodOptions as ObjectMethodOptions},
 };
+use serde_json::Value;
 use slog_scope;
 use std::net::IpAddr;
-use serde_json::Value;
 use trust_dns_resolver::Resolver;
 
 static MANTA_BUCKET: &str = "manta";
@@ -61,19 +61,25 @@ pub fn put_object(
     let key = match object.get("key") {
         Some(k) => match serde_json::to_string(k) {
             Ok(ky) => ky,
-            Err (e) => {
-                error!("Could not parse key field in object {:#?} ({})",
-                       object, e);
+            Err(e) => {
+                error!(
+                    "Could not parse key field in object {:#?} ({})",
+                    object, e
+                );
                 return Err(InternalError::new(
                     Some(InternalErrorCode::BadMantaObject),
-                    "Could not parse Manta Object Key" ).into());
+                    "Could not parse Manta Object Key",
+                )
+                .into());
             }
         },
         None => {
             error!("Missing key field in object {:#?}", object);
             return Err(InternalError::new(
                 Some(InternalErrorCode::BadMantaObject),
-                "Missing Manta Object Key" ).into());
+                "Missing Manta Object Key",
+            )
+            .into());
         }
     };
 

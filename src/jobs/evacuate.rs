@@ -30,7 +30,6 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use std::time::Duration;
 
-
 use crossbeam_channel as crossbeam;
 use crossbeam_channel::TryRecvError;
 use crossbeam_deque::{Injector, Steal};
@@ -39,8 +38,8 @@ use moray::client::MorayClient;
 use quickcheck::{Arbitrary, Gen};
 use quickcheck_helpers::random::string as random_string;
 use reqwest;
-use serde_json::Value;
 use serde::{self, Deserialize};
+use serde_json::Value;
 use strum::IntoEnumIterator;
 use uuid::Uuid;
 
@@ -74,7 +73,6 @@ table! {
 struct UpdateEvacuateObject<'a> {
     id: &'a str,
 }
-
 
 #[derive(Deserialize)]
 struct MantaObjectEssential {
@@ -290,7 +288,7 @@ pub struct EvacuateObject {
     pub assignment_id: AssignmentId,
 
     pub object: Value, // The MantaObject being rebalanced
-    pub shard: i32,          // shard number of metadata object record
+    pub shard: i32,    // shard number of metadata object record
     pub dest_shark: String,
     pub etag: String, // Moray object "_etag"
     pub status: EvacuateObjectStatus,
@@ -345,7 +343,7 @@ impl EvacuateObject {
         manta_object: Value,
         id: ObjectId,
         etag: String,
-        shard: i32
+        shard: i32,
     ) -> Self {
         Self {
             assignment_id: String::new(),
@@ -355,43 +353,6 @@ impl EvacuateObject {
             etag,
             ..Default::default()
         }
-    }
-
-    /*
-    fn new(moray_object: Value) -> Result<Self, Error> {
-        let object_id = match _get_objectId_from_value(ssobj) {
-            Ok(id) => id,
-            Err(e) => {
-                return Err(e);
-            }
-        };
-
-
-
-        Self {
-            assignment_id: String::new(),
-            id: object_id,
-            object: ,
-            shard: ssobj.shard,
-            etag: ssobj.etag,
-            ..Default::default()
-        }
-    }
-    */
-
-    fn get_sharks(&self) -> Result<Vec<MantaObjectShark>, Error>{
-        _get_sharks_from_value(&self.object)
-            /*
-        let sharks_array = match self.object.get("sharks") {
-            Some(sa) => sa,
-            None => {
-                return Err(InternalError::new(
-                    Some(InternalErrorCode::BadMantaObject),
-                    "Missing sharks array" ).into());
-            }
-        };
-        serde_json::from_value(sharks_array.to_owned()).map_err(Error::from)
-        */
     }
 }
 
@@ -1242,11 +1203,10 @@ impl UpdateMetadata for EvacuateJob {
         match object.get_mut("sharks") {
             Some(sharks) => {
                 *sharks = sharks_value;
-            },
+            }
             None => {
-                let msg = format!(
-                    "Missing sharks in manta object {:#?}",
-                    object);
+                let msg =
+                    format!("Missing sharks in manta object {:#?}", object);
 
                 error!("{}", &msg);
                 self.mark_object_error(
@@ -1256,7 +1216,8 @@ impl UpdateMetadata for EvacuateJob {
                 return Err(InternalError::new(
                     Some(InternalErrorCode::BadMantaObject),
                     msg,
-                ).into());
+                )
+                .into());
             }
         }
 
@@ -1387,7 +1348,7 @@ impl ProcessAssignment for EvacuateJob {
 fn _insert_bad_moray_object(
     job_action: &EvacuateJob,
     object: Value,
-    id: ObjectId
+    id: ObjectId,
 ) {
     error!("Moray value missing etag {:#?}", object);
     let eobj = EvacuateObject {
@@ -1403,41 +1364,49 @@ fn _insert_bad_moray_object(
         .expect("Error inserting bad EvacuateObject into DB");
 }
 
-fn _get_sharks_from_value(manta_object: &Value)
-    -> Result<Vec<MantaObjectShark>, Error>
-{
+fn _get_sharks_from_value(
+    manta_object: &Value,
+) -> Result<Vec<MantaObjectShark>, Error> {
     let sharks_array = match manta_object.get("sharks") {
         Some(sa) => sa,
         None => {
             return Err(InternalError::new(
                 Some(InternalErrorCode::BadMantaObject),
-                "Missing sharks array" ).into());
+                "Missing sharks array",
+            )
+            .into());
         }
     };
     serde_json::from_value(sharks_array.to_owned()).map_err(Error::from)
 }
 
+#[allow(non_snake_case)]
 fn _get_objectId_from_value(manta_object: &Value) -> Result<ObjectId, Error> {
     let id = match manta_object.get("objectId") {
         Some(i) => match serde_json::to_string(i) {
             Ok(id_str) => id_str,
             Err(e) => {
                 let msg = format!(
-                    "Could not parse objectId from {:#?}",
-                    manta_object);
+                    "Could not parse objectId from {:#?}\n({})",
+                    manta_object,
+                    e
+                );
                 error!("{}", msg);
                 return Err(InternalError::new(
                     Some(InternalErrorCode::BadMantaObject),
-                    msg).into());
+                    msg,
+                )
+                .into());
             }
         },
         None => {
-            let msg = format!("Missing objectId from {:#?}",
-                              manta_object);
+            let msg = format!("Missing objectId from {:#?}", manta_object);
             error!("{}", msg);
             return Err(InternalError::new(
                 Some(InternalErrorCode::BadMantaObject),
-                msg).into());
+                msg,
+            )
+            .into());
         }
     };
     Ok(id)
@@ -1488,13 +1457,17 @@ fn start_sharkspotter(
                 // For now we consider a poorly formatted moray object or a
                 // missing objectId to be critical failures.  We cannot
                 // insert an evacuate object without an objectId.
-                let manta_object = match sharkspotter::manta_obj_from_moray_obj
-                    (&moray_object) {
-                    Ok(o) => o,
-                    Err(e) => {
-                        return Err(std::io::Error::new(ErrorKind::Other, e))
-                    }
-                };
+                let manta_object =
+                    match sharkspotter::manta_obj_from_moray_obj(&moray_object)
+                    {
+                        Ok(o) => o,
+                        Err(e) => {
+                            return Err(std::io::Error::new(
+                                ErrorKind::Other,
+                                e,
+                            ))
+                        }
+                    };
 
                 let id = match _get_objectId_from_value(&manta_object) {
                     Ok(id_str) => id_str,
@@ -1510,11 +1483,14 @@ fn start_sharkspotter(
                     Some(tag) => match serde_json::to_string(tag) {
                         Ok(t) => t,
                         Err(e) => {
-                            _insert_bad_moray_object(&job_action, manta_object,
-                                                     id);
+                            error!("Cannot convert etag to string: {}", e);
+                            _insert_bad_moray_object(
+                                &job_action,
+                                manta_object,
+                                id,
+                            );
                             return Ok(());
                         }
-
                     },
                     None => {
                         _insert_bad_moray_object(&job_action, manta_object, id);
@@ -1549,7 +1525,8 @@ fn start_sharkspotter(
                     manta_object,
                     id.clone(),
                     etag,
-                    shard as i32);
+                    shard as i32,
+                );
 
                 obj_tx
                     .send(eobj)
@@ -1798,7 +1775,7 @@ where
                     let shark_hash_ent =
                         shark_hash.iter().find(|(_, shark_hash_ent)| {
                             if let Some(reason) = validate_destination(
-                                &eobj,
+                                &eobj.object,
                                 &job_action.from_shark,
                                 &shark_hash_ent.shark,
                             ) {
@@ -1964,11 +1941,15 @@ fn shark_assignment_generator(
                         match serde_json::from_value(eobj.object.clone()) {
                             Ok(mo) => mo,
                             Err(e) => {
-                                error!("Unable to get essential values from \
-                                manta object: {} ({})", eobj.id, e);
+                                error!(
+                                    "Unable to get essential values from \
+                                     manta object: {} ({})",
+                                    eobj.id, e
+                                );
                                 job_action.mark_object_error(
                                     &eobj.id,
-                                    EvacuateObjectError::BadMantaObject);
+                                    EvacuateObjectError::BadMantaObject,
+                                );
                                 continue;
                             }
                         };
@@ -1992,30 +1973,8 @@ fn shark_assignment_generator(
 
                     // Make sure there is enough space for this object on the
                     // shark.
-                    /*
-                    let content_length: u64 = match obj.get("contentLength") {
-                        Some(length) => {
-                            match serde_json::from_value(length) {
-                                Ok(conn_len) => conn_len,
-                                Err(e) => {
-                                    error!("Could not parse content length");
-                                    job_action.mark_object_error(
-                                        &eobj.id,
-                                        EvacuateObjectError::BadContentLength);
-                                    continue;
-                                }
-                            }
-                        },
-                        None => {
-                            job_action.mark_object_error(
-                                &eobj.id,
-                                EvacuateObjectError::BadContentLength);
-                        }
-                    };
-                    */
-
-                    let content_mb = manta_object.content_length / (1024 *
-                        1024);
+                    let content_mb =
+                        manta_object.content_length / (1024 * 1024);
                     if content_mb > available_space {
                         job_action.skip_object(
                             &mut eobj,
@@ -2099,16 +2058,20 @@ fn _continue_adding_tasks(
 }
 
 fn validate_destination(
-    eobj: &EvacuateObject,
+    mobj_value: &Value,
     evac_shark: &MantaObjectShark,
     dest_shark: &StorageNode,
 ) -> Option<ObjectSkippedReason> {
-    let sharks = match eobj.get_sharks() {
+    let sharks = _get_sharks_from_value(mobj_value);
+
+    debug_assert!(sharks.is_ok(), "could not get sharks from evacuate object");
+
+    let sharks = match sharks {
         Ok(s) => s,
         Err(e) => {
             error!("{}", e);
-            debug_assert!(false, "could not get sharks from evacuate object");
-            return Some(ObjectSkippedReason::SourceOtherError)
+            #[allow(clippy::assertions_on_constants)]
+            return Some(ObjectSkippedReason::SourceOtherError);
         }
     };
 
@@ -2132,9 +2095,7 @@ fn validate_destination(
     // So if the destination is NOT in the same data center, and this object
     // already has a copy in the destination data center, we must skip for now.
     if evac_shark.datacenter != dest_shark.datacenter
-        && sharks
-            .iter()
-            .any(|s| s.datacenter == dest_shark.datacenter)
+        && sharks.iter().any(|s| s.datacenter == dest_shark.datacenter)
     {
         return Some(ObjectSkippedReason::ObjectAlreadyInDatacenter);
     }
@@ -2472,11 +2433,9 @@ fn metadata_update_worker(
 
         loop {
             let assignment = match queue_front.steal() {
-                Steal::Success(a) => {
-                    match a {
-                        Some(assignment) => assignment,
-                        None => break
-                    }
+                Steal::Success(a) => match a {
+                    Some(assignment) => assignment,
+                    None => break,
                 },
                 Steal::Retry | Steal::Empty => continue,
             };
@@ -2494,7 +2453,7 @@ fn metadata_update_worker(
 
             for eobj in objects {
                 let etag = eobj.etag.clone();
-                let mut mobj = eobj.object.clone();
+                let mobj = eobj.object.clone();
 
                 // Unfortunately sqlite only accepts signed integers.  So we
                 // have to do the conversion here and cross our fingers that
@@ -2553,7 +2512,7 @@ fn metadata_update_worker(
                 // the associated EvacuateObject in the local database if an
                 // error is encountered.  It is done this way in order to
                 // batch database updates in the happy path.
-                mobj = match job_action
+                match job_action
                     .update_object_shark(mobj, dest_shark, etag, mclient)
                 {
                     Ok(o) => o,
@@ -2644,7 +2603,6 @@ fn metadata_update_worker(
     }
 }
 
-
 /// This thread runs until EvacuateJob Completion.
 /// When it receives a completed Assignment it will enqueue it into a work queue
 /// and then possibly starts worker thread to do the work.  The worker thread
@@ -2696,7 +2654,8 @@ fn start_metadata_update_broker(
                 .spawn(metadata_update_worker(
                     Arc::clone(&job_action),
                     Arc::clone(&queue),
-                )).expect("MD Update Worker handle");
+                ))
+                .expect("MD Update Worker handle");
             loop {
                 let assignment = match md_update_rx.recv() {
                     Ok(assignment) => assignment,
@@ -2712,7 +2671,6 @@ fn start_metadata_update_broker(
                 };
 
                 queue_back.push(Some(assignment));
-
             }
             worker.join().expect("MD Update Worker join");
             Ok(())
@@ -2896,14 +2854,19 @@ mod tests {
         let obj_generator_th = builder
             .name(String::from("no skip object_generator_test"))
             .spawn(move || {
-                for (_, o) in test_objects_copy.into_iter() {
-                    let ssobj = SharkSpotterObject {
-                        shard: 1,
-                        object: o.clone(),
-                        // TODO
-                        etag: String::from("Fake_etag"),
-                    };
-                    match obj_tx.send(ssobj) {
+                for (id, o) in test_objects_copy.into_iter() {
+                    let shard = 1;
+                    let etag = String::from("Fake_etag");
+                    let mobj_value =
+                        serde_json::to_value(o.clone()).expect("mobj value");
+
+                    let eobj = EvacuateObject::from_parts(
+                        mobj_value,
+                        id.clone(),
+                        etag,
+                        shard,
+                    );
+                    match obj_tx.send(eobj) {
                         Ok(()) => (),
                         Err(e) => {
                             error!(
@@ -3038,13 +3001,14 @@ mod tests {
         // Create some EvacuateObjects
         for _ in 0..100 {
             let mobj = MantaObject::arbitrary(&mut g);
-            let ssobj = SharkSpotterObject {
-                shard: 1,
-                object: mobj,
-                etag: random_string(&mut g, 10),
-            };
+            let mobj_value = serde_json::to_value(mobj).expect("mobj_value");
+            let shard = 1;
+            let etag = random_string(&mut g, 10);
+            let id = _get_objectId_from_value(&mobj_value).expect("objectId");
 
-            let mut eobj = EvacuateObject::new(ssobj);
+            let mut eobj =
+                EvacuateObject::from_parts(mobj_value, id, etag, shard);
+
             eobj.assignment_id = uuid.clone();
             eobjs.push(eobj);
         }
@@ -3066,7 +3030,8 @@ mod tests {
 
         for i in 0..eobjs.len() {
             let mut task = Task::arbitrary(&mut g);
-            task.object_id = eobjs[i].object.object_id.clone();
+            task.object_id = _get_objectId_from_value(&eobjs[i].object)
+                .expect("object id for task");
 
             if i % 2 != 0 {
                 let stat = ObjectSkippedReason::arbitrary(&mut g);
@@ -3215,23 +3180,26 @@ mod tests {
 
         // Test evacuation to different shark in the same datacenter.
         to_shark.datacenter = from_shark.datacenter.clone();
+        let obj_value = serde_json::to_value(obj.clone()).expect("obj value");
         assert!(
-            validate_destination(&obj, &from_shark, &to_shark).is_none(),
+            validate_destination(&obj_value, &from_shark, &to_shark).is_none(),
             "Failed to evacuate to another shark in the same data center."
         );
 
         // Test compromising fault domain.
         to_shark.datacenter = obj.sharks[1].datacenter.clone();
+        let obj_value = serde_json::to_value(obj.clone()).expect("obj value");
         assert_eq!(
-            validate_destination(&obj, &from_shark, &to_shark),
+            validate_destination(&obj_value, &from_shark, &to_shark),
             Some(ObjectSkippedReason::ObjectAlreadyInDatacenter),
             "Attempt to place more than one object in the same data center."
         );
 
         // Test evacuating an object to the mako being evacuated.
         to_shark.manta_storage_id = from_shark.manta_storage_id.clone();
+        let obj_value = serde_json::to_value(obj.clone()).expect("obj value");
         assert_eq!(
-            validate_destination(&obj, &from_shark, &to_shark),
+            validate_destination(&obj_value, &from_shark, &to_shark),
             Some(ObjectSkippedReason::ObjectAlreadyOnDestShark),
             "Attempt to evacuate an object back to its source."
         );
@@ -3248,8 +3216,9 @@ mod tests {
             .manta_storage_id
             .clone();
 
+        let obj_value = serde_json::to_value(obj.clone()).expect("obj value");
         assert_eq!(
-            validate_destination(&obj, &from_shark, &to_shark),
+            validate_destination(&obj_value, &from_shark, &to_shark),
             Some(ObjectSkippedReason::ObjectAlreadyOnDestShark),
             "Attempt to evacuate an object back to its source."
         );
@@ -3296,13 +3265,19 @@ mod tests {
             .name(String::from("object_generator_test"))
             .spawn(move || {
                 for o in test_objects_copy.into_iter() {
-                    let ssobj = SharkSpotterObject {
-                        shard: 1,
-                        object: o.clone(),
-                        // TODO
-                        etag: String::from("Fake_etag"),
-                    };
-                    match obj_tx.send(ssobj) {
+                    let shard = 1;
+                    let etag = String::from("Fake_etag");
+                    let mobj_value =
+                        serde_json::to_value(o.clone()).expect("mobj value");
+
+                    let id = o.object_id;
+                    let eobj = EvacuateObject::from_parts(
+                        mobj_value,
+                        id.clone(),
+                        etag,
+                        shard,
+                    );
+                    match obj_tx.send(eobj) {
                         Ok(()) => (),
                         Err(e) => {
                             error!(
