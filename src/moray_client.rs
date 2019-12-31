@@ -60,7 +60,7 @@ pub fn put_object(
     let mut opts = ObjectMethodOptions::default();
     let key = match object.get("key") {
         Some(k) => match serde_json::to_string(k) {
-            Ok(ky) => ky,
+            Ok(ky) => ky.replace("\"", ""),
             Err(e) => {
                 error!(
                     "Could not parse key field in object {:#?} ({})",
