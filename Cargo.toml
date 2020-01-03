@@ -70,8 +70,10 @@ crc = "1.8.1"
 unescape = "0.1.0"
 
 [patch.crates-io]
-diesel = { git = 'https://github.com/diesel-rs/diesel' }
-diesel_derives = { git = "https://github.com/diesel-rs/diesel" }
+# diesel = { git = 'https://github.com/diesel-rs/diesel' }
+# diesel_derives = { git = "https://github.com/diesel-rs/diesel" }
+diesel = { git = 'https://github.com/diesel-rs/diesel', rev = "f75e930e166eb448e3c41d5cdc7251cfcad681f6"}
+diesel_derives = { git = "https://github.com/diesel-rs/diesel" , rev = "f75e930e166eb448e3c41d5cdc7251cfcad681f6"}
 
 [[bin]]
 name = "rebalancer-manager"
