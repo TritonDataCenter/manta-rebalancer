@@ -2488,12 +2488,54 @@ fn start_metadata_update_broker(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::AgentAssignmentStats;
+    use crate::agent::{router as agent_router, AgentAssignmentStats};
     use crate::picker::PickerAlgorithm;
     use crate::util;
+    use lazy_static::lazy_static;
     use quickcheck::{Arbitrary, StdThreadGen};
     use quickcheck_helpers::random::string as random_string;
     use rand::Rng;
+
+    lazy_static! {
+        static ref INITIALIZED: Mutex<bool> = Mutex::new(false);
+    }
+
+    fn unit_test_init() {
+        let mut init = INITIALIZED.lock().unwrap();
+        if *init {
+            return;
+        }
+
+        thread::spawn(move || {
+            let _guard = util::init_global_logger();
+
+            // The reason that we call gotham::start() to start the agent as
+            // opposed to something like TestServer::new() in this case is
+            // because TestServer will automatically pick a port for us based on
+            // what is available at the time, most likely assuring us that
+            // whatever port the agent ends up starting on, it will be something
+            // other than 7878.  Currently, the wiring to pass a port all the
+            // way down to the threads that contact the agent does not exist.
+            // If or when it does, we can use gotham's TestServer as opposed to
+            // explicitly calling gotham::start().
+            gotham::start(
+                "127.0.0.1:7878",
+                agent_router(process_task_always_pass),
+            );
+        });
+
+        *init = true;
+    }
+
+    // This function is supplied to the agent when we start it.  This is what
+    // it will use to process all tasks received in an assignment.  This
+    // particular function does not actually process the task.  Instead, it
+    // declares the task as having been _successfully_ processed.  This will
+    // generally be used when testing the "happy path" of most evacuation job
+    // functionality.
+    fn process_task_always_pass(task: &mut Task) {
+        task.set_status(TaskStatus::Complete);
+    }
 
     fn generate_storage_node(local: bool) -> StorageNode {
         let mut rng = rand::thread_rng();
@@ -2561,8 +2603,7 @@ mod tests {
         use super::*;
         use rand::Rng;
 
-        let _guard = util::init_global_logger();
-
+        unit_test_init();
         struct NoSkipPicker;
         impl NoSkipPicker {
             fn new() -> Self {
@@ -2781,7 +2822,7 @@ mod tests {
 
     #[test]
     fn assignment_processing_test() {
-        let _guard = util::init_global_logger();
+        unit_test_init();
         let mut g = StdThreadGen::new(10);
         let job_action = EvacuateJob::new(
             MantaObjectShark::default(),
@@ -2901,7 +2942,7 @@ mod tests {
 
     #[test]
     fn empty_picker_test() {
-        let _guard = util::init_global_logger();
+        unit_test_init();
         let picker = Arc::new(EmptyPicker {});
         let (full_assignment_tx, _) = crossbeam::bounded(5);
         let (checker_fini_tx, _) = crossbeam::bounded(1);
@@ -2950,18 +2991,18 @@ mod tests {
     #[test]
     fn skip_object_test() {
         // TODO: add test that includes skipped objects
-        let _guard = util::init_global_logger();
+        unit_test_init();
     }
 
     #[test]
     fn duplicate_object_id_test() {
         // TODO: add test that includes duplicate object IDs
-        let _guard = util::init_global_logger();
+        unit_test_init();
     }
 
     #[test]
     fn validate_destination_test() {
-        let _guard = util::init_global_logger();
+        unit_test_init();
         let mut g = StdThreadGen::new(10);
         let obj = MantaObject::arbitrary(&mut g);
 
@@ -3022,7 +3063,7 @@ mod tests {
 
     #[test]
     fn full_test() {
-        let _guard = util::init_global_logger();
+        unit_test_init();
         let now = std::time::Instant::now();
         let picker = MockPicker::new();
         let picker = Arc::new(picker);
