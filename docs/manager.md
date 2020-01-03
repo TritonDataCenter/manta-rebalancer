@@ -46,7 +46,7 @@ evacuated.
         storage node.     | * Select destination    |  destinations.    +------------------------+
         +-----------------+   storage node(s) from  +------------------>+        Picker          |
         |                 |   list based on space   |                   |                        |
-+-------v-------+         |   and fault domain      | Picker responds    | Maintains a cache of   |
++-------v-------+         |   and fault domain      | Picker responds   | Maintains a cache of   |
 | Shark Spotter |         |   requirements.         | with most recently| eligible storage nodes |
 +-------+-------+         | * Direct objects to     | obtained list.    | which is periodically  |
         |                 |   sharks based on       +<------------------+ refreshed.             |
@@ -272,24 +272,6 @@ the rebalancer manager:
 
 
 ## Testing
-
-There is a certain flavor of the rebalancer agent that allow for more convenient
-testing of the rebalancer manager -- namely one that receives a (properly
-formed) assignment and blindly marks all tasks within it as "Complete" instead
-of actually doing the leg work of processing each task.  This is intended for
-scenarios where functional verification of the happy path in the rebalancer
-zone.  As this project evolves, other modes will be introduced.
-
-To build the version of the agent described above, a conditional build flag
-must be passed to the compiler to enable the feature:
-
-```
-cargo build --bin rebalancer-agent --features "always_pass"
-```
-
-Note: By default, this feature should never be enabled.  It is also worth
-mentioning that the postgres feature is not enabled when building the agent,
-even for testing purposes.
 
 ### Testing certain modules
 * To test only a certain module (including all of its submodules):
