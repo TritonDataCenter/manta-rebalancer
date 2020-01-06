@@ -58,7 +58,10 @@ strum_macros = "0.16.0"
 # that is not compatible with rust 1.35.
 unicode-normalization = "=0.1.5"
 
-diesel = {version = "1.4.2", features = ["sqlite"]}
+diesel = { git = 'https://github.com/diesel-rs/diesel', rev = "bc6110d346f05d63db119c12ad4fa4d3b249f76a"}
+
+# diesel = {version = "1.4.2", features = ["sqlite"]}
+#diesel = {version = "1.4.3", features = ["sqlite"]}
 
 slog = "2.5.2"
 slog-bunyan = { git = "https://github.com/slog-rs/bunyan" }
@@ -72,8 +75,25 @@ unescape = "0.1.0"
 [patch.crates-io]
 # diesel = { git = 'https://github.com/diesel-rs/diesel' }
 # diesel_derives = { git = "https://github.com/diesel-rs/diesel" }
-diesel = { git = 'https://github.com/diesel-rs/diesel', rev = "f75e930e166eb448e3c41d5cdc7251cfcad681f6"}
-diesel_derives = { git = "https://github.com/diesel-rs/diesel" , rev = "f75e930e166eb448e3c41d5cdc7251cfcad681f6"}
+
+#xxx diesel = { git = 'https://github.com/diesel-rs/diesel', rev = "f75e930e166eb448e3c41d5cdc7251cfcad681f6"}
+#xxx diesel_derives = { git = "https://github.com/diesel-rs/diesel" , rev = "f75e930e166eb448e3c41d5cdc7251cfcad681f6"}
+
+#diesel = { git = 'https://github.com/diesel-rs/diesel', rev = "6e2d467d131030dc0bbce4e4801c7bee7bcbf0dd"}
+#diesel_derives = { git = "https://github.com/diesel-rs/diesel" , rev = "6e2d467d131030dc0bbce4e4801c7bee7bcbf0dd"}
+
+#diesel = { git = 'https://github.com/diesel-rs/diesel', rev = "ca5b32598621af542cb57163cc1596162a0009eb"}
+#diesel_derives = { git = "https://github.com/diesel-rs/diesel" , rev = "ca5b32598621af542cb57163cc1596162a0009eb"}
+
+# diesel = { git = 'https://github.com/diesel-rs/diesel', rev = "bc6110d346f05d63db119c12ad4fa4d3b249f76a"}
+# diesel_derives = { git = "https://github.com/diesel-rs/diesel" , rev = "bc6110d346f05d63db119c12ad4fa4d3b249f76a"}
+
+# diesel = { git = 'https://github.com/diesel-rs/diesel' }
+# diesel_derives = { git = "https://github.com/diesel-rs/diesel" }
+
+# diesel = { git = 'https://github.com/diesel-rs/diesel', rev = "b49a47abf3bcfb31c54ab26d72312b07f5022484"}
+# diesel_derives = { git = "https://github.com/diesel-rs/diesel" , rev = "b49a47abf3bcfb31c54ab26d72312b07f5022484"}
+
 
 [[bin]]
 name = "rebalancer-manager"
