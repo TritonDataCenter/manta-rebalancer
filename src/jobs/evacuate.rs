@@ -9,12 +9,12 @@
  */
 
 use crate::agent::{AgentAssignmentState, Assignment as AgentAssignment};
-use crate::common::{AssignmentPayload, ObjectSkippedReason, Task, TaskStatus};
+use crate::common::{
+    self, AssignmentPayload, ObjectId, ObjectSkippedReason, Task, TaskStatus,
+};
 use crate::config::Config;
 use crate::error::{CrossbeamError, Error, InternalError, InternalErrorCode};
-use crate::jobs::{
-    Assignment, AssignmentId, AssignmentState, ObjectId, StorageId,
-};
+use crate::jobs::{Assignment, AssignmentId, AssignmentState, StorageId};
 use crate::moray_client;
 use crate::pg_db;
 use crate::picker::{self as mod_picker, SharkSource, StorageNode};
@@ -74,6 +74,12 @@ struct UpdateEvacuateObject<'a> {
     id: &'a str,
 }
 
+// The fields in this struct are a subset of those found in
+// libmanta::MantaObject.  Unfortunately the schema for Manta Objects in
+// the "manta" moray bucket is not consistent.  However each entry should
+// have at least these fields and more.  The fields below are the minimum
+// necessary to rebalance an object.  If we don't have them we can't safely
+// rebalance this object.
 #[derive(Deserialize)]
 struct MantaObjectEssential {
     pub key: String,
@@ -1166,8 +1172,8 @@ impl UpdateMetadata for EvacuateJob {
 
         // Get the sharks in the form of Vec<MantaObjectShark> to make it
         // easy to manipulate.
-        let mut sharks = _get_sharks_from_value(&object)?;
-        let id = _get_objectId_from_value(&object)?;
+        let mut sharks = common::get_sharks_from_value(&object)?;
+        let id = common::get_objectId_from_value(&object)?;
 
         // replace shark value
         for shark in sharks.iter_mut() {
@@ -1364,54 +1370,6 @@ fn _insert_bad_moray_object(
         .expect("Error inserting bad EvacuateObject into DB");
 }
 
-fn _get_sharks_from_value(
-    manta_object: &Value,
-) -> Result<Vec<MantaObjectShark>, Error> {
-    let sharks_array = match manta_object.get("sharks") {
-        Some(sa) => sa,
-        None => {
-            return Err(InternalError::new(
-                Some(InternalErrorCode::BadMantaObject),
-                "Missing sharks array",
-            )
-            .into());
-        }
-    };
-    serde_json::from_value(sharks_array.to_owned()).map_err(Error::from)
-}
-
-#[allow(non_snake_case)]
-fn _get_objectId_from_value(manta_object: &Value) -> Result<ObjectId, Error> {
-    let id = match manta_object.get("objectId") {
-        Some(i) => match serde_json::to_string(i) {
-            Ok(id_str) => id_str.replace("\"", ""),
-            Err(e) => {
-                let msg = format!(
-                    "Could not parse objectId from {:#?}\n({})",
-                    manta_object, e
-                );
-                error!("{}", msg);
-                return Err(InternalError::new(
-                    Some(InternalErrorCode::BadMantaObject),
-                    msg,
-                )
-                .into());
-            }
-        },
-        None => {
-            let msg = format!("Missing objectId from {:#?}", manta_object);
-            error!("{}", msg);
-            return Err(InternalError::new(
-                Some(InternalErrorCode::BadMantaObject),
-                msg,
-            )
-            .into());
-        }
-    };
-
-    Ok(id)
-}
-
 /// Start the sharkspotter thread and feed the objects into the assignment
 /// thread.  If the assignment thread (the rx side of the channel) exits
 /// prematurely the sender.send() method will return a SenderError and that
@@ -1469,7 +1427,7 @@ fn start_sharkspotter(
                         }
                     };
 
-                let id = match _get_objectId_from_value(&manta_object) {
+                let id = match common::get_objectId_from_value(&manta_object) {
                     Ok(id_str) => id_str,
                     Err(e) => {
                         return Err(std::io::Error::new(ErrorKind::Other, e));
@@ -2062,7 +2020,7 @@ fn validate_destination(
     evac_shark: &MantaObjectShark,
     dest_shark: &StorageNode,
 ) -> Option<ObjectSkippedReason> {
-    let sharks = _get_sharks_from_value(mobj_value);
+    let sharks = common::get_sharks_from_value(mobj_value);
 
     debug_assert!(sharks.is_ok(), "could not get sharks from evacuate object");
 
@@ -3004,7 +2962,8 @@ mod tests {
             let mobj_value = serde_json::to_value(mobj).expect("mobj_value");
             let shard = 1;
             let etag = random_string(&mut g, 10);
-            let id = _get_objectId_from_value(&mobj_value).expect("objectId");
+            let id =
+                common::get_objectId_from_value(&mobj_value).expect("objectId");
 
             let mut eobj =
                 EvacuateObject::from_parts(mobj_value, id, etag, shard);
@@ -3030,7 +2989,7 @@ mod tests {
 
         for i in 0..eobjs.len() {
             let mut task = Task::arbitrary(&mut g);
-            task.object_id = _get_objectId_from_value(&eobjs[i].object)
+            task.object_id = common::get_objectId_from_value(&eobjs[i].object)
                 .expect("object id for task");
 
             if i % 2 != 0 {

@@ -11,7 +11,7 @@
 pub mod evacuate;
 pub mod status;
 
-use crate::common::Task;
+use crate::common::{ObjectId, Task};
 use crate::config::Config;
 use crate::error::Error;
 use crate::picker::StorageNode;
@@ -25,7 +25,6 @@ use uuid::Uuid;
 
 pub type StorageId = String; // Hostname
 pub type AssignmentId = String; // UUID
-pub type ObjectId = String; // UUID
 pub type HttpStatusCode = u16;
 
 pub struct Job {

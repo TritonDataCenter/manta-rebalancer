@@ -14,11 +14,14 @@ use std::io::Write;
 #[cfg(feature = "postgres")]
 use std::str::FromStr;
 
+use crate::error::{Error, InternalError, InternalErrorCode};
+
 use libmanta::moray::MantaObjectShark;
 use md5::{Digest, Md5};
 use quickcheck::{Arbitrary, Gen};
 use quickcheck_helpers::random::string as random_string;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use uuid::Uuid;
 
 #[cfg(feature = "postgres")]
@@ -31,10 +34,10 @@ use diesel::pg::{Pg, PgValue};
 use diesel::serialize::{self, IsNull, Output, ToSql};
 
 use diesel::sql_types;
-
 use strum::IntoEnumIterator;
 
 pub type HttpStatusCode = u16;
+pub type ObjectId = String; // UUID
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AssignmentPayload {
@@ -259,4 +262,54 @@ impl FromSql<sql_types::Text, Pg> for ObjectSkippedReason {
         let ts: String = t_str.to_string();
         _osr_from_sql(ts)
     }
+}
+
+pub(crate) fn get_sharks_from_value(
+    manta_object: &Value,
+) -> Result<Vec<MantaObjectShark>, Error> {
+    let sharks_array = match manta_object.get("sharks") {
+        Some(sa) => sa,
+        None => {
+            return Err(InternalError::new(
+                Some(InternalErrorCode::BadMantaObject),
+                "Missing sharks array",
+            )
+            .into());
+        }
+    };
+    serde_json::from_value(sharks_array.to_owned()).map_err(Error::from)
+}
+
+#[allow(non_snake_case)]
+pub(crate) fn get_objectId_from_value(
+    manta_object: &Value,
+) -> Result<ObjectId, Error> {
+    let id = match manta_object.get("objectId") {
+        Some(i) => match serde_json::to_string(i) {
+            Ok(id_str) => id_str.replace("\"", ""),
+            Err(e) => {
+                let msg = format!(
+                    "Could not parse objectId from {:#?}\n({})",
+                    manta_object, e
+                );
+                error!("{}", msg);
+                return Err(InternalError::new(
+                    Some(InternalErrorCode::BadMantaObject),
+                    msg,
+                )
+                .into());
+            }
+        },
+        None => {
+            let msg = format!("Missing objectId from {:#?}", manta_object);
+            error!("{}", msg);
+            return Err(InternalError::new(
+                Some(InternalErrorCode::BadMantaObject),
+                msg,
+            )
+            .into());
+        }
+    };
+
+    Ok(id)
 }
