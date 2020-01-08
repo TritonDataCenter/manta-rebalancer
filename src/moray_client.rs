@@ -1,9 +1,20 @@
-use crate::error::Error;
-use libmanta::moray::{MantaObject, MantaObjectShark};
+/*
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ */
+
+/*
+ * Copyright 2020 Joyent, Inc.
+ */
+
+use crate::error::{Error, InternalError, InternalErrorCode};
+use libmanta::moray::MantaObjectShark;
 use moray::{
     client::MorayClient,
     objects::{Etag, MethodOptions as ObjectMethodOptions},
 };
+use serde_json::Value;
 use slog_scope;
 use std::net::IpAddr;
 use trust_dns_resolver::Resolver;
@@ -53,24 +64,46 @@ pub fn get_manta_object_shark(
 }
 pub fn put_object(
     mclient: &mut MorayClient,
-    object: &MantaObject,
+    object: &Value,
     etag: &str,
 ) -> Result<(), Error> {
     let mut opts = ObjectMethodOptions::default();
-    let key = object.key.as_str();
-    let value = serde_json::to_value(object)?;
+    let key = match object.get("key") {
+        Some(k) => match serde_json::to_string(k) {
+            Ok(ky) => ky.replace("\"", ""),
+            Err(e) => {
+                error!(
+                    "Could not parse key field in object {:#?} ({})",
+                    object, e
+                );
+                return Err(InternalError::new(
+                    Some(InternalErrorCode::BadMantaObject),
+                    "Could not parse Manta Object Key",
+                )
+                .into());
+            }
+        },
+        None => {
+            error!("Missing key field in object {:#?}", object);
+            return Err(InternalError::new(
+                Some(InternalErrorCode::BadMantaObject),
+                "Missing Manta Object Key",
+            )
+            .into());
+        }
+    };
 
     opts.etag = Etag::Specified(etag.to_string());
 
     trace!(
         "Updating metadata. Key: {}\nValue: {:#?}\nopts: {:?}",
         key,
-        value,
+        object,
         opts
     );
 
     mclient
-        .put_object(MANTA_BUCKET, key, value, &opts, |o| {
+        .put_object(MANTA_BUCKET, &key, object.to_owned(), &opts, |o| {
             trace!("Object Updated: {}", o);
             Ok(())
         })

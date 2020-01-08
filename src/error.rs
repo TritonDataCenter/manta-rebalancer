@@ -5,7 +5,7 @@
  */
 
 /*
- * Copyright 2019, Joyent, Inc.
+ * Copyright 2020 Joyent, Inc.
  */
 
 use std::fmt;
@@ -139,6 +139,7 @@ pub enum InternalErrorCode {
     LockError,
     HashNotFound,
     DuplicateShark,
+    BadMantaObject,
 }
 
 impl fmt::Display for InternalError {
