@@ -1412,7 +1412,7 @@ fn start_sharkspotter(
                 if let Some(max) = max_objects {
                     if count > max {
                         return Err(std::io::Error::new(
-                            ErrorKind::Other,
+                            ErrorKind::Interrupted,
                             "Max Objects Limit Reached",
                         ));
                     }

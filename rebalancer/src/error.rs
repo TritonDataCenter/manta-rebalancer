@@ -24,6 +24,15 @@ pub enum Error {
     DieselConnection(diesel::ConnectionError),
 }
 
+impl Error {
+    pub fn to_internal_error(&self) -> Option<InternalError> {
+        match self {
+            Error::Internal(e) => Some(e.to_owned()),
+            _ => None
+        }
+    }
+}
+
 impl std::error::Error for Error {
     fn description(&self) -> &str {
         match self {
@@ -122,7 +131,7 @@ impl fmt::Display for Error {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct InternalError {
     msg: String,
     pub code: InternalErrorCode,
@@ -140,6 +149,8 @@ pub enum InternalErrorCode {
     HashNotFound,
     DuplicateShark,
     BadMantaObject,
+    JobBuilderError,
+    MaxObjectsLimit,
 }
 
 impl fmt::Display for InternalError {
@@ -203,3 +214,4 @@ impl<T> fmt::Display for CrossbeamError<T> {
         }
     }
 }
+

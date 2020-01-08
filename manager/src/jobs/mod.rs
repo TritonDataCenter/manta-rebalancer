@@ -15,7 +15,7 @@ use crate::config::Config;
 use crate::storinfo::StorageNode;
 use crate::pg_db::connect_or_create_db;
 use rebalancer::common::{ObjectId, Task};
-use rebalancer::error::Error;
+use rebalancer::error::{Error, InternalError, InternalErrorCode};
 
 use std::collections::HashMap;
 use std::fmt;
@@ -25,9 +25,10 @@ use diesel::pg::{Pg, PgConnection, PgValue};
 use diesel::prelude::*;
 use diesel::serialize::{self, IsNull, Output, ToSql};
 use diesel::sql_types;
-use diesel::Expression;
 use evacuate::EvacuateJob;
+use libmanta::moray::MantaObjectShark;
 use serde::{Deserialize, Serialize};
+use std::io::ErrorKind;
 use std::io::Write;
 use std::str::FromStr;
 
@@ -45,6 +46,65 @@ pub struct Job {
     action: JobAction,
     state: JobState,
     config: Config,
+}
+
+pub struct JobBuilder {
+    id: Uuid,
+    action: Option<JobAction>,
+    state: JobState,
+    config: Config
+}
+
+impl JobBuilder {
+    pub fn new(config: Config) -> Self {
+        JobBuilder {
+            config,
+            ..Default::default()
+        }
+    }
+
+    pub fn evacuate(
+        mut self,
+        from_shark: MantaObjectShark,
+        domain_name: &str,
+        max_objects: Option<u32>,
+    ) -> JobBuilder {
+        let action = JobAction::Evacuate(Box::new(EvacuateJob::new(
+            from_shark,
+            domain_name,
+            &self.id.to_string(),
+            max_objects
+        )));
+        self.action = Some(action);
+        self
+    }
+
+    pub fn commit(self) -> Result<Job, Error> {
+        if self.action.is_none() {
+            return Err(InternalError::new(
+                Some(InternalErrorCode::JobBuilderError),
+                "A job action must be specified").into());
+        }
+
+        if self.state != JobState::Init {
+            let msg = format!("Attempted to commit job in {} state.  Must be \
+                in init state.", self.state);
+            return Err(InternalError::new(
+                Some(InternalErrorCode::JobBuilderError),
+                msg).into());
+        }
+
+        let job = Job {
+            id: self.id,
+            action: self.action.expect("job action"),
+            state: JobState::Setup,
+            config: self.config,
+        };
+
+        job.insert_into_db()?;
+
+        Ok(job)
+    }
 }
 
 // This is not ideal, but it is along the lines of what the crate
@@ -213,8 +273,27 @@ impl Job {
             ..Default::default()
         };
 
+        job.insert_into_db();
+
         Ok(job)
 
+    }
+
+    pub fn new_evacuate(
+        config: Config,
+        from_shark: MantaObjectShark,
+        domain_name: &str,
+        db_name: &str,
+        max_objects: Option<u32>,
+    ) -> Result<Self, Error> {
+        let job = Job {
+            config,
+            ..Default::default()
+        };
+
+        job.insert_into_db();
+
+        Ok(job)
 
     }
 
@@ -227,12 +306,45 @@ impl Job {
     }
 
     // The goal here is to eventually have a run method for all JobActions.
-    pub fn run(self) -> Result<(), Error> {
+    pub fn run(mut self) -> Result<(), Error> {
         debug!("Starting job {:#?}", &self);
         println!("Starting Job: {}", &self.id);
-        match self.action {
-            JobAction::Evacuate(job_action) => job_action.run(&self.config),
+        self.update_state(JobState::Running);
+        let result = match self.action {
+            JobAction::Evacuate(job_action) => {
+                match job_action.run(&self.config) {
+                    Ok(()) => Ok(()),
+                    Err(e) => {
+                        match &e {
+                            Error::IoError(err) => match err.kind() {
+                                ErrorKind::Interrupted =>  {
+                                    info!("Job {} complete", self.id);
+                                    Ok(())
+                                },
+                                _ => {
+                                    error!("Job Failed: {}", err);
+                                    Err(e)
+                                }
+                            },
+                            _ => {
+                                error!("Job Failed: {}", e);
+                                Err(e)
+                            }
+                        }
+                    }
+                }
+            },
             _ => Ok(()),
+        };
+        match result {
+            Ok(()) => {
+                self.update_state(JobState::Complete);
+                Ok(())
+            },
+            Err(e) => {
+                self.update_state(JobState::Failed);
+                Err(e)
+            }
         }
     }
 
@@ -259,6 +371,25 @@ impl Job {
             .values(&db_ent)
             .execute(&conn).map_err(Error::from)
     }
+
+    fn update_state(&mut self, to_state: JobState) -> Result<usize, Error> {
+        use self::jobs::dsl::*;
+
+        let conn = match connect_or_create_db("rebalancer") {
+            Ok(conn) => conn,
+            Err(e) => {
+                return Err(e.into());
+            }
+        };
+
+        self.state = to_state;
+
+        diesel::update(jobs)
+            .filter(id.eq(self.id.to_string()))
+            .set(state.eq(to_state))
+            .execute(&conn)
+            .map_err(Error::from)
+    }
 }
 
 impl Default for JobAction {
@@ -277,6 +408,17 @@ impl Default for Job {
     fn default() -> Self {
         Self {
             action: JobAction::default(),
+            state: JobState::default(),
+            id: Uuid::new_v4(),
+            config: Config::default(),
+        }
+    }
+}
+
+impl Default for JobBuilder {
+    fn default() -> Self {
+        Self {
+            action: None,
             state: JobState::default(),
             id: Uuid::new_v4(),
             config: Config::default(),

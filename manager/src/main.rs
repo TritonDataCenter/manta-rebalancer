@@ -18,7 +18,7 @@ extern crate serde_derive;
 extern crate rebalancer;
 
 use manager::config::{self, Config};
-use manager::jobs::{self, JobAction};
+use manager::jobs::{self, JobAction, JobBuilder};
 use std::collections::HashMap;
 use std::string::ToString;
 
@@ -223,6 +223,9 @@ impl NewHandler for JobCreateHandler {
 impl Handler for JobCreateHandler {
     fn handle(self, mut state: State) -> Box<HandlerFuture> {
         info!("Post Job Request");
+        let job_builder = JobBuilder::new(self.config.clone());
+
+        /*
         let mut job = match jobs::Job::new(self.config.clone()) {
             Ok(j) => j,
             Err(e) => {
@@ -232,6 +235,7 @@ impl Handler for JobCreateHandler {
             }
         };
         let job_uuid = job.get_id().to_string();
+        */
 
         let f =
             Body::take_from(&mut state).concat2().then(
@@ -273,6 +277,19 @@ impl Handler for JobCreateHandler {
                     }
                 };
 
+                let job = match job_builder.evacuate(
+                    evac_payload.from_shark.clone(),
+                    &domain_name,
+                    max_objects
+                ).commit() {
+                    Ok(j) => j,
+                    Err(e) => {
+                        let error = invalid_server_error(&state, String::from(e
+                            .description()));
+                        return Box::new(future::ok((state, error)))
+                    }
+                };
+                /*
                 let job_action =
                     JobAction::Evacuate(Box::new(EvacuateJob::new(
                         evac_payload.from_shark.clone(),
@@ -282,7 +299,9 @@ impl Handler for JobCreateHandler {
                     )));
 
                 job.add_action(job_action);
+                */
 
+                let job_uuid = job.get_id();
                 if let Err(e) = self.tx.send(job) {
                     panic!("Tx error: {}", e);
                 }
