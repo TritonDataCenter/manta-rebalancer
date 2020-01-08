@@ -657,20 +657,6 @@ fn download(
     }
 }
 
-// As soon as the test code in the rebalancer zone uses the Gotham API to
-// create a TestServer, the desired function for processing tasks can be
-// passed in as an argument to router() and the agent can be run on a separate
-// thread within the same process as the actual test code in the zone.  Until
-// then, it relies on an external agent running in a separate process, built
-// with the alway_pass feature enabled.  Once we move to a model where it
-// uses TestSever though, this function can go away.
-#[cfg(feature = "always_pass")]
-fn process_task(task: &mut Task) {
-    task.set_status(TaskStatus::Complete);
-    return;
-}
-
-#[cfg(not(feature = "always_pass"))]
 fn process_task(task: &mut Task) {
     let file_path = manta_file_path(&task.owner, &task.object_id);
     let path = Path::new(&file_path);
