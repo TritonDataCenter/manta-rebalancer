@@ -49,8 +49,22 @@ fn main() -> Result<(), Error> {
         },
         SubCommand::JobList => match status::list_jobs() {
             Ok(list) => {
+                let width = 20;
+                println!(
+                    "{:<width$}{:<width$}{:<width$}",
+                    "JOB",
+                    "ACTION",
+                    "STATE",
+                    width = width
+                );
                 for job in list {
-                    println!("{}", job);
+                    println!(
+                        "{:<width$}{:<width$}{:<width$}",
+                        job.id,
+                        job.action,
+                        job.state,
+                        width = width,
+                    );
                 }
                 Ok(())
             }

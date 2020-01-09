@@ -18,7 +18,7 @@ extern crate serde_derive;
 extern crate rebalancer;
 
 use manager::config::{self, Config};
-use manager::jobs::{self, JobAction, JobBuilder};
+use manager::jobs::{self, JobAction, JobBuilder, JobDbEntry};
 use manager::jobs::evacuate::EvacuateJob;
 use manager::jobs::status::StatusError;
 use std::collections::HashMap;
@@ -146,7 +146,7 @@ fn get_job(mut state: State) -> Box<HandlerFuture> {
 }
 
 type JobListFuture =
-    Box<dyn Future<Item = Vec<String>, Error = StatusError> + Send>;
+    Box<dyn Future<Item = Vec<JobDbEntry>, Error = StatusError> + Send>;
 
 fn get_job_list() -> JobListFuture {
     Box::new(match jobs::status::list_jobs() {

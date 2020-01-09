@@ -39,7 +39,7 @@ pub type StorageId = String; // Hostname
 pub type AssignmentId = String; // UUID
 pub type HttpStatusCode = u16;
 
-static REBALANCER_DB: &str = "rebalancer";
+pub(crate) static REBALANCER_DB: &str = "rebalancer";
 
 pub struct Job {
     id: Uuid,
@@ -118,13 +118,20 @@ impl JobBuilder {
 // developers recommend.
 // https://github.com/diesel-rs/diesel/issues/860
 #[derive(
-    Insertable, Queryable, Identifiable, AsChangeset, AsExpression, PartialEq,
+    Debug,
+    Insertable,
+    Queryable,
+    Identifiable,
+    AsChangeset,
+    AsExpression,
+    PartialEq,
+    Serialize,
 )]
 #[table_name = "jobs"]
-struct JobDbEntry {
-    id: String,
-    action: JobActionDbEntry,
-    state: JobState,
+pub struct JobDbEntry {
+    pub id: String,
+    pub action: JobActionDbEntry,
+    pub state: JobState,
 }
 
 table! {
@@ -141,7 +148,14 @@ table! {
 //#[sql_type = "sql_types::Text"]
 #[sql_type = "sql_types::Text"]
 #[derive(
-    Debug, Display, Clone, EnumString, FromSqlRow, AsExpression, PartialEq,
+    Serialize,
+    Debug,
+    Display,
+    Clone,
+    EnumString,
+    FromSqlRow,
+    AsExpression,
+    PartialEq,
 )]
 #[strum(serialize_all = "snake_case")]
 pub enum JobState {
@@ -186,9 +200,11 @@ impl JobAction {
 }
 
 #[sql_type = "sql_types::Text"]
-#[derive(Debug, Display, EnumString, FromSqlRow, AsExpression, PartialEq)]
+#[derive(
+    Serialize, Debug, Display, EnumString, FromSqlRow, AsExpression, PartialEq,
+)]
 #[strum(serialize_all = "snake_case")]
-enum JobActionDbEntry {
+pub enum JobActionDbEntry {
     Evacuate,
     None,
 }
