@@ -28,7 +28,7 @@ impl Error {
     pub fn to_internal_error(&self) -> Option<InternalError> {
         match self {
             Error::Internal(e) => Some(e.to_owned()),
-            _ => None
+            _ => None,
         }
     }
 }
@@ -214,4 +214,3 @@ impl<T> fmt::Display for CrossbeamError<T> {
         }
     }
 }
-

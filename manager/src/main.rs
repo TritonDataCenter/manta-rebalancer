@@ -19,8 +19,13 @@ extern crate rebalancer;
 
 use manager::config::{self, Config};
 use manager::jobs::{self, JobAction, JobBuilder};
+use manager::jobs::evacuate::EvacuateJob;
+use manager::jobs::status::StatusError;
 use std::collections::HashMap;
 use std::string::ToString;
+use std::error::Error;
+
+use rebalancer::util;
 
 use clap::{App, Arg, ArgMatches};
 use crossbeam_channel;
@@ -34,12 +39,8 @@ use gotham::router::Router;
 use gotham::state::{FromState, State};
 use hyper::{Body, Response, StatusCode};
 use libmanta::moray::MantaObjectShark;
-use manager::jobs::evacuate::EvacuateJob;
-use manager::jobs::status::StatusError;
-use rebalancer::util;
 use threadpool::ThreadPool;
 use uuid::Uuid;
-use std::error::Error;
 
 static THREAD_COUNT: usize = 1;
 
@@ -225,18 +226,6 @@ impl Handler for JobCreateHandler {
         info!("Post Job Request");
         let job_builder = JobBuilder::new(self.config.clone());
 
-        /*
-        let mut job = match jobs::Job::new(self.config.clone()) {
-            Ok(j) => j,
-            Err(e) => {
-                let error = invalid_server_error(&state, String::from(e
-                    .description()));
-                return Box::new(future::ok((state, error)))
-            }
-        };
-        let job_uuid = job.get_id().to_string();
-        */
-
         let f =
             Body::take_from(&mut state).concat2().then(
                 move |body| match body {
@@ -277,29 +266,23 @@ impl Handler for JobCreateHandler {
                     }
                 };
 
-                let job = match job_builder.evacuate(
-                    evac_payload.from_shark.clone(),
-                    &domain_name,
-                    max_objects
-                ).commit() {
-                    Ok(j) => j,
-                    Err(e) => {
-                        let error = invalid_server_error(&state, String::from(e
-                            .description()));
-                        return Box::new(future::ok((state, error)))
-                    }
-                };
-                /*
-                let job_action =
-                    JobAction::Evacuate(Box::new(EvacuateJob::new(
+                let job = match job_builder
+                    .evacuate(
                         evac_payload.from_shark.clone(),
                         &domain_name,
-                        &job_uuid,
                         max_objects,
-                    )));
-
-                job.add_action(job_action);
-                */
+                    )
+                    .commit()
+                {
+                    Ok(j) => j,
+                    Err(e) => {
+                        let error = invalid_server_error(
+                            &state,
+                            String::from(e.description()),
+                        );
+                        return Box::new(future::ok((state, error)));
+                    }
+                };
 
                 let job_uuid = job.get_id();
                 if let Err(e) = self.tx.send(job) {

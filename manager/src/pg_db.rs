@@ -12,8 +12,8 @@ use rebalancer::error::Error;
 
 use diesel::pg::PgConnection;
 use diesel::prelude::*;
-use diesel::sql_query;
 use diesel::result::ConnectionError;
+use diesel::sql_query;
 
 static DB_URL: &str = "postgres://postgres:postgres@";
 
@@ -73,5 +73,3 @@ pub fn connect_or_create_db(db_name: &str) -> Result<PgConnection, Error> {
         }
     }
 }
-
-
