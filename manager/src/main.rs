@@ -327,7 +327,7 @@ fn router(config: Config) -> Router {
         });
     }
 
-    build_simple_router(|route| {
+    let rtr = build_simple_router(|route| {
         route
             .get("/jobs/:uuid")
             .with_path_extractor::<GetJobParams>()
@@ -336,12 +336,18 @@ fn router(config: Config) -> Router {
         route
             .post("/jobs")
             .to_new_handler(job_create_handler.clone());
-    })
+    });
+
+    info!("Rebalancer Online");
+
+    rtr
 }
 
 fn main() {
     let _guard = util::init_global_logger();
     let addr = "0.0.0.0:8888";
+
+    info!("Initializing...");
 
     let matches: ArgMatches = App::new("rebalancer")
         .version("0.1.0")
@@ -364,6 +370,11 @@ fn main() {
             std::process::exit(1);
         })
         .unwrap();
+
+    if let Err(e) = jobs::create_job_database() {
+        remora::error!("Error creating Jobs database: {}", e);
+        return;
+    }
 
     gotham::start(addr, router(config))
 }

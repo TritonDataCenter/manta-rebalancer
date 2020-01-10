@@ -143,19 +143,17 @@ table! {
     }
 }
 
-//#[derive(Display, EnumString, EnumVariantNames, Debug, FromSqlRow, AsExpression,)]
-//#[strum(serialize_all = "snake_case")]
-//#[sql_type = "sql_types::Text"]
 #[sql_type = "sql_types::Text"]
 #[derive(
-    Serialize,
+    AsExpression,
+    Clone,
     Debug,
     Display,
-    Clone,
     EnumString,
+    EnumVariantNames,
     FromSqlRow,
-    AsExpression,
     PartialEq,
+    Serialize,
 )]
 #[strum(serialize_all = "snake_case")]
 pub enum JobState {
@@ -201,7 +199,14 @@ impl JobAction {
 
 #[sql_type = "sql_types::Text"]
 #[derive(
-    Serialize, Debug, Display, EnumString, FromSqlRow, AsExpression, PartialEq,
+    Serialize,
+    Debug,
+    Display,
+    EnumString,
+    EnumVariantNames,
+    AsExpression,
+    PartialEq,
+    FromSqlRow,
 )]
 #[strum(serialize_all = "snake_case")]
 pub enum JobActionDbEntry {
@@ -429,4 +434,28 @@ fn update_job_db_state(
         .set(state.eq(to_state))
         .execute(&conn)
         .map_err(Error::from)
+}
+
+pub fn create_job_database() -> Result<(), Error> {
+    let conn = connect_or_create_db(REBALANCER_DB)?;
+
+    let action_strings = JobActionDbEntry::variants();
+    let state_strings = JobState::variants();
+
+    let action_check = format!("'{}'", action_strings.join("', '"));
+    let state_check = format!("'{}'", state_strings.join("', '"));
+
+    // TODO: Should try to use Enum types here.
+    let create_query = format!(
+        "
+            CREATE TABLE IF NOT EXISTS jobs(
+                id TEXT PRIMARY KEY,
+                action TEXT CHECK(action IN ({})) NOT NULL,
+                state TEXT CHECK(state IN ({})) NOT NULL
+            );
+        ",
+        action_check, state_check,
+    );
+
+    conn.execute(&create_query).map(|_| {}).map_err(Error::from)
 }
