@@ -24,15 +24,6 @@ pub enum Error {
     DieselConnection(diesel::ConnectionError),
 }
 
-impl Error {
-    pub fn to_internal_error(&self) -> Option<InternalError> {
-        match self {
-            Error::Internal(e) => Some(e.to_owned()),
-            _ => None,
-        }
-    }
-}
-
 impl std::error::Error for Error {
     fn description(&self) -> &str {
         match self {

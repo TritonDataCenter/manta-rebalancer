@@ -48,6 +48,10 @@ pub struct Job {
     config: Config,
 }
 
+// JobBuilder allows us to build a job before commiting its configuration and
+// calling it's `run()` method.  This also allows us to create job actions
+// internally to the class(module) instead of exposing them to the rest of
+// the crate.
 pub struct JobBuilder {
     id: Uuid,
     action: Option<JobAction>,
@@ -63,6 +67,8 @@ impl JobBuilder {
         }
     }
 
+    // Create the configuration for an evacuate job action and add it to this
+    // job's action field.
     pub fn evacuate(
         mut self,
         from_shark: MantaObjectShark,
@@ -79,6 +85,9 @@ impl JobBuilder {
         self
     }
 
+    // * commit the configuration
+    // * set the job state to JobSate::Init
+    // * insert the job into "rebalancer" database in the "jobs" table
     pub fn commit(self) -> Result<Job, Error> {
         if self.action.is_none() {
             return Err(InternalError::new(
@@ -114,8 +123,15 @@ impl JobBuilder {
     }
 }
 
-// This is not ideal, but it is along the lines of what the crate
-// developers recommend.
+// A rust version of the "jobs" database schema.  We call the various
+// "to_db_entry()" methods for these fields to convert a Job object into one
+// of these that can be inserted into the DB.  For the JobActionDbEntry we
+// simply take the variant name of the JobAction.  There is no need to store
+// the entire Job Action configuration in the DB, nor would it be valuable
+// because the Job Action state is constantly changing as the job runs.
+//
+// This approach does not seem ideal, but it is along the lines of what the
+// crate developers recommend.
 // https://github.com/diesel-rs/diesel/issues/860
 #[derive(
     Debug,
@@ -165,8 +181,6 @@ pub enum JobState {
     Failed,
 }
 
-// This exact impl occurs for at least 2 other enums.  We should consider
-// making this a custom derive
 impl ToSql<sql_types::Text, Pg> for JobState {
     fn to_sql<W: Write>(&self, out: &mut Output<W, Pg>) -> serialize::Result {
         let action = self.to_string();
@@ -263,7 +277,7 @@ enum AssignmentState {
     Assigned,         // Assignment has been submitted to the Agent.
     Rejected,         // Agent has rejected the Assignment.
     AgentUnavailable, // Could not connect to agent.
-    AgentComplete,    // Agent as completed its work, and the JobAction is now
+    AgentComplete,    // Agent has completed its work, and the JobAction is now
     // post processing the Assignment.
     PostProcessed, // The Assignment has completed all necessary work.
 }
@@ -302,7 +316,6 @@ impl Job {
         self.action = action;
     }
 
-    // The goal here is to eventually have a run method for all JobActions.
     pub fn run(mut self) -> Result<(), Error> {
         let job_id = self.id.to_string();
 
@@ -315,6 +328,9 @@ impl Job {
                 match job_action.run(&self.config) {
                     Ok(()) => Ok(()),
                     Err(e) => match &e {
+                        // This dance is only intended to support the
+                        // evacuate object limit which will eventually be
+                        // removed.
                         Error::IoError(err) => match err.kind() {
                             ErrorKind::Interrupted => {
                                 info!("Job {} complete", self.id);
@@ -445,7 +461,6 @@ pub fn create_job_database() -> Result<(), Error> {
     let action_check = format!("'{}'", action_strings.join("', '"));
     let state_check = format!("'{}'", state_strings.join("', '"));
 
-    // TODO: Should try to use Enum types here.
     let create_query = format!(
         "
             CREATE TABLE IF NOT EXISTS jobs(

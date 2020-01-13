@@ -118,6 +118,7 @@ impl Storinfo {
     /// Populate the storinfo's sharks field, and start the storinfo updater thread.
     pub fn start(&mut self) -> Result<(), Error> {
         let mut locked_sharks = self.sharks.lock().unwrap();
+        // TODO: MANTA-4961, don't start job if picker cannot be reached.
         *locked_sharks = Some(fetch_sharks(&self.host));
 
         let handle = Self::updater(
