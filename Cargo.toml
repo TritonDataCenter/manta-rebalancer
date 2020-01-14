@@ -20,7 +20,7 @@ libmanta = { git = "https://github.com/joyent/rust-libmanta", tag = "v0.7.0" }
 
 clap = "2.33.0"
 
-sharkspotter = { git = "https://github.com/joyent/rust-sharkspotter", tag = "v0.10.0" }
+sharkspotter = { git = "https://github.com/joyent/rust-sharkspotter", tag = "v0.10.1" }
 crossbeam-channel = "0.3.8"
 crossbeam-deque = "0.7.1"
 serde = { version = "1.0.91", features = ["derive"] }
@@ -33,7 +33,7 @@ joyent-rust-utils = { git = "https://github.com/joyent/rust-utils" }
 Inflector = "0.11.4"
 lazy_static = "1.4.0"
 mime = "0.3.13"
-moray = { git = "https://github.com/joyent/rust-moray", tag = "v0.9.0" }
+moray = { git = "https://github.com/joyent/rust-moray", tag = "v0.9.1" }
 futures = "0.1.27"
 trust-dns-resolver = "0.11.1"
 threadpool = "1.7.1"
