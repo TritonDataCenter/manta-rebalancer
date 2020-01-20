@@ -37,8 +37,11 @@ pub fn init_global_logger() -> slog_scope::GlobalLoggerGuard {
 pub fn get_thread_name() -> String {
     let cn = crate_name!().to_owned();
 
+    // If no name print the crate with the thread ID like so:
+    //      "<crate_name>[ThreadId(<tid>)]: <log msg>"
     if thread::current().name().is_none() {
-        return cn;
+        let ret = format!("{}[{:?}]", cn, thread::current().id());
+        return ret;
     }
 
     // Prepend the crate name to the thread name.
