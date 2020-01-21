@@ -41,6 +41,7 @@ use reqwest;
 use serde::{self, Deserialize};
 use serde_json::Value;
 use strum::IntoEnumIterator;
+use threadpool::ThreadPool;
 use uuid::Uuid;
 
 // --- Diesel Stuff, TODO This should be refactored --- //
@@ -2375,10 +2376,10 @@ fn reconnect_and_reupdate(
 
 // This worker continues to run as long as the queue has entries for it to
 // work on.  If, when the worker attempts to "steal" from the queue, the
-// queue is emtpy the worker exits.
+// queue is empty the worker exits.
 fn metadata_update_worker(
     job_action: Arc<EvacuateJob>,
-    queue_front: Arc<Injector<Option<Assignment>>>,
+    queue_front: Arc<Injector<Assignment>>,
 ) -> impl Fn() {
     move || {
         // For each worker we create a hash of moray clients indexed by shard.
@@ -2391,11 +2392,9 @@ fn metadata_update_worker(
 
         loop {
             let assignment = match queue_front.steal() {
-                Steal::Success(a) => match a {
-                    Some(assignment) => assignment,
-                    None => break,
-                },
-                Steal::Retry | Steal::Empty => continue,
+                Steal::Success(a) => a,
+                Steal::Retry => continue,
+                Steal::Empty => break,
             };
 
             info!("Updating metadata for assignment: {}", assignment.id);
@@ -2601,36 +2600,61 @@ fn start_metadata_update_broker(
     md_update_rx: crossbeam::Receiver<Assignment>,
 ) -> Result<thread::JoinHandle<Result<(), Error>>, Error> {
     // TODO: tunable
-    let queue = Arc::new(Injector::<Option<Assignment>>::new());
+    let pool = ThreadPool::new(3);
+    let queue = Arc::new(Injector::<Assignment>::new());
     let queue_back = Arc::clone(&queue);
 
     thread::Builder::new()
         .name(String::from("Metadata Update broker"))
         .spawn(move || {
-            let worker = thread::Builder::new()
-                .name(String::from("Metadata Update Worker"))
-                .spawn(metadata_update_worker(
-                    Arc::clone(&job_action),
-                    Arc::clone(&queue),
-                ))
-                .expect("MD Update Worker handle");
             loop {
                 let assignment = match md_update_rx.recv() {
                     Ok(assignment) => assignment,
                     Err(e) => {
+                        // If the queue is empty and there are no active or
+                        // queued threads, kick one off to drain the queue.
+                        if !queue_back.is_empty()
+                            && pool.active_count() == 0
+                            && pool.queued_count() == 0
+                        {
+                            let worker = metadata_update_worker(
+                                Arc::clone(&job_action),
+                                Arc::clone(&queue),
+                            );
+
+                            pool.execute(worker);
+                        }
                         error!(
                             "MD Update: Error receiving metadata from \
                              assignment checker thread: {}",
                             e
                         );
-                        queue_back.push(None);
                         break;
                     }
                 };
 
-                queue_back.push(Some(assignment));
+                queue_back.push(assignment);
+
+                // If all the pools threads are devoted to workers there's
+                // really no reason to queue up a new worker.
+                let total_jobs = pool.active_count() + pool.queued_count();
+                if total_jobs >= pool.max_count() {
+                    trace!(
+                        "Reached max thread count for pool not starting \
+                         new thread"
+                    );
+                    continue;
+                }
+
+                // XXX: async/await candidate?
+                let worker = metadata_update_worker(
+                    Arc::clone(&job_action),
+                    Arc::clone(&queue),
+                );
+
+                pool.execute(worker);
             }
-            worker.join().expect("MD Update Worker join");
+            pool.join();
             Ok(())
         })
         .map_err(Error::from)
