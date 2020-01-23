@@ -5,7 +5,7 @@
  */
 
 /*
- * Copyright 2019, Joyent, Inc.
+ * Copyright 2020, Joyent, Inc.
  */
 
 #[cfg(feature = "postgres")]
@@ -15,7 +15,6 @@ use std::io::Write;
 use std::str::FromStr;
 
 use crate::error::{Error, InternalError, InternalErrorCode};
-
 use libmanta::moray::MantaObjectShark;
 use md5::{Digest, Md5};
 use quickcheck::{Arbitrary, Gen};
@@ -264,7 +263,8 @@ impl FromSql<sql_types::Text, Pg> for ObjectSkippedReason {
     }
 }
 
-pub(crate) fn get_sharks_from_value(
+//pub(crate) fn get_sharks_from_value(
+pub fn get_sharks_from_value(
     manta_object: &Value,
 ) -> Result<Vec<MantaObjectShark>, Error> {
     let sharks_array = match manta_object.get("sharks") {
@@ -281,7 +281,8 @@ pub(crate) fn get_sharks_from_value(
 }
 
 #[allow(non_snake_case)]
-pub(crate) fn get_objectId_from_value(
+//pub(crate) fn get_objectId_from_value(
+pub fn get_objectId_from_value(
     manta_object: &Value,
 ) -> Result<ObjectId, Error> {
     let id = match manta_object.get("objectId") {

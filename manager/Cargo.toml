@@ -1,0 +1,52 @@
+[package]
+name = "manager"
+version = "0.1.0"
+authors = ["Jenkins Agent <jenkins-agent@joyent.com>"]
+edition = "2018"
+workspace = ".."
+
+[features]
+# Postgres enabled by default in the manager.
+default = ["postgres"]
+postgres = ["libmanta/postgres", "sharkspotter/postgres", "moray/postgres",
+"diesel/postgres", "diesel/serde_json", "rebalancer/postgres"]
+
+[dependencies]
+clap = "2.33.0"
+crossbeam-channel = "0.3.8"
+crossbeam-deque = "0.7.1"
+futures = "0.1.27"
+hyper = "0.12"
+Inflector = "0.11.4"
+lazy_static = "1.4.0"
+libmanta = { git = "https://github.com/joyent/rust-libmanta", tag = "v0.7.0" }
+mime = "0.3.13"
+moray = { git = "https://github.com/joyent/rust-moray", tag = "v0.9.0" }
+sharkspotter = { git = "https://github.com/joyent/rust-sharkspotter", tag = "v0.10.0" }
+diesel = {version = "1.4.2", features = ["sqlite"]}
+rand = "0.7.0"
+reqwest = "0.9.18"
+strum = "0.16.0"
+strum_macros = "0.16.0"
+uuid = { version = "0.7.4", features = ["v4"] }
+gotham = "0.3.0"
+gotham_derive = "0.3.0"
+quickcheck = "0.8.5"
+quickcheck_helpers = { git = "https://github.com/joyent/rust-quickcheck-helpers.git", tag = "v0.1.0" }
+rebalancer = { path = "../rebalancer" }
+serde_derive = "1.0.91"
+serde = { version = "1.0.91", features = ["derive"] }
+serde_json = "1.0.39"
+slog = "2.5.2"
+slog-bunyan = { git = "https://github.com/slog-rs/bunyan" }
+slog-scope = "4.1.2"
+threadpool = "1.7.1"
+trust-dns-resolver = "0.11.1"
+
+[[bin]]
+name = "rebalancer-manager"
+path = "src/main.rs"
+
+[[bin]]
+name = "rebalancer-adm"
+path = "src/rebalancer-adm.rs"

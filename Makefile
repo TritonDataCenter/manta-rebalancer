@@ -5,7 +5,7 @@
 #
 
 #
-# Copyright 2019 Joyent, Inc.
+# Copyright 2020, Joyent, Inc.
 #
 
 NAME=rebalancer
@@ -49,15 +49,11 @@ include ./deps/eng/tools/mk/Makefile.smf.defs
 #
 
 all:
-	$(CARGO) build --bin rebalancer-agent --release
-	$(CARGO) build --bin rebalancer-manager --features "postgres" --release
-	$(CARGO) build --bin rebalancer-adm --features "postgres" --release
+	$(CARGO) build --release
 
 debug:
-	$(CARGO) build --bin rebalancer-agent
-	$(CARGO) build --bin rebalancer-manager --features "postgres"
-	$(CARGO) build --bin rebalancer-adm --features "postgres"
-	cp src/config.json target/debug/
+	$(CARGO) build
+	cp manager/src/config.json target/debug/
 
 .PHONY: release
 release: all deps/manta-scripts/.git $(SMF_MANIFESTS)
@@ -120,10 +116,10 @@ clippy-deps:
 	rustup component add clippy
 
 jobtests:
-	RUST_LOG=remora=trace $(CARGO) test job --features "postgres" -- --test-threads=1
+	RUST_LOG=remora=trace $(CARGO) test job -- --test-threads=1
 
 agenttests:
-	RUST_LOG=remora=trace $(CARGO) test agent --features "postgres"
+	RUST_LOG=remora=trace $(CARGO) test agenttests
 
 test: agenttests jobtests
 

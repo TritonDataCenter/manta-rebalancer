@@ -5,10 +5,10 @@
  */
 
 /*
- * Copyright 2019, Joyent, Inc.
+ * Copyright 2020, Joyent, Inc.
  */
 
-use crate::error::Error;
+use rebalancer::error::Error;
 use quickcheck::{Arbitrary, Gen};
 use quickcheck_helpers::random::string as random_string;
 use reqwest;

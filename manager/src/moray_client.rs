@@ -8,7 +8,7 @@
  * Copyright 2020 Joyent, Inc.
  */
 
-use crate::error::{Error, InternalError, InternalErrorCode};
+use rebalancer::error::{Error, InternalError, InternalErrorCode};
 use libmanta::moray::MantaObjectShark;
 use moray::{
     client::MorayClient,
