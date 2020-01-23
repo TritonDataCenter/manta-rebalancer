@@ -6,6 +6,5 @@
 /target
 **/*.rs.bk
 .idea/*
-Cargo.lock
 cscope.*
 *.db
