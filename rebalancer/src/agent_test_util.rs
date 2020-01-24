@@ -5,7 +5,7 @@
  */
 
 /*
- * Copyright 2020, Joyent, Inc.
+ * Copyright 2020 Joyent, Inc.
  */
 
 use crate::libagent::Assignment;
@@ -17,7 +17,7 @@ use reqwest::StatusCode;
 // server and verifies that it was received as intended.  Upon success,
 // return the uuid of the assignment which we will use to monitor progress.
 pub fn send_assignment_impl(
-    tasks: &Vec<Task>,
+    tasks: &[Task],
     id: &str,
     test_server: &TestServer,
     status: StatusCode,

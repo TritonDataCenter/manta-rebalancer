@@ -5,7 +5,7 @@
 #
 
 #
-# Copyright 2020, Joyent, Inc.
+# Copyright 2020 Joyent, Inc.
 #
 
 NAME=rebalancer
@@ -49,10 +49,12 @@ include ./deps/eng/tools/mk/Makefile.smf.defs
 #
 
 all:
-	$(CARGO) build --release
+	$(CARGO) build --manifest-path=agent/Cargo.toml --release
+	$(CARGO) build --manifest-path=manager/Cargo.toml --release
 
 debug:
-	$(CARGO) build
+	$(CARGO) build --manifest-path=agent/Cargo.toml
+	$(CARGO) build --manifest-path=manager/Cargo.toml
 	cp manager/src/config.json target/debug/
 
 .PHONY: release
