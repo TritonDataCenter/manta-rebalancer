@@ -350,7 +350,6 @@ fn main() {
 
     let config = config::Config::parse_config(config_file)
         .map_err(|e| {
-            //xxxremora::error!("Error parsing config: {}", e);
             error!("Error parsing config: {}", e);
             std::process::exit(1);
         })

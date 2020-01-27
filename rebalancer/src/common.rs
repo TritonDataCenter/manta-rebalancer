@@ -263,7 +263,6 @@ impl FromSql<sql_types::Text, Pg> for ObjectSkippedReason {
     }
 }
 
-//pub(crate) fn get_sharks_from_value(
 pub fn get_sharks_from_value(
     manta_object: &Value,
 ) -> Result<Vec<MantaObjectShark>, Error> {
@@ -281,7 +280,6 @@ pub fn get_sharks_from_value(
 }
 
 #[allow(non_snake_case)]
-//pub(crate) fn get_objectId_from_value(
 pub fn get_objectId_from_value(
     manta_object: &Value,
 ) -> Result<ObjectId, Error> {
