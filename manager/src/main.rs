@@ -18,8 +18,7 @@ extern crate serde_derive;
 extern crate rebalancer;
 
 use manager::config::{self, Config};
-use manager::jobs::{self, JobAction, JobBuilder, JobDbEntry};
-use manager::jobs::evacuate::EvacuateJob;
+use manager::jobs::{self, JobBuilder, JobDbEntry};
 use manager::jobs::status::StatusError;
 use std::collections::HashMap;
 use std::string::ToString;
@@ -372,7 +371,7 @@ fn main() {
         .unwrap();
 
     if let Err(e) = jobs::create_job_database() {
-        remora::error!("Error creating Jobs database: {}", e);
+        error!("Error creating Jobs database: {}", e);
         return;
     }
 

@@ -10,8 +10,8 @@
 
 use super::evacuate::EvacuateObjectStatus;
 
+use crate::jobs::{JobDbEntry, REBALANCER_DB};
 use crate::pg_db;
-use manager::jobs::{JobDbEntry, REBALANCER_DB};
 use rebalancer::error::Error;
 
 use std::collections::HashMap;
