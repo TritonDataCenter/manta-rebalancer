@@ -18,6 +18,6 @@ extern crate strum_macros;
 pub mod util;
 
 pub mod agent_test_util;
-pub mod libagent;
 pub mod common;
 pub mod error;
+pub mod libagent;

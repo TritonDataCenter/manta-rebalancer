@@ -8,12 +8,12 @@
  * Copyright 2020 Joyent, Inc.
  */
 
-use rebalancer::error::{Error, InternalError, InternalErrorCode};
 use libmanta::moray::MantaObjectShark;
 use moray::{
     client::MorayClient,
     objects::{Etag, MethodOptions as ObjectMethodOptions},
 };
+use rebalancer::error::{Error, InternalError, InternalErrorCode};
 use serde_json::Value;
 use slog_scope;
 use std::net::IpAddr;

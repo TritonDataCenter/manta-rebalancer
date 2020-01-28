@@ -57,23 +57,24 @@ fn main() {
 
 #[cfg(test)]
 pub mod agenttests {
-    use std::path::Path;
-    use std::sync::Mutex;
-    use joyent_rust_utils::file::calculate_md5;
-    use libmanta::moray::MantaObjectShark;
-    use rebalancer::util;
-    use rebalancer::libagent::{Assignment, AgentAssignmentState, process_task,
-        router};
-    use rebalancer::agent_test_util::{get_progress, send_assignment_impl};
-    use rebalancer::common::{Task, TaskStatus, ObjectSkippedReason};
     use gotham::handler::assets::FileOptions;
     use gotham::router::builder::{
         build_simple_router, DefineSingleRoute, DrawRoutes,
     };
     use gotham::test::TestServer;
+    use joyent_rust_utils::file::calculate_md5;
     use lazy_static::lazy_static;
-    use std::{mem, thread, time};
+    use libmanta::moray::MantaObjectShark;
+    use rebalancer::agent_test_util::{get_progress, send_assignment_impl};
+    use rebalancer::common::{ObjectSkippedReason, Task, TaskStatus};
+    use rebalancer::libagent::{
+        process_task, router, AgentAssignmentState, Assignment,
+    };
+    use rebalancer::util;
     use reqwest::StatusCode;
+    use std::path::Path;
+    use std::sync::Mutex;
+    use std::{mem, thread, time};
     use uuid::Uuid;
     use walkdir::WalkDir;
 

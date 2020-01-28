@@ -8,10 +8,10 @@
  * Copyright 2020 Joyent, Inc.
  */
 
-use rebalancer::error::Error;
-use rebalancer::util;
 use manager::config::{Command, SubCommand};
 use manager::jobs::status::{self, StatusError};
+use rebalancer::error::Error;
+use rebalancer::util;
 
 fn main() -> Result<(), Error> {
     let _guard = util::init_global_logger();
