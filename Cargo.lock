@@ -607,6 +607,15 @@ version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 
 [[package]]
+name = "field_count"
+version = "0.2.0"
+source = "git+https://github.com/rjloura/rust-field-count.git?tag=v0.2.0#ac803612707f3ee46246db008e4a60e074797198"
+dependencies = [
+ "quote 1.0.2 (registry+https://github.com/rust-lang/crates.io-index)",
+ "syn 1.0.14 (registry+https://github.com/rust-lang/crates.io-index)",
+]
+
+[[package]]
 name = "flate2"
 version = "1.0.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1013,6 +1022,7 @@ dependencies = [
  "crossbeam-channel 0.3.9 (registry+https://github.com/rust-lang/crates.io-index)",
  "crossbeam-deque 0.7.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "diesel 1.4.3 (git+https://github.com/diesel-rs/diesel?rev=f75e930e166eb448e3c41d5cdc7251cfcad681f6)",
+ "field_count 0.2.0 (git+https://github.com/rjloura/rust-field-count.git?tag=v0.2.0)",
  "futures 0.1.29 (registry+https://github.com/rust-lang/crates.io-index)",
  "gotham 0.4.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "gotham_derive 0.4.0 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -2895,6 +2905,7 @@ dependencies = [
 "checksum failure_derive 0.1.6 (registry+https://github.com/rust-lang/crates.io-index)" = "0bc225b78e0391e4b8683440bf2e63c2deeeb2ce5189eab46e2b68c6d3725d08"
 "checksum fallible-iterator 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)" = "4443176a9f2c162692bd3d352d745ef9413eec5782a80d8fd6f8a1ac692a07f7"
 "checksum fallible-streaming-iterator 0.1.9 (registry+https://github.com/rust-lang/crates.io-index)" = "7360491ce676a36bf9bb3c56c1aa791658183a54d2744120f27285738d90465a"
+"checksum field_count 0.2.0 (git+https://github.com/rjloura/rust-field-count.git?tag=v0.2.0)" = "<none>"
 "checksum flate2 1.0.13 (registry+https://github.com/rust-lang/crates.io-index)" = "6bd6d6f4752952feb71363cffc9ebac9411b75b87c6ab6058c40c8900cf43c0f"
 "checksum fnv 1.0.6 (registry+https://github.com/rust-lang/crates.io-index)" = "2fad85553e09a6f881f739c29f0b00b0f01357c743266d478b68951ce23285f3"
 "checksum foreign-types 0.3.2 (registry+https://github.com/rust-lang/crates.io-index)" = "f6f339eb8adc052cd2ca78910fda869aefa38d22d5cb648e6485e4d3fc06f3b1"

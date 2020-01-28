@@ -10,6 +10,7 @@ clap = "2.33.0"
 crossbeam-channel = "0.3.8"
 crossbeam-deque = "0.7.1"
 futures = "0.1.29"
+field_count = { git = "https://github.com/rjloura/rust-field-count.git", tag = "v0.2.0"}
 hyper = "0.12"
 Inflector = "0.11.4"
 lazy_static = "1.4.0"
