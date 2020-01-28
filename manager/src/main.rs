@@ -18,10 +18,9 @@ extern crate serde_derive;
 extern crate rebalancer;
 
 use manager::config::{self, Config};
-use manager::jobs::{self, JobBuilder, JobDbEntry};
 use manager::jobs::status::StatusError;
+use manager::jobs::{self, JobBuilder, JobDbEntry};
 use std::collections::HashMap;
-use std::string::ToString;
 use std::error::Error;
 
 use rebalancer::util;

@@ -15,8 +15,8 @@ use serde::Deserialize;
 use std::fs::File;
 use std::io::BufReader;
 
+use crate::jobs::{Job, JobBuilder};
 use crate::moray_client;
-use crate::jobs::{evacuate::EvacuateJob, Job, JobAction, JobBuilder};
 use rebalancer::error::Error;
 use rebalancer::util;
 use uuid::Uuid;
