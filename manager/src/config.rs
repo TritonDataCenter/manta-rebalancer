@@ -15,10 +15,10 @@ use serde::Deserialize;
 use std::fs::File;
 use std::io::BufReader;
 
-use rebalancer::error::Error;
-use rebalancer::util;
 use crate::jobs::{evacuate::EvacuateJob, Job, JobAction};
 use crate::moray_client;
+use rebalancer::error::Error;
+use rebalancer::util;
 use uuid::Uuid;
 
 static DEFAULT_CONFIG_PATH: &str = "/var/tmp/config.json";

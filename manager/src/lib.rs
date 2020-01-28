@@ -24,4 +24,3 @@ pub mod jobs;
 pub mod moray_client;
 pub mod pg_db;
 pub mod picker;
-

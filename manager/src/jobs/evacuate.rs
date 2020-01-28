@@ -11,9 +11,12 @@
 use rebalancer::common::{
     self, AssignmentPayload, ObjectId, ObjectSkippedReason, Task, TaskStatus,
 };
-use rebalancer::error::{CrossbeamError, Error, InternalError,
-    InternalErrorCode};
-use rebalancer::libagent::{AgentAssignmentState, Assignment as AgentAssignment};
+use rebalancer::error::{
+    CrossbeamError, Error, InternalError, InternalErrorCode,
+};
+use rebalancer::libagent::{
+    AgentAssignmentState, Assignment as AgentAssignment,
+};
 use rebalancer::util::{MAX_HTTP_STATUS_CODE, MIN_HTTP_STATUS_CODE};
 
 use crate::config::Config;
@@ -2665,13 +2668,13 @@ fn start_metadata_update_broker(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rebalancer::libagent::{router as agent_router, AgentAssignmentStats};
-    use rebalancer::util;
     use crate::picker::PickerAlgorithm;
     use lazy_static::lazy_static;
     use quickcheck::{Arbitrary, StdThreadGen};
     use quickcheck_helpers::random::string as random_string;
     use rand::Rng;
+    use rebalancer::libagent::{router as agent_router, AgentAssignmentStats};
+    use rebalancer::util;
 
     lazy_static! {
         static ref INITIALIZED: Mutex<bool> = Mutex::new(false);

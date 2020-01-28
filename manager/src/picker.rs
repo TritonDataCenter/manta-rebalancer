@@ -8,9 +8,9 @@
  * Copyright 2020 Joyent, Inc.
  */
 
-use rebalancer::error::Error;
 use quickcheck::{Arbitrary, Gen};
 use quickcheck_helpers::random::string as random_string;
+use rebalancer::error::Error;
 use reqwest;
 use serde::{Deserialize, Serialize};
 use std::sync::{

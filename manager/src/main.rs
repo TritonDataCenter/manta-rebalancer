@@ -17,10 +17,10 @@ extern crate serde_derive;
 #[macro_use]
 extern crate rebalancer;
 
-use std::collections::HashMap;
-use std::string::ToString;
 use manager::config::{self, Config};
 use manager::jobs::{self, JobAction};
+use std::collections::HashMap;
+use std::string::ToString;
 
 use clap::{App, Arg, ArgMatches};
 use crossbeam_channel;

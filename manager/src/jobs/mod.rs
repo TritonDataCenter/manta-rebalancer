@@ -11,10 +11,10 @@
 pub mod evacuate;
 pub mod status;
 
-use rebalancer::common::{ObjectId, Task};
-use rebalancer::error::Error;
 use crate::config::Config;
 use crate::picker::StorageNode;
+use rebalancer::common::{ObjectId, Task};
+use rebalancer::error::Error;
 
 use std::collections::HashMap;
 use std::fmt;

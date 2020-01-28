@@ -8,8 +8,8 @@
  * Copyright 2020 Joyent, Inc.
  */
 
-use crate::libagent::Assignment;
 use crate::common::Task;
+use crate::libagent::Assignment;
 use gotham::test::TestServer;
 use reqwest::StatusCode;
 
@@ -27,8 +27,7 @@ pub fn send_assignment_impl(
 
     // Finally, serialize the entire HashMap before stuffing it in the
     // message body.
-    let body: Vec<u8> =
-        serde_json::to_vec(&obj).expect("Serialized payload");
+    let body: Vec<u8> = serde_json::to_vec(&obj).expect("Serialized payload");
 
     let response = test_server
         .client()

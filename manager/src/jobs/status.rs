@@ -9,8 +9,8 @@
  */
 
 use super::evacuate::EvacuateObjectStatus;
-use rebalancer::error::Error;
 use crate::pg_db;
+use rebalancer::error::Error;
 
 use std::collections::HashMap;
 use std::str::FromStr;
@@ -96,8 +96,8 @@ mod tests {
     use super::*;
     use crate::jobs::evacuate::{self, EvacuateObject};
     use crate::pg_db;
-    use rebalancer::util;
     use quickcheck::{Arbitrary, StdThreadGen};
+    use rebalancer::util;
 
     static NUM_OBJS: u32 = 200;
 
