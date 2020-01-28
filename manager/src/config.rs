@@ -61,7 +61,7 @@ pub struct Config {
     #[serde(default)]
     pub snaplinks_cleanup_required: bool,
     #[serde(default)]
-    pub options: ConfigOptions
+    pub options: ConfigOptions,
 }
 
 impl Config {
