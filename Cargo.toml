@@ -1,71 +1,12 @@
-[package]
-name = "remora"
-version = "0.1.0"
-authors = ["Rui Loura <rjloura@gmail.com>"]
-edition = "2018"
+[workspace]
+members = [
+    "agent",
+    "manager",
+    "rebalancer"
+]
 
 [profile.dev]
 panic = "abort"
-
-[features]
-# No features by default
-default = []
-postgres = ["libmanta/postgres", "sharkspotter/postgres", "moray/postgres",
-"diesel/postgres", "diesel/serde_json"]
-
-[dependencies]
-base64 = "0.10.1"
-uuid = { version = "0.7.4", features = ["v4"] }
-libmanta = { git = "https://github.com/joyent/rust-libmanta", tag = "v0.7.0" }
-
-clap = "2.33.0"
-
-sharkspotter = { git = "https://github.com/joyent/rust-sharkspotter", tag = "v0.10.2" }
-crossbeam-channel = "0.3.8"
-crossbeam-deque = "0.7.1"
-serde = { version = "1.0.91", features = ["derive"] }
-serde_derive = "1.0.91"
-serde_json = "1.0.39"
-gotham = "0.3.0"
-gotham_derive = "0.3.0"
-hyper = "0.12"
-joyent-rust-utils = { git = "https://github.com/joyent/rust-utils" }
-Inflector = "0.11.4"
-lazy_static = "1.4.0"
-mime = "0.3.13"
-moray = { git = "https://github.com/joyent/rust-moray", tag = "v0.9.2" }
-futures = "0.1.27"
-trust-dns-resolver = "0.11.1"
-threadpool = "1.7.1"
-reqwest = "0.9.18"
-url = "1.7"
-md-5 = "0.8.0"
-rusqlite = "0.19.0"
-walkdir = "2"
-log = "0.4.6"
-rand = "0.7.0"
-quickcheck = "0.8.5"
-quickcheck_helpers = { git = "https://github.com/joyent/rust-quickcheck-helpers.git", tag = "v0.1.0" }
-failure = "0.1.5"
-bytes = "0.4.12"
-strum = "0.16.0"
-strum_macros = "0.16.0"
-
-# We don't use this directly, but gotham pulls it in via the rust-url crate.
-# If we don't specify the exact version here cargo will bring in a newer version
-# that is not compatible with rust 1.35.
-unicode-normalization = "=0.1.5"
-
-diesel = {version = "1.4.2", features = ["sqlite"]}
-
-slog = "2.5.2"
-slog-bunyan = { git = "https://github.com/slog-rs/bunyan" }
-slog-scope = "4.1.2"
-
-## TODO: is this needed?
-slog-term = "2.4.1"
-crc = "1.8.1"
-unescape = "0.1.0"
 
 [patch.crates-io]
 # We require the use of certain constructs which unfortunately were not
@@ -86,15 +27,3 @@ unescape = "0.1.0"
 # builing any depedencies that also rely on diesel (which is a good thing).
 diesel = { git = "https://github.com/diesel-rs/diesel", rev = "f75e930e166eb448e3c41d5cdc7251cfcad681f6"}
 diesel_derives = { git = "https://github.com/diesel-rs/diesel" , rev = "f75e930e166eb448e3c41d5cdc7251cfcad681f6"}
-
-[[bin]]
-name = "rebalancer-manager"
-path = "src/manager.rs"
-
-[[bin]]
-name = "rebalancer-agent"
-path = "src/agent-main.rs"
-
-[[bin]]
-name = "rebalancer-adm"
-path = "src/main.rs"

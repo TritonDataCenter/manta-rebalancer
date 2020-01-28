@@ -8,17 +8,19 @@
  * Copyright 2020 Joyent, Inc.
  */
 
-use crate::agent::{AgentAssignmentState, Assignment as AgentAssignment};
-use crate::common::{
+use rebalancer::common::{
     self, AssignmentPayload, ObjectId, ObjectSkippedReason, Task, TaskStatus,
 };
+use rebalancer::error::{CrossbeamError, Error, InternalError,
+    InternalErrorCode};
+use rebalancer::libagent::{AgentAssignmentState, Assignment as AgentAssignment};
+use rebalancer::util::{MAX_HTTP_STATUS_CODE, MIN_HTTP_STATUS_CODE};
+
 use crate::config::Config;
-use crate::error::{CrossbeamError, Error, InternalError, InternalErrorCode};
 use crate::jobs::{Assignment, AssignmentId, AssignmentState, StorageId};
 use crate::moray_client;
 use crate::pg_db;
 use crate::picker::{self as mod_picker, SharkSource, StorageNode};
-use crate::util::{MAX_HTTP_STATUS_CODE, MIN_HTTP_STATUS_CODE};
 
 use std::collections::hash_map::Entry::{Occupied, Vacant};
 use std::collections::HashMap;
@@ -2663,9 +2665,9 @@ fn start_metadata_update_broker(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::{router as agent_router, AgentAssignmentStats};
+    use rebalancer::libagent::{router as agent_router, AgentAssignmentStats};
+    use rebalancer::util;
     use crate::picker::PickerAlgorithm;
-    use crate::util;
     use lazy_static::lazy_static;
     use quickcheck::{Arbitrary, StdThreadGen};
     use quickcheck_helpers::random::string as random_string;

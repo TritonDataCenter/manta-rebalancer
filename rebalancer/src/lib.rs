@@ -5,10 +5,8 @@
  */
 
 /*
- * Copyright 2019, Joyent, Inc.
+ * Copyright 2020 Joyent, Inc.
  */
-
-/// Manta Object Rebalancer
 
 #[macro_use]
 extern crate diesel;
@@ -19,22 +17,7 @@ extern crate strum_macros;
 #[macro_use]
 pub mod util;
 
-pub mod agent;
+pub mod agent_test_util;
+pub mod libagent;
 pub mod common;
-
-#[cfg(feature = "postgres")]
-pub mod config;
-
 pub mod error;
-
-#[cfg(feature = "postgres")]
-pub mod jobs;
-
-#[cfg(feature = "postgres")]
-pub mod moray_client;
-
-#[cfg(feature = "postgres")]
-pub mod pg_db;
-
-#[cfg(feature = "postgres")]
-pub mod picker;

@@ -1,15 +1,26 @@
+/*
+ * This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at http://mozilla.org/MPL/2.0/.
+ */
+
+/*
+ * Copyright 2020 Joyent, Inc.
+ */
+
 #[macro_use]
 extern crate gotham_derive;
 
 #[macro_use]
 extern crate serde_derive;
 
-use remora::{info, log_impl, util, warn};
+#[macro_use]
+extern crate rebalancer;
+
 use std::collections::HashMap;
 use std::string::ToString;
-
-use remora::config::{self, Config};
-use remora::jobs::{self, JobAction};
+use manager::config::{self, Config};
+use manager::jobs::{self, JobAction};
 
 use clap::{App, Arg, ArgMatches};
 use crossbeam_channel;
@@ -23,8 +34,9 @@ use gotham::router::Router;
 use gotham::state::{FromState, State};
 use hyper::{Body, Response, StatusCode};
 use libmanta::moray::MantaObjectShark;
-use remora::jobs::evacuate::EvacuateJob;
-use remora::jobs::status::StatusError;
+use manager::jobs::evacuate::EvacuateJob;
+use manager::jobs::status::StatusError;
+use rebalancer::util;
 use threadpool::ThreadPool;
 use uuid::Uuid;
 
@@ -51,7 +63,7 @@ fn bad_request(state: &State, msg: String) -> Response<Body> {
 }
 
 fn invalid_server_error(state: &State, msg: String) -> Response<Body> {
-    remora::error!("{}", msg);
+    error!("{}", msg);
     create_response(
         state,
         StatusCode::INTERNAL_SERVER_ERROR,
@@ -101,7 +113,7 @@ fn get_job(mut state: State) -> Box<HandlerFuture> {
             }
             Err(e) => {
                 let ret: Response<Body>;
-                remora::error!("Get Status error: {:?}", e);
+                error!("Get Status error: {:?}", e);
                 match e {
                     StatusError::DBExists => {
                         ret = bad_request(
@@ -338,7 +350,7 @@ fn main() {
 
     let config = config::Config::parse_config(config_file)
         .map_err(|e| {
-            remora::error!("Error parsing config: {}", e);
+            error!("Error parsing config: {}", e);
             std::process::exit(1);
         })
         .unwrap();
@@ -382,9 +394,9 @@ mod tests {
         // Create a Job manually so that we know one exists regardless of the
         // ability of this API to create one, or the order in which tests are
         // run.
-        let new_job = remora::jobs::Job::new(config.clone());
+        let new_job = manager::jobs::Job::new(config.clone());
         let job_id = new_job.get_id().to_string();
-        let job_action = remora::jobs::evacuate::EvacuateJob::new(
+        let job_action = manager::jobs::evacuate::EvacuateJob::new(
             MantaObjectShark {
                 manta_storage_id: String::from("fake_storage_id"),
                 datacenter: String::from("fake_datacenter"),

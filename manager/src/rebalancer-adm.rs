@@ -5,13 +5,13 @@
  */
 
 /*
- * Copyright 2019, Joyent, Inc.
+ * Copyright 2020 Joyent, Inc.
  */
 
-use remora::config::{Command, SubCommand};
-use remora::error::Error;
-use remora::jobs::status::{self, StatusError};
-use remora::util;
+use rebalancer::error::Error;
+use rebalancer::util;
+use manager::config::{Command, SubCommand};
+use manager::jobs::status::{self, StatusError};
 
 fn main() -> Result<(), Error> {
     let _guard = util::init_global_logger();

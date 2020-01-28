@@ -5,15 +5,15 @@
  */
 
 /*
- * Copyright 2019, Joyent, Inc.
+ * Copyright 2020 Joyent, Inc.
  */
 
 pub mod evacuate;
 pub mod status;
 
-use crate::common::{ObjectId, Task};
+use rebalancer::common::{ObjectId, Task};
+use rebalancer::error::Error;
 use crate::config::Config;
-use crate::error::Error;
 use crate::picker::StorageNode;
 
 use std::collections::HashMap;
