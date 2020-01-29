@@ -184,9 +184,6 @@ pub trait SharkSource: Sync + Send {
     fn choose(&self, algo: &ChooseAlgorithm) -> Option<Vec<StorageNode>>;
 }
 
-// Use our prototype storinfo zone for now.  Might change this to a shard 1 moray
-// client in the future.
-// TODO: MANTA-4555
 fn fetch_sharks(host: &str) -> Vec<StorageNode> {
     let base_url = format!("http://{}/poll", host);
     let mut new_sharks = vec![];
