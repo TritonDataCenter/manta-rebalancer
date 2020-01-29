@@ -413,19 +413,18 @@ mod tests {
         // Create a Job manually so that we know one exists regardless of the
         // ability of this API to create one, or the order in which tests are
         // run.
-        let new_job = manager::jobs::Job::new(config.clone());
-        let job_id = new_job.get_id().to_string();
-        let job_action = manager::jobs::evacuate::EvacuateJob::new(
-            MantaObjectShark {
-                manta_storage_id: String::from("fake_storage_id"),
-                datacenter: String::from("fake_datacenter"),
-            },
-            "fake.joyent.us",
-            &job_id,
-            None,
-        );
-
-        job_action.create_table().unwrap();
+        let job_builder = JobBuilder::new(config.clone());
+        let job = job_builder
+            .evacuate(
+                MantaObjectShark {
+                    manta_storage_id: String::from("fake_storage_id"),
+                    datacenter: String::from("fake_datacenter"),
+                },
+                "fake.joyent.us",
+                None,
+            )
+            .commit()
+            .expect("Failed to create job");
 
         let test_server = TestServer::new(router(config)).unwrap();
 
@@ -443,7 +442,8 @@ mod tests {
         assert!(job_list.len() > 0);
         println!("Return value: {:#?}", job_list);
 
-        let get_job_uri = format!("http://localhost:8888/jobs/{}", job_id);
+        let get_job_uri =
+            format!("http://localhost:8888/jobs/{}", job.get_id());
         let response = test_server.client().get(get_job_uri).perform().unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
