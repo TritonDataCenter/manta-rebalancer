@@ -23,7 +23,7 @@ use crate::config::Config;
 use crate::jobs::{Assignment, AssignmentId, AssignmentState, StorageId};
 use crate::moray_client;
 use crate::pg_db;
-use crate::picker::{self as mod_picker, SharkSource, StorageNode};
+use crate::storinfo::{self as mod_storinfo, SharkSource, StorageNode};
 
 use std::collections::hash_map::Entry::{Occupied, Vacant};
 use std::collections::HashMap;
@@ -495,18 +495,18 @@ impl EvacuateJob {
         let post_thread =
             start_assignment_post(full_assignment_rx, Arc::clone(&job_action))?;
 
-        // start picker thread which will periodically update the list of
+        // start storinfo thread which will periodically update the list of
         // available sharks.
-        let mut picker = mod_picker::Picker::new(domain)?;
-        picker.start().map_err(Error::from)?;
-        let picker = Arc::new(picker);
+        let mut storinfo = mod_storinfo::Storinfo::new(domain)?;
+        storinfo.start().map_err(Error::from)?;
+        let storinfo = Arc::new(storinfo);
 
         let assignment_manager = start_assignment_manager(
             full_assignment_tx,
             checker_fini_tx,
             obj_rx,
             Arc::clone(&job_action),
-            Arc::clone(&picker),
+            Arc::clone(&storinfo),
         )?;
 
         // At this point the rebalance job is running and we are blocked at
@@ -517,9 +517,9 @@ impl EvacuateJob {
             Ok(()) => (),
             Err(e) => {
                 if let Error::Internal(err) = e {
-                    if err.code == InternalErrorCode::PickerError {
+                    if err.code == InternalErrorCode::StorinfoError {
                         error!(
-                            "Encountered empty picker on startup, exiting \
+                            "Encountered empty storinfo on startup, exiting \
                              safely"
                         );
                     } else {
@@ -531,7 +531,7 @@ impl EvacuateJob {
             }
         }
 
-        picker.fini();
+        storinfo.fini();
 
         sharkspotter_thread
             .join()
@@ -659,19 +659,19 @@ impl EvacuateJob {
             .collect();
     }
 
-    // Check for a new picker snapshot.
-    // If the picker finds some sharks then update our hash.  If the
-    // picker doesn't have any new sharks for us, then we will use
+    // Check for a new storinfo snapshot.
+    // If the storinfo finds some sharks then update our hash.  If the
+    // storinfo doesn't have any new sharks for us, then we will use
     // whatever is in the hash already.  If the list in our hash is also
     // empty then we sleep and retry.
-    // Note that receiving back `None` from `picker.choose()` simply means
+    // Note that receiving back `None` from `storinfo.choose()` simply means
     // there is no update from the last time we asked so we should use the
     // existing value.
     // TODO: make retry delay configurable
     fn get_shark_list<S>(
         &self,
-        picker: Arc<S>,
-        algo: &mod_picker::DefaultPickerAlgorithm,
+        storinfo: Arc<S>,
+        algo: &mod_storinfo::DefaultChooseAlgorithm,
         retries: u16,
     ) -> Result<Vec<StorageNode>, Error>
     where
@@ -684,7 +684,7 @@ impl EvacuateJob {
         trace!("Getting new shark list");
         while tries < retries {
             if let Some(valid_sharks) =
-                picker.choose(&mod_picker::PickerAlgorithm::Default(algo))
+                storinfo.choose(&mod_storinfo::ChooseAlgorithm::Default(algo))
             {
                 self.update_dest_sharks(&valid_sharks);
             }
@@ -711,7 +711,7 @@ impl EvacuateJob {
 
         if shark_list.is_empty() {
             Err(InternalError::new(
-                Some(InternalErrorCode::PickerError),
+                Some(InternalErrorCode::StorinfoError),
                 "No valid sharks available.",
             )
             .into())
@@ -1043,9 +1043,9 @@ fn assignment_post_success(
             // This could happen in the event that while this assignment was
             // being filled out by the assignment generator thread and being
             // posted to the agent, the assignment manager might have
-            // received an updated list of sharks from the picker and as a
-            // result removed this one from it's active hash.  Regardless the
-            // assignment has been posted and is actively running on the
+            // received an updated list of sharks from the storinfo service and
+            // as a result removed this one from it's active hash.  Regardless
+            // the assignment has been posted and is actively running on the
             // shark's rebalancer agent at this point.
             warn!(
                 "Could not find destination shark ({}) to update available \
@@ -1639,7 +1639,7 @@ fn start_assignment_manager<S>(
     checker_fini_tx: crossbeam_channel::Sender<FiniMsg>,
     obj_rx: crossbeam_channel::Receiver<EvacuateObject>,
     job_action: Arc<EvacuateJob>,
-    picker: Arc<S>,
+    storinfo: Arc<S>,
 ) -> Result<thread::JoinHandle<Result<(), Error>>, Error>
 where
     S: SharkSource + 'static,
@@ -1647,7 +1647,7 @@ where
     thread::Builder::new()
         .name(String::from("assignment_manager"))
         .spawn(move || {
-            let algo = mod_picker::DefaultPickerAlgorithm {
+            let algo = mod_storinfo::DefaultChooseAlgorithm {
                 min_avail_mb: job_action.min_avail_mb,
                 blacklist: vec![],
             };
@@ -1659,7 +1659,7 @@ where
                 // TODO: MANTA-4519
                 // get a fresh shark list
                 let mut shark_list =
-                    job_action.get_shark_list(Arc::clone(&picker), &algo, 3)?;
+                    job_action.get_shark_list(Arc::clone(&storinfo), &algo, 3)?;
 
                 // TODO: file ticket, tunable number of sharks which implies
                 // number of threads.
@@ -1854,8 +1854,8 @@ fn shark_assignment_generator(
         // entry in the EvacuateJobAction's hash is updated.  The other is here.
         // If this thread is still running when the shark enters the Ready
         // state again (when there are no active assignments on it), but
-        // before the picker updates the amount of available space (or before
-        // the picker is re-queried for an updated) then we want to have some
+        // before the storinfo updates the amount of available space (or before
+        // storinfo is re-queried for an updated) then we want to have some
         // idea of what we are working with.
         let mut available_space = assignment.max_size;
 
@@ -2668,7 +2668,7 @@ fn start_metadata_update_broker(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::picker::PickerAlgorithm;
+    use crate::storinfo::ChooseAlgorithm;
     use lazy_static::lazy_static;
     use quickcheck::{Arbitrary, StdThreadGen};
     use quickcheck_helpers::random::string as random_string;
@@ -2749,16 +2749,16 @@ mod tests {
         ret
     }
 
-    struct MockPicker;
+    struct MockStorinfo;
 
-    impl MockPicker {
+    impl MockStorinfo {
         fn new() -> Self {
-            MockPicker {}
+            MockStorinfo {}
         }
     }
 
-    impl SharkSource for MockPicker {
-        fn choose(&self, _: &PickerAlgorithm) -> Option<Vec<StorageNode>> {
+    impl SharkSource for MockStorinfo {
+        fn choose(&self, _: &ChooseAlgorithm) -> Option<Vec<StorageNode>> {
             let mut rng = rand::thread_rng();
             let random = rng.gen_range(0, 10);
 
@@ -2771,9 +2771,9 @@ mod tests {
     }
 
     #[derive(Default)]
-    struct EmptyPicker {}
-    impl SharkSource for EmptyPicker {
-        fn choose(&self, _algo: &PickerAlgorithm) -> Option<Vec<StorageNode>> {
+    struct EmptyStorinfo {}
+    impl SharkSource for EmptyStorinfo {
+        fn choose(&self, _algo: &ChooseAlgorithm) -> Option<Vec<StorageNode>> {
             None
         }
     }
@@ -2784,15 +2784,15 @@ mod tests {
         use rand::Rng;
 
         unit_test_init();
-        struct NoSkipPicker;
-        impl NoSkipPicker {
+        struct NoSkipStorinfo;
+        impl NoSkipStorinfo {
             fn new() -> Self {
-                NoSkipPicker {}
+                NoSkipStorinfo {}
             }
         }
 
-        impl SharkSource for NoSkipPicker {
-            fn choose(&self, _: &PickerAlgorithm) -> Option<Vec<StorageNode>> {
+        impl SharkSource for NoSkipStorinfo {
+            fn choose(&self, _: &ChooseAlgorithm) -> Option<Vec<StorageNode>> {
                 let mut g = StdThreadGen::new(100);
                 let mut sharks = vec![];
                 for i in 1..10 {
@@ -2826,8 +2826,8 @@ mod tests {
         assert!(job_action.create_table().is_ok());
         let job_action = Arc::new(job_action);
 
-        let picker = NoSkipPicker::new();
-        let picker = Arc::new(picker);
+        let storinfo = NoSkipStorinfo::new();
+        let storinfo = Arc::new(storinfo);
 
         let (full_assignment_tx, full_assignment_rx) = crossbeam::bounded(5);
         let (obj_tx, obj_rx) = crossbeam::bounded(5);
@@ -2874,7 +2874,7 @@ mod tests {
             checker_fini_tx,
             obj_rx,
             Arc::clone(&job_action),
-            Arc::clone(&picker),
+            Arc::clone(&storinfo),
         )
         .expect("start assignment manager");
 
@@ -3129,9 +3129,9 @@ mod tests {
     }
 
     #[test]
-    fn empty_picker_test() {
+    fn empty_storinfo_test() {
         unit_test_init();
-        let picker = Arc::new(EmptyPicker {});
+        let storinfo = Arc::new(EmptyStorinfo {});
         let (full_assignment_tx, _) = crossbeam::bounded(5);
         let (checker_fini_tx, _) = crossbeam::bounded(1);
         let (_, obj_rx) = crossbeam::bounded(5);
@@ -3151,7 +3151,7 @@ mod tests {
             checker_fini_tx,
             obj_rx,
             Arc::clone(&job_action),
-            Arc::clone(&picker),
+            Arc::clone(&storinfo),
         ) {
             Ok(h) => h,
             Err(e) => {
@@ -3168,7 +3168,7 @@ mod tests {
 
         match ret.unwrap_err() {
             Error::Internal(e) => {
-                assert_eq!(e.code, InternalErrorCode::PickerError);
+                assert_eq!(e.code, InternalErrorCode::StorinfoError);
             }
             _ => {
                 assert_eq!(1, 0, "Incorrect Error Code");
@@ -3257,8 +3257,8 @@ mod tests {
     fn full_test() {
         unit_test_init();
         let now = std::time::Instant::now();
-        let picker = MockPicker::new();
-        let picker = Arc::new(picker);
+        let storinfo = MockStorinfo::new();
+        let storinfo = Arc::new(storinfo);
 
         let (full_assignment_tx, full_assignment_rx) = crossbeam::bounded(5);
         let (obj_tx, obj_rx) = crossbeam::bounded(5);
@@ -3341,7 +3341,7 @@ mod tests {
             checker_fini_tx,
             obj_rx,
             Arc::clone(&job_action),
-            Arc::clone(&picker),
+            Arc::clone(&storinfo),
         )
         .expect("start assignment manager");
 
@@ -3354,9 +3354,9 @@ mod tests {
             Ok(()) => (),
             Err(e) => {
                 if let Error::Internal(err) = e {
-                    if err.code == InternalErrorCode::PickerError {
+                    if err.code == InternalErrorCode::StorinfoError {
                         error!(
-                            "Encountered empty picker on startup, exiting \
+                            "Encountered empty storinfo on startup, exiting \
                              safely"
                         );
                     } else {

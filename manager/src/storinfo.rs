@@ -52,7 +52,7 @@ impl Arbitrary for StorageNode {
     }
 }
 
-pub struct Picker {
+pub struct Storinfo {
     sharks: Arc<Mutex<Option<Vec<StorageNode>>>>,
     handle: Mutex<Option<JoinHandle<()>>>,
     running: Arc<AtomicBool>,
@@ -65,25 +65,25 @@ pub struct Picker {
 ///  * Default:
 ///     Provide a list of storage nodes that have at least a <minimum
 ///     available capacity> and are not in a <blacklist of datacenters>
-pub enum PickerAlgorithm<'a> {
-    Default(&'a DefaultPickerAlgorithm),
+pub enum ChooseAlgorithm<'a> {
+    Default(&'a DefaultChooseAlgorithm),
 }
 
 #[derive(Default)]
-pub struct DefaultPickerAlgorithm {
+pub struct DefaultChooseAlgorithm {
     pub blacklist: Vec<String>,
     pub min_avail_mb: Option<u64>,
 }
 
-impl<'a> PickerAlgorithm<'a> {
+impl<'a> ChooseAlgorithm<'a> {
     fn choose(&self, sharks: &[StorageNode]) -> Vec<StorageNode> {
         match self {
-            PickerAlgorithm::Default(algo) => algo.method(sharks),
+            ChooseAlgorithm::Default(algo) => algo.method(sharks),
         }
     }
 }
 
-impl DefaultPickerAlgorithm {
+impl DefaultChooseAlgorithm {
     fn method(&self, sharks: &[StorageNode]) -> Vec<StorageNode> {
         let mut ret: Vec<StorageNode> = vec![];
 
@@ -104,18 +104,18 @@ impl DefaultPickerAlgorithm {
     }
 }
 
-impl Picker {
+impl Storinfo {
     pub fn new(domain: &str) -> Result<Self, Error> {
-        let picker_domain_name = format!("picker.{}", domain);
-        Ok(Picker {
+        let storinfo_domain_name = format!("storinfo.{}", domain);
+        Ok(Storinfo {
             running: Arc::new(AtomicBool::new(true)),
             handle: Mutex::new(None),
             sharks: Arc::new(Mutex::new(Some(vec![]))),
-            host: picker_domain_name,
+            host: storinfo_domain_name,
         })
     }
 
-    /// Populate the picker's sharks field, and start the picker updater thread.
+    /// Populate the storinfo's sharks field, and start the storinfo updater thread.
     pub fn start(&mut self) -> Result<(), Error> {
         let mut locked_sharks = self.sharks.lock().unwrap();
         *locked_sharks = Some(fetch_sharks(&self.host));
@@ -140,7 +140,7 @@ impl Picker {
         }
     }
 
-    /// Get the the Vec<sharks> from the picker.
+    /// Get the the Vec<sharks> from the storinfo service.
     pub fn get_sharks(&self) -> Option<Vec<StorageNode>> {
         self.sharks.lock().unwrap().take()
     }
@@ -170,9 +170,9 @@ impl Picker {
 }
 
 // TODO: MANTA-4519
-impl SharkSource for Picker {
+impl SharkSource for Storinfo {
     /// Choose the sharks based on the specified algorithm
-    fn choose(&self, algo: &PickerAlgorithm) -> Option<Vec<StorageNode>> {
+    fn choose(&self, algo: &ChooseAlgorithm) -> Option<Vec<StorageNode>> {
         match self.get_sharks() {
             Some(s) => Some(algo.choose(&s)),
             None => None,
@@ -181,12 +181,9 @@ impl SharkSource for Picker {
 }
 
 pub trait SharkSource: Sync + Send {
-    fn choose(&self, algo: &PickerAlgorithm) -> Option<Vec<StorageNode>>;
+    fn choose(&self, algo: &ChooseAlgorithm) -> Option<Vec<StorageNode>>;
 }
 
-// Use our prototype picker zone for now.  Might change this to a shard 1 moray
-// client in the future.
-// TODO: MANTA-4555
 fn fetch_sharks(host: &str) -> Vec<StorageNode> {
     let base_url = format!("http://{}/poll", host);
     let mut new_sharks = vec![];
@@ -207,7 +204,7 @@ fn fetch_sharks(host: &str) -> Vec<StorageNode> {
         };
 
         let result: Vec<StorageNode> =
-            response.json().expect("picker response format");
+            response.json().expect("storinfo response format");
 
         match result.last() {
             Some(r) => after_id = r.manta_storage_id.clone(),
@@ -220,6 +217,6 @@ fn fetch_sharks(host: &str) -> Vec<StorageNode> {
         new_sharks.extend(result);
     }
 
-    debug!("picker updated with new sharks: {:?}", new_sharks);
+    debug!("storinfo updated with new sharks: {:?}", new_sharks);
     new_sharks
 }

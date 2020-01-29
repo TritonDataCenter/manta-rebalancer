@@ -133,7 +133,7 @@ pub enum InternalErrorCode {
     Other,
     InvalidJobAction,
     Crossbeam,
-    PickerError,
+    StorinfoError,
     AssignmentLookupError,
     AssignmentGetError,
     LockError,

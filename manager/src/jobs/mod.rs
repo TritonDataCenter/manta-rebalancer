@@ -12,7 +12,7 @@ pub mod evacuate;
 pub mod status;
 
 use crate::config::Config;
-use crate::picker::StorageNode;
+use crate::storinfo::StorageNode;
 use rebalancer::common::{ObjectId, Task};
 use rebalancer::error::Error;
 

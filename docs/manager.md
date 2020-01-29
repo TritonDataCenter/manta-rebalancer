@@ -5,7 +5,7 @@
 -->
 
 <!--
-    Copyright 2019, Joyent, Inc.
+    Copyright 2020 Joyent, Inc.
 -->
 
 # Manta Rebalancer Manager
@@ -42,11 +42,11 @@ evacuated.
         Manager asks      |                         |  Request a list
         shark spotter     | * Obtain latest list of |  of storage nodes
         for all objects   |   qualified storage     |  as potential
-        on a given        |   nodes from  picker.   |  evacuation
+        on a given        |   nodes from storinfo.  |  evacuation
         storage node.     | * Select destination    |  destinations.    +------------------------+
-        +-----------------+   storage node(s) from  +------------------>+        Picker          |
+        +-----------------+   storage node(s) from  +------------------>+        Storinfo        |
         |                 |   list based on space   |                   |                        |
-+-------v-------+         |   and fault domain      | Picker responds   | Maintains a cache of   |
++-------v-------+         |   and fault domain      | Storinfo responds | Maintains a cache of   |
 | Shark Spotter |         |   requirements.         | with most recently| eligible storage nodes |
 +-------+-------+         | * Direct objects to     | obtained list.    | which is periodically  |
         |                 |   sharks based on       +<------------------+ refreshed.             |
