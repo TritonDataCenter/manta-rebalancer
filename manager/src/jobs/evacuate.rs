@@ -1671,8 +1671,11 @@ where
             while !done {
                 // TODO: MANTA-4519
                 // get a fresh shark list
-                let mut shark_list =
-                    job_action.get_shark_list(Arc::clone(&storinfo), &algo, 3)?;
+                let mut shark_list = job_action.get_shark_list(
+                    Arc::clone(&storinfo),
+                    &algo,
+                    3,
+                )?;
 
                 // TODO: file ticket, tunable number of sharks which implies
                 // number of threads.
