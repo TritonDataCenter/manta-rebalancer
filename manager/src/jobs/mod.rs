@@ -472,3 +472,30 @@ pub fn create_job_database() -> Result<(), Error> {
 
     conn.execute(&create_query).map(|_| {}).map_err(Error::from)
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn basic() {
+        let config = Config::parse_config(Some("src/config.json")).unwrap();
+
+        let builder = JobBuilder::new(config);
+        assert_eq!(builder.state, JobState::Init);
+
+        let from_shark = MantaObjectShark {
+            manta_storage_id: String::from("1.stor.domain"),
+            datacenter: String::from("foo"),
+        };
+
+        let builder = builder.evacuate(from_shark, "fakedomain.us", Some(1));
+        assert_eq!(builder.state, JobState::Init);
+
+        let job = builder.commit().expect("failed to create job");
+        assert_eq!(job.state, JobState::Setup);
+
+        // We expect an error here because every parameter above is fake
+        assert!(job.run().is_err());
+    }
+}
