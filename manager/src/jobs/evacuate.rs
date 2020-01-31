@@ -454,6 +454,8 @@ impl EvacuateJob {
         // depending on how we implement job restarts we may want to move it out.
         self.create_table()?;
 
+        let mut ret = Ok(());
+
         // job_action will be shared between threads so create an Arc for it.
         let job_action = Arc::new(self);
 
@@ -522,6 +524,7 @@ impl EvacuateJob {
                             "Encountered empty storinfo on startup, exiting \
                              safely"
                         );
+                        set_run_error(&mut ret, err);
                     } else {
                         panic!("Error {}", err);
                     }
@@ -537,25 +540,35 @@ impl EvacuateJob {
             .join()
             .expect("Sharkspotter Thread")
             .unwrap_or_else(|e| {
-                error!("Error joining sharkspotter handle: {}\n", e);
+                error!("Error joining sharkspotter: {}\n", e);
+                set_run_error(&mut ret, e);
             });
 
         post_thread
             .join()
             .expect("Post Thread")
-            .expect("Error joining assignment processor thread");
+            .unwrap_or_else(|e| {
+                error!("Error joining post thread: {}\n", e);
+                set_run_error(&mut ret, e);
+            });
 
         assignment_checker_thread
             .join()
             .expect("Checker Thread")
-            .expect("Error joining assignment checker thread");
+            .unwrap_or_else(|e| {
+                error!("Error joining assignment checker thread: {}\n", e);
+                set_run_error(&mut ret, e);
+            });
 
         metadata_update_thread
             .join()
             .expect("MD Update Thread")
-            .expect("Error joining metadata update thread");
+            .unwrap_or_else(|e| {
+                error!("Error joining metadata update thread: {}\n", e);
+                set_run_error(&mut ret, e);
+            });
 
-        Ok(())
+        ret
     }
 
     fn set_assignment_state(
@@ -1412,7 +1425,7 @@ fn start_sharkspotter(
                 if let Some(max) = max_objects {
                     if count > max {
                         return Err(std::io::Error::new(
-                            ErrorKind::Other,
+                            ErrorKind::Interrupted,
                             "Max Objects Limit Reached",
                         ));
                     }
@@ -1504,7 +1517,20 @@ fn start_sharkspotter(
                         std::io::Error::new(ErrorKind::Other, e.description())
                     })
             })
-            .map_err(Error::from)
+            .map_err(|e| {
+                if e.kind() == ErrorKind::Interrupted {
+                    if let Some(max) = max_objects {
+                        if count > max {
+                            return InternalError::new(
+                                Some(InternalErrorCode::MaxObjectsLimit),
+                                "Max Objects Limit Reached",
+                            )
+                            .into();
+                        }
+                    }
+                }
+                e.into()
+            })
         })
         .map_err(Error::from)
 }
@@ -1658,8 +1684,11 @@ where
             while !done {
                 // TODO: MANTA-4519
                 // get a fresh shark list
-                let mut shark_list =
-                    job_action.get_shark_list(Arc::clone(&storinfo), &algo, 3)?;
+                let mut shark_list = job_action.get_shark_list(
+                    Arc::clone(&storinfo),
+                    &algo,
+                    3,
+                )?;
 
                 // TODO: file ticket, tunable number of sharks which implies
                 // number of threads.
@@ -2663,6 +2692,21 @@ fn start_metadata_update_broker(
             Ok(())
         })
         .map_err(Error::from)
+}
+
+// In the future we may want to return a vector of errors.  But since our
+// architecture is such that all the various threads are connected by
+// channels, an error in one channel cascades to other channels.  So, it is
+// most likely the case that the first error is the most (and only) valuable
+// one to the user.  At any rate, all errors are still logged, but the job
+// error is only for the job DB.
+fn set_run_error<E>(current_error: &mut Result<(), Error>, err: E)
+where
+    E: Into<Error>,
+{
+    if current_error.is_ok() {
+        *current_error = Err(err.into());
+    }
 }
 
 #[cfg(test)]

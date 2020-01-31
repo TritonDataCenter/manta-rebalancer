@@ -12,6 +12,7 @@ use rebalancer::error::Error;
 
 use diesel::pg::PgConnection;
 use diesel::prelude::*;
+use diesel::result::ConnectionError;
 use diesel::sql_query;
 
 static DB_URL: &str = "postgres://postgres:postgres@";
@@ -54,4 +55,24 @@ pub fn list_databases() -> Result<Vec<String>, Error> {
 pub fn create_and_connect_db(db_name: &str) -> Result<PgConnection, Error> {
     create_db(db_name)?;
     connect_db(db_name)
+}
+
+// Try to connect to the specified database, if not, create the database and
+// connect to it.  In either case, on success, return the PgConnection, and
+// Error on failure.
+pub fn connect_or_create_db(db_name: &str) -> Result<PgConnection, Error> {
+    match connect_db(db_name) {
+        Ok(conn) => Ok(conn),
+        Err(err) => {
+            if let Error::DieselConnection(derr) = err {
+                if let ConnectionError::BadConnection(_) = derr {
+                    create_and_connect_db(db_name)
+                } else {
+                    Err(Error::from(derr))
+                }
+            } else {
+                Err(err)
+            }
+        }
+    }
 }

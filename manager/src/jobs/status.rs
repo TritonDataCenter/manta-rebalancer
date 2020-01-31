@@ -9,11 +9,12 @@
  */
 
 use super::evacuate::EvacuateObjectStatus;
+
+use crate::jobs::{JobDbEntry, REBALANCER_DB};
 use crate::pg_db;
 use rebalancer::error::Error;
 
 use std::collections::HashMap;
-use std::str::FromStr;
 use std::string::ToString;
 
 use diesel::prelude::*;
@@ -72,23 +73,26 @@ pub fn get_status(uuid: Uuid) -> Result<HashMap<String, usize>, StatusError> {
     Ok(ret)
 }
 
-pub fn list_jobs() -> Result<Vec<String>, StatusError> {
-    let db_list = match pg_db::list_databases() {
+pub fn list_jobs() -> Result<Vec<JobDbEntry>, StatusError> {
+    use crate::jobs::jobs::dsl::jobs as jobs_db;
+
+    let conn = match pg_db::connect_or_create_db(REBALANCER_DB) {
+        Ok(conn) => conn,
+        Err(e) => {
+            error!("Error connecting to rebalancer DB: {}", e);
+            return Err(StatusError::Unknown);
+        }
+    };
+
+    let job_list = match jobs_db.load::<JobDbEntry>(&conn) {
         Ok(list) => list,
         Err(e) => {
             error!("Error listing jobs: {}", e);
             return Err(StatusError::Unknown);
         }
     };
-    let mut ret = vec![];
 
-    for db in db_list {
-        if let Ok(job_id) = Uuid::from_str(&db) {
-            ret.push(job_id.to_string());
-        }
-    }
-
-    Ok(ret)
+    Ok(job_list)
 }
 
 #[cfg(test)]

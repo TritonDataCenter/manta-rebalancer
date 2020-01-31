@@ -122,7 +122,7 @@ impl fmt::Display for Error {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct InternalError {
     msg: String,
     pub code: InternalErrorCode,
@@ -140,6 +140,8 @@ pub enum InternalErrorCode {
     HashNotFound,
     DuplicateShark,
     BadMantaObject,
+    JobBuilderError,
+    MaxObjectsLimit,
 }
 
 impl fmt::Display for InternalError {

@@ -18,9 +18,12 @@ extern crate serde_derive;
 extern crate rebalancer;
 
 use manager::config::{self, Config};
-use manager::jobs::{self, JobAction};
+use manager::jobs::status::StatusError;
+use manager::jobs::{self, JobBuilder, JobDbEntry};
 use std::collections::HashMap;
-use std::string::ToString;
+use std::error::Error;
+
+use rebalancer::util;
 
 use clap::{App, Arg, ArgMatches};
 use crossbeam_channel;
@@ -34,9 +37,6 @@ use gotham::router::Router;
 use gotham::state::{FromState, State};
 use hyper::{Body, Response, StatusCode};
 use libmanta::moray::MantaObjectShark;
-use manager::jobs::evacuate::EvacuateJob;
-use manager::jobs::status::StatusError;
-use rebalancer::util;
 use threadpool::ThreadPool;
 use uuid::Uuid;
 
@@ -144,7 +144,7 @@ fn get_job(mut state: State) -> Box<HandlerFuture> {
 }
 
 type JobListFuture =
-    Box<dyn Future<Item = Vec<String>, Error = StatusError> + Send>;
+    Box<dyn Future<Item = Vec<JobDbEntry>, Error = StatusError> + Send>;
 
 fn get_job_list() -> JobListFuture {
     Box::new(match jobs::status::list_jobs() {
@@ -222,8 +222,7 @@ impl NewHandler for JobCreateHandler {
 impl Handler for JobCreateHandler {
     fn handle(self, mut state: State) -> Box<HandlerFuture> {
         info!("Post Job Request");
-        let mut job = jobs::Job::new(self.config.clone());
-        let job_uuid = job.get_id().to_string();
+        let job_builder = JobBuilder::new(self.config.clone());
 
         let f =
             Body::take_from(&mut state).concat2().then(
@@ -265,16 +264,25 @@ impl Handler for JobCreateHandler {
                     }
                 };
 
-                let job_action =
-                    JobAction::Evacuate(Box::new(EvacuateJob::new(
+                let job = match job_builder
+                    .evacuate(
                         evac_payload.from_shark.clone(),
                         &domain_name,
-                        &job_uuid,
                         max_objects,
-                    )));
+                    )
+                    .commit()
+                {
+                    Ok(j) => j,
+                    Err(e) => {
+                        let error = invalid_server_error(
+                            &state,
+                            String::from(e.description()),
+                        );
+                        return Box::new(future::ok((state, error)));
+                    }
+                };
 
-                job.add_action(job_action);
-
+                let job_uuid = job.get_id();
                 if let Err(e) = self.tx.send(job) {
                     panic!("Tx error: {}", e);
                 }
@@ -317,7 +325,7 @@ fn router(config: Config) -> Router {
         });
     }
 
-    build_simple_router(|route| {
+    let rtr = build_simple_router(|route| {
         route
             .get("/jobs/:uuid")
             .with_path_extractor::<GetJobParams>()
@@ -326,12 +334,18 @@ fn router(config: Config) -> Router {
         route
             .post("/jobs")
             .to_new_handler(job_create_handler.clone());
-    })
+    });
+
+    info!("Rebalancer Online");
+
+    rtr
 }
 
 fn main() {
     let _guard = util::init_global_logger();
     let addr = "0.0.0.0:8888";
+
+    info!("Initializing...");
 
     let matches: ArgMatches = App::new("rebalancer")
         .version("0.1.0")
@@ -354,6 +368,11 @@ fn main() {
             std::process::exit(1);
         })
         .unwrap();
+
+    if let Err(e) = jobs::create_job_database() {
+        error!("Error creating Jobs database: {}", e);
+        return;
+    }
 
     gotham::start(addr, router(config))
 }
@@ -394,19 +413,18 @@ mod tests {
         // Create a Job manually so that we know one exists regardless of the
         // ability of this API to create one, or the order in which tests are
         // run.
-        let new_job = manager::jobs::Job::new(config.clone());
-        let job_id = new_job.get_id().to_string();
-        let job_action = manager::jobs::evacuate::EvacuateJob::new(
-            MantaObjectShark {
-                manta_storage_id: String::from("fake_storage_id"),
-                datacenter: String::from("fake_datacenter"),
-            },
-            "fake.joyent.us",
-            &job_id,
-            None,
-        );
-
-        job_action.create_table().unwrap();
+        let job_builder = JobBuilder::new(config.clone());
+        let job = job_builder
+            .evacuate(
+                MantaObjectShark {
+                    manta_storage_id: String::from("fake_storage_id"),
+                    datacenter: String::from("fake_datacenter"),
+                },
+                "fake.joyent.us",
+                None,
+            )
+            .commit()
+            .expect("Failed to create job");
 
         let test_server = TestServer::new(router(config)).unwrap();
 
@@ -424,7 +442,8 @@ mod tests {
         assert!(job_list.len() > 0);
         println!("Return value: {:#?}", job_list);
 
-        let get_job_uri = format!("http://localhost:8888/jobs/{}", job_id);
+        let get_job_uri =
+            format!("http://localhost:8888/jobs/{}", job.get_id());
         let response = test_server.client().get(get_job_uri).perform().unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
