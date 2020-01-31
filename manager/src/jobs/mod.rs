@@ -28,7 +28,6 @@ use diesel::sql_types;
 use evacuate::EvacuateJob;
 use libmanta::moray::MantaObjectShark;
 use serde::{Deserialize, Serialize};
-use std::io::ErrorKind;
 use std::io::Write;
 use std::str::FromStr;
 
@@ -330,8 +329,8 @@ impl Job {
                         // This dance is only intended to support the
                         // evacuate object limit which will eventually be
                         // removed.
-                        Error::IoError(err) => match err.kind() {
-                            ErrorKind::Interrupted => {
+                        Error::Internal(err) => match err.code {
+                            InternalErrorCode::MaxObjectsLimit => {
                                 info!("Job {} complete", self.id);
                                 Ok(())
                             }

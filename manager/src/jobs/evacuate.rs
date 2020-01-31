@@ -1517,7 +1517,20 @@ fn start_sharkspotter(
                         std::io::Error::new(ErrorKind::Other, e.description())
                     })
             })
-            .map_err(Error::from)
+            .map_err(|e| {
+                if e.kind() == ErrorKind::Interrupted {
+                    if let Some(max) = max_objects {
+                        if count > max {
+                            return InternalError::new(
+                                Some(InternalErrorCode::MaxObjectsLimit),
+                                "Max Objects Limit Reached",
+                            )
+                            .into();
+                        }
+                    }
+                }
+                e.into()
+            })
         })
         .map_err(Error::from)
 }

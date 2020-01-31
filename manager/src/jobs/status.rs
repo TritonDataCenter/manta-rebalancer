@@ -80,7 +80,7 @@ pub fn list_jobs() -> Result<Vec<JobDbEntry>, StatusError> {
         Ok(conn) => conn,
         Err(e) => {
             error!("Error connecting to rebalancer DB: {}", e);
-            return Err(StatusError::DBExists);
+            return Err(StatusError::Unknown);
         }
     };
 

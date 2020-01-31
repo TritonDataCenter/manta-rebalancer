@@ -57,6 +57,9 @@ pub fn create_and_connect_db(db_name: &str) -> Result<PgConnection, Error> {
     connect_db(db_name)
 }
 
+// Try to connect to the specified database, if not, create the database and
+// connect to it.  In either case, on success, return the PgConnection, and
+// Error on failure.
 pub fn connect_or_create_db(db_name: &str) -> Result<PgConnection, Error> {
     match connect_db(db_name) {
         Ok(conn) => Ok(conn),
