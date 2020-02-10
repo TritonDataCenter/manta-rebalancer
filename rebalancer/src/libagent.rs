@@ -13,6 +13,7 @@ use std::fs;
 use std::fs::File;
 use std::path::Path;
 use std::sync::{mpsc, Arc, Mutex, RwLock};
+use std::thread;
 
 use futures::future;
 use futures::future::*;
@@ -29,6 +30,8 @@ use joyent_rust_utils::file::calculate_md5;
 use libmanta::moray::MantaObjectShark;
 
 use crate::common::{AssignmentPayload, ObjectSkippedReason, Task, TaskStatus};
+use crate::metrics;
+use crate::metrics::RegisteredMetrics;
 
 use reqwest::StatusCode;
 use rusqlite;
@@ -728,6 +731,8 @@ fn process_assignment(
     assignments: Arc<Mutex<Assignments>>,
     uuid: String,
     f: fn(&mut Task),
+    //metrics: Option<Arc<RegisteredMetrics>>,
+    metrics: Option<RegisteredMetrics>,
 ) {
     // If we are unsuccessful in loading the assignment from disk, there is
     // nothing left to do here, other than return.
@@ -743,6 +748,10 @@ fn process_assignment(
     assignment.write().unwrap().stats.state = AgentAssignmentState::Running;
 
     info!("Begin processing assignment {}.", &uuid);
+
+    if let Some(m) = metrics {
+        m.request_count.inc();
+    }
 
     for i in 0..len {
         let assn = assignment.clone();
@@ -801,6 +810,22 @@ fn process_assignment(
 // consumers, namely the rebalancer zone test framework.
 pub fn router(f: fn(&mut Task)) -> Router {
     build_simple_router(|route| {
+        let mut config = metrics::ConfigMetrics::default();
+        //let metrics = Arc::new(metrics::register_metrics(&config));
+        let metrics = metrics::register_metrics(&config);
+        let metrics_clone = metrics.clone();
+        let metrics_host = config.host.clone();
+        let metrics_port = config.port;
+
+        thread::spawn(move || {
+           metrics::start_server(
+                &metrics_host,
+                metrics_port,
+                metrics_clone,
+                &slog_scope::logger(),
+            )
+        });
+
         let (w, r): (mpsc::Sender<String>, mpsc::Receiver<String>) =
             mpsc::channel();
         let tx = Arc::new(Mutex::new(w));
@@ -814,6 +839,8 @@ pub fn router(f: fn(&mut Task)) -> Router {
         for _ in 0..1 {
             let rx = Arc::clone(&rx);
             let assignments = Arc::clone(&agent.assignments);
+            let m = Some(metrics.clone());
+
             pool.execute(move || loop {
                 let uuid = match rx.lock().unwrap().recv() {
                     Ok(r) => r,
@@ -822,7 +849,7 @@ pub fn router(f: fn(&mut Task)) -> Router {
                         return;
                     }
                 };
-                process_assignment(Arc::clone(&assignments), uuid, f);
+                process_assignment(Arc::clone(&assignments), uuid, f, m.clone());
             });
         }
 
