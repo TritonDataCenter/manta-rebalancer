@@ -9,7 +9,6 @@
  */
 
 use std::fmt;
-use trust_dns_resolver::error::ResolveErrorKind;
 
 #[derive(Debug)]
 pub enum Error {
@@ -19,7 +18,6 @@ pub enum Error {
     Diesel(diesel::result::Error),
     SerdeJson(serde_json::error::Error),
     Reqwest(reqwest::Error),
-    Resolve(trust_dns_resolver::error::ResolveError),
     ParseInt(std::num::ParseIntError),
     DieselConnection(diesel::ConnectionError),
 }
@@ -35,19 +33,6 @@ impl std::error::Error for Error {
             Error::Reqwest(e) => e.description(),
             Error::ParseInt(e) => e.description(),
             Error::DieselConnection(e) => e.description(),
-            Error::Resolve(e) => {
-                let kind = e.kind();
-                match kind {
-                    ResolveErrorKind::Message(m) => m,
-                    ResolveErrorKind::Io => "IO Error",
-                    ResolveErrorKind::Msg(m) => m.as_str(),
-                    ResolveErrorKind::NoRecordsFound { .. } => {
-                        "No Records Found"
-                    }
-                    ResolveErrorKind::Proto => "Proto Error",
-                    ResolveErrorKind::Timeout => "Request Timed Out",
-                }
-            }
         }
     }
 }
@@ -88,12 +73,6 @@ impl From<reqwest::Error> for Error {
     }
 }
 
-impl From<trust_dns_resolver::error::ResolveError> for Error {
-    fn from(error: trust_dns_resolver::error::ResolveError) -> Self {
-        Error::Resolve(error)
-    }
-}
-
 impl From<std::num::ParseIntError> for Error {
     fn from(error: std::num::ParseIntError) -> Self {
         Error::ParseInt(error)
@@ -115,7 +94,6 @@ impl fmt::Display for Error {
             Error::Diesel(e) => write!(f, "{}", e),
             Error::SerdeJson(e) => write!(f, "{}", e),
             Error::Reqwest(e) => write!(f, "{}", e),
-            Error::Resolve(e) => write!(f, "{}", e),
             Error::ParseInt(e) => write!(f, "{}", e),
             Error::DieselConnection(e) => write!(f, "{}", e),
         }
@@ -137,7 +115,9 @@ pub enum InternalErrorCode {
     AssignmentLookupError,
     AssignmentGetError,
     LockError,
+    IpLookupError,
     HashNotFound,
+    SharkNotFound,
     DuplicateShark,
     BadMantaObject,
     JobBuilderError,

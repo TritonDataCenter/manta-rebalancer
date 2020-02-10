@@ -186,27 +186,30 @@ pub trait SharkSource: Sync + Send {
 }
 
 fn fetch_sharks(host: &str) -> Vec<StorageNode> {
-    let base_url = format!("http://{}/poll", host);
     let mut new_sharks = vec![];
     let mut done = false;
-    let limit = 100;
     let mut after_id = String::new();
+    let base_url = format!("http://{}/poll", host);
+    let limit = 100;
 
-    // Continue to request sharks until we encounter an error or the number
-    // of sharks returned is less than the number requested via the 'limit' arg.
     while !done {
         let url = format!("{}?limit={}&after_id={}", base_url, limit, after_id);
         let mut response = match reqwest::get(&url) {
             Ok(r) => r,
             Err(e) => {
-                error!("Error fetching sharks: {}", e);
-                break;
+                error!(
+                    "Error requesting list of sharks from storinfo \
+                     service: {}",
+                    e
+                );
+                return vec![];
             }
         };
-
         let result: Vec<StorageNode> =
-            response.json().expect("storinfo response format");
+            response.json().expect("picker response format");
 
+        // .last() returns None on an empty Vec, so we can just break out of the
+        // loop if that is the case.
         match result.last() {
             Some(r) => after_id = r.manta_storage_id.clone(),
             None => break,
@@ -215,6 +218,7 @@ fn fetch_sharks(host: &str) -> Vec<StorageNode> {
         if result.len() < limit {
             done = true;
         }
+
         new_sharks.extend(result);
     }
 

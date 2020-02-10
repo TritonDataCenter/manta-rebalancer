@@ -118,6 +118,7 @@ clippy-deps:
 	rustup component add clippy
 
 jobtests:
+	RUST_LOG=remora=trace $(CARGO) test tests --bin rebalancer-manager -- --test-threads=1
 	RUST_LOG=remora=trace $(CARGO) test job -- --test-threads=1
 
 agenttests:

@@ -414,14 +414,15 @@ pub struct EvacuateJob {
 }
 
 impl EvacuateJob {
-    /// Create a new EvacauteJob instance.
+    /// Create a new EvacuateJob instance.
     /// As part of this initialization also create a new PgConnection.
     pub fn new(
-        from_shark: MantaObjectShark,
+        storage_id: String,
         domain_name: &str,
         db_name: &str,
         max_objects: Option<u32>,
-    ) -> Self {
+    ) -> Result<Self, Error> {
+        let mut from_shark = MantaObjectShark::default();
         let conn = match pg_db::create_and_connect_db(db_name) {
             Ok(c) => c,
             Err(e) => {
@@ -430,7 +431,10 @@ impl EvacuateJob {
             }
         };
 
-        Self {
+        create_evacuateobjects_table(&conn)?;
+        from_shark.manta_storage_id = storage_id;
+
+        Ok(Self {
             min_avail_mb: Some(1000),             // TODO: config
             max_tasks_per_assignment: Some(1000), // TODO: config
             dest_shark_list: RwLock::new(HashMap::new()),
@@ -440,7 +444,7 @@ impl EvacuateJob {
             total_db_time: Mutex::new(0),
             domain_name: domain_name.to_string(),
             max_objects,
-        }
+        })
     }
 
     pub fn create_table(&self) -> Result<usize, Error> {
@@ -448,13 +452,16 @@ impl EvacuateJob {
         create_evacuateobjects_table(&*conn)
     }
 
-    pub fn run(self, config: &Config) -> Result<(), Error> {
-        // We could call this from within the EvacuateJob constructor, but we may
-        // want to enable job restarts.  So for now lets call it from here, and
-        // depending on how we implement job restarts we may want to move it out.
-        self.create_table()?;
-
+    pub fn run(mut self, config: &Config) -> Result<(), Error> {
         let mut ret = Ok(());
+
+        // Validate the shark upfront.
+        let from_shark = moray_client::get_manta_object_shark(
+            &self.from_shark.manta_storage_id,
+            &self.domain_name,
+        )?;
+
+        self.from_shark = from_shark;
 
         // job_action will be shared between threads so create an Arc for it.
         let job_action = Arc::new(self);
@@ -2424,6 +2431,10 @@ fn metadata_update_worker(
         // metadata update worker threads.
         let mut client_hash: HashMap<u32, MorayClient> = HashMap::new();
 
+        debug!(
+            "Started metadata update worker: {:?}",
+            thread::current().id()
+        );
         loop {
             let assignment = match queue_front.steal() {
                 Steal::Success(a) => a,
@@ -2856,20 +2867,17 @@ mod tests {
             }
         }
 
-        let from_shark = MantaObjectShark {
-            manta_storage_id: String::from("1.stor.domain"),
-            datacenter: String::from("foo"),
-        };
-
+        let from_shark = String::from("1.stor.domain");
         let job_action = EvacuateJob::new(
             from_shark,
             "fakedomain.us",
             &Uuid::new_v4().to_string(),
             Some(100),
-        );
+        )
+        .expect("initialize evacuate job");
         assert!(job_action.create_table().is_ok());
-        let job_action = Arc::new(job_action);
 
+        let job_action = Arc::new(job_action);
         let storinfo = NoSkipStorinfo::new();
         let storinfo = Arc::new(storinfo);
 
@@ -3054,11 +3062,12 @@ mod tests {
         unit_test_init();
         let mut g = StdThreadGen::new(10);
         let job_action = EvacuateJob::new(
-            MantaObjectShark::default(),
+            String::new(),
             "fakedomain.us",
             &Uuid::new_v4().to_string(),
             None,
-        );
+        )
+        .expect("initialize evacuate job");
 
         // Create the database table
         assert!(job_action.create_table().is_ok());
@@ -3183,11 +3192,12 @@ mod tests {
         // These tests are run locally and don't go out over the network so any properly formatted
         // host/domain name is valid here.
         let job_action = EvacuateJob::new(
-            MantaObjectShark::default(),
+            String::new(),
             "fakedomain.us",
             &Uuid::new_v4().to_string(),
             None,
-        );
+        )
+        .expect("initialize evacuate job");
         let job_action = Arc::new(job_action);
 
         let assignment_manager_handle = match start_assignment_manager(
@@ -3312,11 +3322,12 @@ mod tests {
         // These tests are run locally and don't go out over the network so any properly formatted
         // host/domain name is valid here.
         let job_action = EvacuateJob::new(
-            MantaObjectShark::default(),
+            String::new(),
             "region.fakedomain.us",
             &Uuid::new_v4().to_string(),
             None,
-        );
+        )
+        .expect("initialize evacuate job");
 
         // Create the database table
         assert!(job_action.create_table().is_ok());
@@ -3324,7 +3335,7 @@ mod tests {
         let job_action = Arc::new(job_action);
         let mut test_objects = vec![];
         let mut g = StdThreadGen::new(10);
-        let num_objects = 10000;
+        let num_objects = 100;
 
         for _ in 0..num_objects {
             let mobj = MantaObject::arbitrary(&mut g);

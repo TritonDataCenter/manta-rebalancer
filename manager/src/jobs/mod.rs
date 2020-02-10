@@ -26,7 +26,6 @@ use diesel::prelude::*;
 use diesel::serialize::{self, IsNull, Output, ToSql};
 use diesel::sql_types;
 use evacuate::EvacuateJob;
-use libmanta::moray::MantaObjectShark;
 use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::str::FromStr;
@@ -69,17 +68,26 @@ impl JobBuilder {
     // job's action field.
     pub fn evacuate(
         mut self,
-        from_shark: MantaObjectShark,
+        from_shark: String,
         domain_name: &str,
         max_objects: Option<u32>,
     ) -> JobBuilder {
-        let action = JobAction::Evacuate(Box::new(EvacuateJob::new(
+        match EvacuateJob::new(
             from_shark,
             domain_name,
             &self.id.to_string(),
             max_objects,
-        )));
-        self.action = Some(action);
+        ) {
+            Ok(j) => {
+                let action = JobAction::Evacuate(Box::new(j));
+                self.action = Some(action);
+            }
+            Err(e) => {
+                error!("Failed to initialize evacuate job: {}", e);
+                self.state = JobState::Failed;
+            }
+        }
+
         self
     }
 
@@ -87,14 +95,6 @@ impl JobBuilder {
     // * set the job state to JobSate::Init
     // * insert the job into "rebalancer" database in the "jobs" table
     pub fn commit(self) -> Result<Job, Error> {
-        if self.action.is_none() {
-            return Err(InternalError::new(
-                Some(InternalErrorCode::JobBuilderError),
-                "A job action must be specified",
-            )
-            .into());
-        }
-
         if self.state != JobState::Init {
             let msg = format!(
                 "Attempted to commit job in {} state.  Must be \
@@ -104,6 +104,14 @@ impl JobBuilder {
             return Err(InternalError::new(
                 Some(InternalErrorCode::JobBuilderError),
                 msg,
+            )
+            .into());
+        }
+
+        if self.action.is_none() {
+            return Err(InternalError::new(
+                Some(InternalErrorCode::JobBuilderError),
+                "A job action must be specified",
             )
             .into());
         }
@@ -132,13 +140,14 @@ impl JobBuilder {
 // crate developers recommend.
 // https://github.com/diesel-rs/diesel/issues/860
 #[derive(
-    Debug,
-    Insertable,
-    Queryable,
-    Identifiable,
     AsChangeset,
     AsExpression,
+    Debug,
+    Deserialize,
+    Identifiable,
+    Insertable,
     PartialEq,
+    Queryable,
     Serialize,
 )]
 #[table_name = "jobs"]
@@ -162,6 +171,7 @@ table! {
     AsExpression,
     Clone,
     Debug,
+    Deserialize,
     Display,
     EnumString,
     EnumVariantNames,
@@ -211,14 +221,15 @@ impl JobAction {
 
 #[sql_type = "sql_types::Text"]
 #[derive(
-    Serialize,
+    AsExpression,
     Debug,
+    Deserialize,
     Display,
     EnumString,
     EnumVariantNames,
-    AsExpression,
-    PartialEq,
     FromSqlRow,
+    PartialEq,
+    Serialize,
 )]
 #[strum(serialize_all = "snake_case")]
 pub enum JobActionDbEntry {
@@ -476,19 +487,17 @@ pub fn create_job_database() -> Result<(), Error> {
 #[cfg(test)]
 mod test {
     use super::*;
+    use rebalancer::util;
 
     #[test]
     fn basic() {
+        let _guard = util::init_global_logger();
         let config = Config::parse_config(Some("src/config.json")).unwrap();
 
         let builder = JobBuilder::new(config);
         assert_eq!(builder.state, JobState::Init);
 
-        let from_shark = MantaObjectShark {
-            manta_storage_id: String::from("1.stor.domain"),
-            datacenter: String::from("foo"),
-        };
-
+        let from_shark = String::from("1.stor.domain");
         let builder = builder.evacuate(from_shark, "fakedomain.us", Some(1));
         assert_eq!(builder.state, JobState::Init);
 
