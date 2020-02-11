@@ -77,21 +77,23 @@ struct PathExtractor {
     parts: Vec<String>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Agent {
     assignments: Arc<Mutex<Assignments>>,
     quiescing: Arc<Mutex<HashSet<String>>>,
     tx: Arc<Mutex<mpsc::Sender<String>>>,
+    metrics: Arc<Mutex<Option<RegisteredMetrics>>>,
 }
 
 impl Agent {
-    pub fn new(tx: Arc<Mutex<mpsc::Sender<String>>>) -> Agent {
+    pub fn new(tx: Arc<Mutex<mpsc::Sender<String>>>, metrics: Arc<Mutex<Option<RegisteredMetrics>>>) -> Agent {
         let assignments = Arc::new(Mutex::new(Assignments::new()));
         let quiescing = Arc::new(Mutex::new(HashSet::new()));
         Agent {
             assignments,
             quiescing,
             tx,
+            metrics,
         }
     }
 
@@ -731,7 +733,6 @@ fn process_assignment(
     assignments: Arc<Mutex<Assignments>>,
     uuid: String,
     f: fn(&mut Task),
-    //metrics: Option<Arc<RegisteredMetrics>>,
     metrics: Option<RegisteredMetrics>,
 ) {
     // If we are unsuccessful in loading the assignment from disk, there is
@@ -749,7 +750,7 @@ fn process_assignment(
 
     info!("Begin processing assignment {}.", &uuid);
 
-    if let Some(m) = metrics {
+    if let Some(m) = metrics.clone() {
         m.request_count.inc();
     }
 
@@ -777,12 +778,23 @@ fn process_assignment(
         // the end of the loop (which is not for very long).
         let tmp = &mut assn.write().unwrap();
 
+        // Update the total number of objects that have been processes, whether
+        // successful or not.
+        if let Some(m) = metrics.clone() {
+            m.object_count.inc();
+        }
+
         // Update our stats.
         match t.status {
             TaskStatus::Pending => (),
             TaskStatus::Running => (),
             TaskStatus::Complete => tmp.stats.complete += 1,
-            TaskStatus::Failed(_) => {
+            TaskStatus::Failed(e) => {
+                if let Some(m) = metrics.clone() {
+                    m.error_count
+                        .with_label_values(&[&e.to_string()])
+                        .inc();
+                }
                 tmp.stats.complete += 1;
                 tmp.stats.failed += 1;
                 failures.push(t.clone());
@@ -810,10 +822,8 @@ fn process_assignment(
 // consumers, namely the rebalancer zone test framework.
 pub fn router(f: fn(&mut Task)) -> Router {
     build_simple_router(|route| {
-        let mut config = metrics::ConfigMetrics::default();
-        //let metrics = Arc::new(metrics::register_metrics(&config));
+        let config = metrics::MetricLabels::default();
         let metrics = metrics::register_metrics(&config);
-        let metrics_clone = metrics.clone();
         let metrics_host = config.host.clone();
         let metrics_port = config.port;
 
@@ -821,7 +831,6 @@ pub fn router(f: fn(&mut Task)) -> Router {
            metrics::start_server(
                 &metrics_host,
                 metrics_port,
-                metrics_clone,
                 &slog_scope::logger(),
             )
         });
@@ -830,9 +839,11 @@ pub fn router(f: fn(&mut Task)) -> Router {
             mpsc::channel();
         let tx = Arc::new(Mutex::new(w));
         let rx = Arc::new(Mutex::new(r));
-        let agent = Agent::new(tx.clone());
+        let new_socialism = Arc::new(Mutex::new(Some(metrics.clone())));
+        let agent = Agent::new(tx.clone(), new_socialism);
         let pool = ThreadPool::new(1);
 
+        //agent.metrics = Arc::new(mutex::new(Some(metrics.clone())));
         create_dir(REBALANCER_SCHEDULED_DIR);
         create_dir(REBALANCER_FINISHED_DIR);
 
