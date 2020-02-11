@@ -16,7 +16,6 @@ use std::fs::File;
 use std::io::BufReader;
 
 use crate::jobs::{Job, JobBuilder};
-use crate::moray_client;
 use rebalancer::error::Error;
 use rebalancer::util;
 use uuid::Uuid;
@@ -255,12 +254,8 @@ fn job_create_subcommand_handler(
 
     let max_objects = if max == 0 { None } else { Some(max) };
     let shark_id = format!("{}.{}", shark_id, domain_name);
-    let from_shark =
-        moray_client::get_manta_object_shark(&shark_id, &domain_name)
-            .map_err(Error::from)?;
-
     let job = JobBuilder::new(config)
-        .evacuate(from_shark, &domain_name, max_objects)
+        .evacuate(shark_id, &domain_name, max_objects)
         .commit()?;
 
     Ok(SubCommand::DoJob(Box::new(job)))

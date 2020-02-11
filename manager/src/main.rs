@@ -20,10 +20,10 @@ extern crate rebalancer;
 use manager::config::{self, Config};
 use manager::jobs::status::StatusError;
 use manager::jobs::{self, JobBuilder, JobDbEntry};
+use rebalancer::util;
+
 use std::collections::HashMap;
 use std::error::Error;
-
-use rebalancer::util;
 
 use clap::{App, Arg, ArgMatches};
 use crossbeam_channel;
@@ -36,7 +36,6 @@ use gotham::router::builder::{
 use gotham::router::Router;
 use gotham::state::{FromState, State};
 use hyper::{Body, Response, StatusCode};
-use libmanta::moray::MantaObjectShark;
 use threadpool::ThreadPool;
 use uuid::Uuid;
 
@@ -182,26 +181,25 @@ fn list_jobs(state: State) -> Box<HandlerFuture> {
     }))
 }
 
-#[derive(Serialize, Deserialize, Default)]
-struct JobPayload {
-    action: JobActionPayload,
-}
-
+/// The JobPayload is an enum with variants of JobActions.  A properly
+/// formatted JobPayload submitted from the client in JSON form looks like:
+///
+/// ```json
+/// {
+///     "action": <job action (String)>,
+///     "params": { <job action specific params > }
+/// }
+/// ```
 #[derive(Serialize, Deserialize)]
-enum JobActionPayload {
+#[serde(tag = "action", content = "params")]
+#[serde(rename_all = "lowercase")]
+enum JobPayload {
     Evacuate(EvacuateJobPayload),
-}
-
-impl Default for JobActionPayload {
-    fn default() -> Self {
-        JobActionPayload::Evacuate(EvacuateJobPayload::default())
-    }
 }
 
 #[derive(Serialize, Deserialize, Default)]
 struct EvacuateJobPayload {
-    from_shark: MantaObjectShark,
-    domain_name: Option<String>,
+    from_shark: String,
     max_objects: Option<u32>,
 }
 
@@ -232,25 +230,29 @@ impl Handler for JobCreateHandler {
                             &valid_body.into_bytes(),
                         ) {
                             Ok(jp) => future::ok(jp),
-                            Err(e) => future::err(e.into_handler_error()),
+                            Err(e) => {
+                                error!("Error deserializing: {}", &e);
+                                future::err(e.into_handler_error())
+                            }
                         }
                     }
-                    Err(e) => future::err(e.into_handler_error()),
+                    Err(e) => {
+                        error!("Body parse error: {}", &e);
+                        future::err(e.into_handler_error())
+                    }
                 },
             );
 
-        let payload = match f.wait() {
+        let payload: JobPayload = match f.wait() {
             Ok(p) => p,
             Err(e) => {
+                error!("Payload error: {}", &e);
                 return Box::new(future::err((state, e)));
             }
         };
 
-        let ret = match payload.action {
-            JobActionPayload::Evacuate(evac_payload) => {
-                let domain_name = evac_payload
-                    .domain_name
-                    .unwrap_or_else(|| self.config.domain_name.clone());
+        let ret = match payload {
+            JobPayload::Evacuate(evac_payload) => {
                 let max_objects = match evac_payload.max_objects {
                     Some(val) => {
                         if val == 0 {
@@ -266,8 +268,8 @@ impl Handler for JobCreateHandler {
 
                 let job = match job_builder
                     .evacuate(
-                        evac_payload.from_shark.clone(),
-                        &domain_name,
+                        evac_payload.from_shark,
+                        &self.config.domain_name,
                         max_objects,
                     )
                     .commit()
@@ -382,6 +384,7 @@ mod tests {
     use super::*;
     use gotham::test::TestServer;
     use lazy_static::lazy_static;
+    use rebalancer::error::{Error, InternalError};
     use std::sync::Mutex;
     use std::thread;
 
@@ -395,60 +398,70 @@ mod tests {
             return;
         }
 
+        *init = true;
+
         thread::spawn(move || {
             let _guard = util::init_global_logger();
             loop {
                 std::thread::sleep(std::time::Duration::from_millis(1))
             }
         });
+    }
 
-        *init = true;
+    fn get_job_list(
+        test_server: &TestServer,
+    ) -> Result<Vec<JobDbEntry>, Error> {
+        let response = test_server
+            .client()
+            .get("http://localhost:8888/jobs")
+            .perform()
+            .expect("Get Job List");
+
+        if !response.status().is_success() {
+            let msg = format!("client get error: {}", response.status());
+            return Err(InternalError::new(None, msg).into());
+        }
+
+        let jobs_ret = response.read_body().expect("response body");
+        serde_json::from_slice(&jobs_ret).map_err(Error::from)
+    }
+
+    fn job_list_contains(jobs: &Vec<JobDbEntry>, id: &str) -> bool {
+        jobs.iter().any(|j| j.id.to_string() == id)
     }
 
     #[test]
     fn basic() {
         unit_test_init();
-        let config = Config::parse_config(Some("src/config.json")).unwrap();
+        let config =
+            Config::parse_config(Some("src/config.json")).expect("config");
+        let test_server =
+            TestServer::new(router(config.clone())).expect("test server");
 
         // Create a Job manually so that we know one exists regardless of the
         // ability of this API to create one, or the order in which tests are
         // run.
         let job_builder = JobBuilder::new(config.clone());
         let job = job_builder
-            .evacuate(
-                MantaObjectShark {
-                    manta_storage_id: String::from("fake_storage_id"),
-                    datacenter: String::from("fake_datacenter"),
-                },
-                "fake.joyent.us",
-                None,
-            )
+            .evacuate(String::from("fake_storage_id"), "fake.joyent.us", None)
             .commit()
             .expect("Failed to create job");
-
-        let test_server = TestServer::new(router(config)).unwrap();
-
-        let response = test_server
-            .client()
-            .get("http://localhost:8888/jobs")
-            .perform()
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::OK);
-
-        let jobs_ret = response.read_body().unwrap();
-        let job_list: Vec<String> = serde_json::from_slice(&jobs_ret).unwrap();
+        let job_id = job.get_id().to_string();
+        let job_list = get_job_list(&test_server).expect("get job list");
 
         assert!(job_list.len() > 0);
-        println!("Return value: {:#?}", job_list);
+        assert!(job_list_contains(&job_list, &job_id));
 
-        let get_job_uri =
-            format!("http://localhost:8888/jobs/{}", job.get_id());
-        let response = test_server.client().get(get_job_uri).perform().unwrap();
+        let get_job_uri = format!("http://localhost:8888/jobs/{}", job_id);
+        let response = test_server
+            .client()
+            .get(get_job_uri)
+            .perform()
+            .expect("get job status response");
 
         assert_eq!(response.status(), StatusCode::OK);
 
-        let ret = response.read_utf8_body().unwrap();
+        let ret = response.read_utf8_body().expect("response body");
         let pretty_response: HashMap<String, usize> =
             serde_json::from_str(&ret).expect("job status hash");
         println!("{:#?}", pretty_response);
@@ -457,23 +470,15 @@ mod tests {
     #[test]
     fn post_test() {
         unit_test_init();
-        let config = Config::parse_config(Some("src/config.json")).unwrap();
-        let test_server = TestServer::new(router(config)).unwrap();
-        let action_payload = EvacuateJobPayload {
-            domain_name: Some(String::from("fake.joyent.us")),
-            from_shark: MantaObjectShark {
-                manta_storage_id: String::from("fake_storage_id"),
-                datacenter: String::from("fake_datacenter"),
-            },
+        let config =
+            Config::parse_config(Some("src/config.json")).expect("config");
+        let test_server = TestServer::new(router(config)).expect("test server");
+        let job_payload = JobPayload::Evacuate(EvacuateJobPayload {
+            from_shark: String::from("fake_storage_id"),
             max_objects: Some(10),
-        };
-
-        let job_payload = JobPayload {
-            action: JobActionPayload::Evacuate(action_payload),
-        };
-
-        let payload = serde_json::to_string(&job_payload).unwrap();
-
+        });
+        let payload = serde_json::to_string(&job_payload)
+            .expect("serde serialize payload");
         let response = test_server
             .client()
             .post(
@@ -482,12 +487,13 @@ mod tests {
                 mime::APPLICATION_JSON,
             )
             .perform()
-            .unwrap();
+            .expect("client post");
 
         assert_eq!(response.status(), StatusCode::OK);
 
-        let ret = response.read_utf8_body().unwrap();
-        assert!(Uuid::parse_str(&ret).is_ok());
+        let ret = response.read_utf8_body().expect("response body");
+        let ret = ret.trim_end();
+        assert!(Uuid::parse_str(ret).is_ok());
 
         println!("{:#?}", ret);
     }
