@@ -43,14 +43,14 @@ impl Default for MetricLabels {
 
 #[derive(Clone)]
 pub struct RegisteredMetrics {
-    pub request_count: Counter,
+    pub request_count: CounterVec,
     pub object_count: Counter,
     pub error_count: CounterVec,
 }
 
 impl RegisteredMetrics {
     fn new(
-        request_count: Counter,
+        request_count: CounterVec,
         object_count: Counter,
         error_count: CounterVec,
     ) -> Self {
@@ -75,10 +75,10 @@ pub fn register_metrics(labels: &MetricLabels) -> RegisteredMetrics {
     const_labels.insert("datacenter".to_string(), labels.datacenter.clone());
     const_labels.insert("zonename".to_string(), hostname.clone());
 
-    let request_counter = register_counter!(opts!(
+    let request_counter = register_counter_vec!(opts!(
         "incoming_request_count",
         "Total number of requests handled."
-    ).const_labels(const_labels.clone()))
+    ).const_labels(const_labels.clone()), &["op"])
     .expect("failed to register incoming_request_count counter");
 
     let object_counter = register_counter!(opts!(

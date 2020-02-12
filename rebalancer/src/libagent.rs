@@ -82,11 +82,11 @@ pub struct Agent {
     assignments: Arc<Mutex<Assignments>>,
     quiescing: Arc<Mutex<HashSet<String>>>,
     tx: Arc<Mutex<mpsc::Sender<String>>>,
-    metrics: Arc<Mutex<Option<RegisteredMetrics>>>,
+    metrics: Arc<Mutex<RegisteredMetrics>>,
 }
 
 impl Agent {
-    pub fn new(tx: Arc<Mutex<mpsc::Sender<String>>>, metrics: Arc<Mutex<Option<RegisteredMetrics>>>) -> Agent {
+    pub fn new(tx: Arc<Mutex<mpsc::Sender<String>>>, metrics: Arc<Mutex<RegisteredMetrics>>) -> Agent {
         let assignments = Arc::new(Mutex::new(Assignments::new()));
         let quiescing = Arc::new(Mutex::new(HashSet::new()));
         Agent {
@@ -418,11 +418,15 @@ fn post(agent: Agent, mut state: State) -> Box<HandlerFuture> {
                 // an assignent out of the message body.
                 let (uuid, v) = match validate_assignment(&valid_body) {
                     Ok(uv) => uv,
-                    Err(_e) => {
+                    Err(e) => {
                         let res = create_empty_response(
                             &state,
                             StatusCode::BAD_REQUEST,
                         );
+                        agent.metrics.lock().unwrap()
+                            .error_count
+                            .with_label_values(&[&e])
+                            .inc();
                         return future::ok((state, res));
                     }
                 };
@@ -433,6 +437,10 @@ fn post(agent: Agent, mut state: State) -> Box<HandlerFuture> {
                 if agent.assignment_exists(&uuid) {
                     let res =
                         create_empty_response(&state, StatusCode::CONFLICT);
+                    agent.metrics.lock().unwrap()
+                        .error_count
+                        .with_label_values(&["conflict"])
+                        .inc();
                     return future::ok((state, res));
                 }
 
@@ -469,7 +477,14 @@ fn post(agent: Agent, mut state: State) -> Box<HandlerFuture> {
                 assignment_signal(&agent, &uuid);
                 future::ok((state, res))
             }
-            Err(e) => future::err((state, e.into_handler_error())),
+
+            Err(e) => {
+                agent.metrics.lock().unwrap()
+                    .error_count
+                    .with_label_values(&[&e.to_string()])
+                    .inc();
+                future::err((state, e.into_handler_error()))
+            },
         });
     Box::new(f)
 }
@@ -566,6 +581,11 @@ fn validate_assignment(body: &Chunk) -> Result<(String, Vec<Task>), String> {
 impl Handler for Agent {
     fn handle(self, state: State) -> Box<HandlerFuture> {
         let method = Method::borrow_from(&state);
+
+        self.metrics.lock().unwrap()
+            .request_count
+            .with_label_values(&[method.as_str()])
+            .inc();
 
         // If we are here, then the method must either be
         // POST or GET.  It can not be anything else.
@@ -750,10 +770,6 @@ fn process_assignment(
 
     info!("Begin processing assignment {}.", &uuid);
 
-    if let Some(m) = metrics.clone() {
-        m.request_count.inc();
-    }
-
     for i in 0..len {
         let assn = assignment.clone();
 
@@ -839,11 +855,10 @@ pub fn router(f: fn(&mut Task)) -> Router {
             mpsc::channel();
         let tx = Arc::new(Mutex::new(w));
         let rx = Arc::new(Mutex::new(r));
-        let new_socialism = Arc::new(Mutex::new(Some(metrics.clone())));
+        let new_socialism = Arc::new(Mutex::new(metrics.clone()));
         let agent = Agent::new(tx.clone(), new_socialism);
         let pool = ThreadPool::new(1);
 
-        //agent.metrics = Arc::new(mutex::new(Some(metrics.clone())));
         create_dir(REBALANCER_SCHEDULED_DIR);
         create_dir(REBALANCER_FINISHED_DIR);
 
