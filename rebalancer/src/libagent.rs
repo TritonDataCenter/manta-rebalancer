@@ -836,6 +836,7 @@ fn process_assignment(
 
 // Create a `Router`.  This function is public because it will have external
 // consumers, namely the rebalancer zone test framework.
+#[allow(clippy::many_single_char_names)]
 pub fn router(f: fn(&mut Task)) -> Router {
     build_simple_router(|route| {
         let config = metrics::MetricLabels::default();
