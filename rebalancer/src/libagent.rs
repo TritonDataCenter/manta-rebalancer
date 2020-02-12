@@ -856,7 +856,6 @@ pub fn router(f: fn(&mut Task)) -> Router {
             mpsc::channel();
         let tx = Arc::new(Mutex::new(w));
         let rx = Arc::new(Mutex::new(r));
-        //let new_socialism = Arc::new(Mutex::new(metrics.clone()));
         let agent = Agent::new(tx.clone(),
             Arc::new(Mutex::new(metrics.clone())));
         let pool = ThreadPool::new(1);
