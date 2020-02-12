@@ -68,7 +68,7 @@ pub fn register_metrics(labels: &MetricLabels) -> RegisteredMetrics {
         .unwrap_or_else(|_| String::from("unknown"));
 
     // Convert our MetricLabels structure to a HashMap since that is what
-    // Prometheus requires when created a new metric with labels.
+    // Prometheus requires when creating a new metric with labels.
     let mut const_labels = HashMap::new();
     const_labels.insert("service".to_string(), labels.service.clone());
     const_labels.insert("server".to_string(), labels.server.clone());
