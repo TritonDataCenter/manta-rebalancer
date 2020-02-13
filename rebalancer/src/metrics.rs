@@ -62,31 +62,45 @@ impl RegisteredMetrics {
     }
 }
 
+// Given the service configuration information, create (i.e. register) the
+// desired metrics with prometheus.
 pub fn register_metrics(labels: &MetricLabels) -> RegisteredMetrics {
     let hostname = gethostname()
         .into_string()
         .unwrap_or_else(|_| String::from("unknown"));
 
     // Convert our MetricLabels structure to a HashMap since that is what
-    // Prometheus requires when creating a new metric with labels.
+    // Prometheus requires when creating a new metric with labels.  It is a
+    // Manta-wide convention to require the (below) labels at a minimum as a
+    // part of all metrics.  Other labels can be added, but these are required.
     let mut const_labels = HashMap::new();
     const_labels.insert("service".to_string(), labels.service.clone());
     const_labels.insert("server".to_string(), labels.server.clone());
     const_labels.insert("datacenter".to_string(), labels.datacenter.clone());
     const_labels.insert("zonename".to_string(), hostname.clone());
 
+    // The request counter maintains a list of requests received, broken down
+    // by the type of request (e.g. op=GET, op=POST).
     let request_counter = register_counter_vec!(opts!(
         "incoming_request_count",
         "Total number of requests handled."
     ).const_labels(const_labels.clone()), &["op"])
     .expect("failed to register incoming_request_count counter");
 
+    // The object counter maintains a count of the total number of objects that
+    // have been processed (whether successfully or not).
     let object_counter = register_counter!(opts!(
         "object_count",
         "Total number of objects processed."
     ).const_labels(const_labels.clone()))
     .expect("failed to register object_count counter");
 
+    // The error counter maintains a list of errors encountered, broken down by
+    // the type of error observed.  Note that in order to avoid a polynomial
+    // explosion of buckets here, one should have a reasonable idea of the
+    // different kinds of possible errors that a given application could
+    // encounter and in the event that there are too many possibilities, only
+    // track certain error types and maintain the rest in a generic bucket.
     let error_counter = register_counter_vec!(opts!(
         "error_count",
         "Errors encountered."
@@ -100,6 +114,7 @@ pub fn register_metrics(labels: &MetricLabels) -> RegisteredMetrics {
     )
 }
 
+// Start the metrics server on the address and port specified by the caller.
 pub fn start_server(
     address: &str,
     port: u16,
@@ -115,14 +130,19 @@ pub fn start_server(
     let server = Server::bind(&addr)
         .serve(move || {
             service_fn_ok(move |_: Request<Body>| {
+                // Gather all metrics from the default registry.
                 let metric_families = prometheus::gather();
                 let mut buffer = vec![];
+
+                // Convert the MetricFamily message into text format and store
+                // the result in `buffer' which will be in the payload of the
+                // reponse to a request for metrics.
                 let encoder = TextEncoder::new();
                 encoder.encode(&metric_families, &mut buffer).unwrap();
-
                 let content_type =
                     encoder.format_type().parse::<HeaderValue>().unwrap();
 
+                // Send the response.
                 Response::builder()
                     .header(CONTENT_TYPE, content_type)
                     .status(StatusCode::OK)
