@@ -418,7 +418,7 @@ fn post(agent: Agent, mut state: State) -> Box<HandlerFuture> {
         .then(move |full_body| match full_body {
             Ok(valid_body) => {
                 // Ceremony for parsing the information needed to create an
-                // an assignent out of the message body.
+                // an assigment out of the message body.
                 let (uuid, v) = match validate_assignment(&valid_body) {
                     Ok(uv) => uv,
                     Err(e) => {
