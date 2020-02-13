@@ -122,6 +122,7 @@ pub enum InternalErrorCode {
     BadMantaObject,
     JobBuilderError,
     MaxObjectsLimit,
+    JobValidationError,
 }
 
 impl fmt::Display for InternalError {

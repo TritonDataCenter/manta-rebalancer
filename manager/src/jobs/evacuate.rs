@@ -452,16 +452,81 @@ impl EvacuateJob {
         create_evacuateobjects_table(&*conn)
     }
 
+    // Validate that:
+    //  1. We are running in a Manta V2 (or greater) environment.
+    //  2. That Snaplinks are cleaned up.
+    //  3. The shark we are evacuating from exists.
+    // Note this is not purely a validation function.  We do set the
+    // from_shark field in here so that it has the complete manta_storage_id
+    // and datacenter.
+    fn validate(&mut self, config: &Config) -> Result<(), Error>{
+        let log = slog_scope::logger();
+        let sapi = sapi::SAPI::new(&config.sapi_url, 60, log);
+        let applications = sapi.get_application_by_name("manta")?;
+
+        if applications.len() != 1 {
+            let err_msg = format!(
+                "There should be only one manta application.  Found {}",
+                applications.len()
+            );
+            return Err(InternalError::new(
+                Some(InternalErrorCode::JobValidationError),
+                err_msg).into());
+        }
+
+        let version_validation = applications
+            .first()
+            .ok_or("Missing manta application".to_string())
+            .and_then(|application| {
+                application
+                    .metadata
+                    .as_ref()
+                    .ok_or("Missing application metadata".to_string())
+            })
+            .and_then(|metadata| {
+                metadata
+                    .get("MANTAV")
+                    .ok_or("Missing MantaV metadata entry".to_string())
+                    .and_then()
+            })
+            .and_then(|version| {
+                version
+                    .as_u64()
+                    .ok_or("Version is not a number".to_string())
+            })
+            .and_then(|ver| {
+                if ver < 2 {
+                    let msg = format!(
+                        "Rebalancer requires manta version 2 or \
+                     greater.  Found version {}",
+                        ver
+                    );
+                    Err(msg)
+                } else {
+                    Ok(())
+                }
+            });
+
+        if let Err(error_msg) = version_validation {
+            return Err(InternalError::new(
+                Some(InternalErrorCode::JobValidationError),
+                error_msg).into());
+        }
+
+
+
+        let from_shark = moray_client::get_manta_object_shark(
+            &self.from_shark.manta_storage_id,
+            &self.domain_name,)?;
+
+        self.from_shark = from_shark;
+
+        Ok(())
+    }
+
     pub fn run(mut self, config: &Config) -> Result<(), Error> {
         let mut ret = Ok(());
 
-        // Validate the shark upfront.
-        let from_shark = moray_client::get_manta_object_shark(
-            &self.from_shark.manta_storage_id,
-            &self.domain_name,
-        )?;
-
-        self.from_shark = from_shark;
 
         // job_action will be shared between threads so create an Arc for it.
         let job_action = Arc::new(self);

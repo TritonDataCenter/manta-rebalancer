@@ -1,5 +1,6 @@
 {
     "domain_name": "{{DOMAIN_NAME}}",
+    "sapi_url": "{{SAPI_URL}}"
     "shards": [{{#INDEX_MORAY_SHARDS}}
         {
             "host": "{{host}}"
