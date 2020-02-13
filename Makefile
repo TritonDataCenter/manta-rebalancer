@@ -48,9 +48,7 @@ include ./deps/eng/tools/mk/Makefile.smf.defs
 # Repo-specific targets
 #
 
-all:
-	$(CARGO) build --manifest-path=agent/Cargo.toml --release
-	$(CARGO) build --manifest-path=manager/Cargo.toml --release
+all: agent manager
 
 debug:
 	$(CARGO) build --manifest-path=agent/Cargo.toml
@@ -96,7 +94,11 @@ clean::
 
 .PHONY: agent
 agent:
-	$(CARGO) build --bin rebalancer-agent --release
+	$(CARGO) build --manifest-path=agent/Cargo.toml --release
+
+.PHONY: manager
+manager:
+	$(CARGO) build --manifest-path=manager/Cargo.toml --release
 
 .PHONY: pkg_agent
 pkg_agent:
