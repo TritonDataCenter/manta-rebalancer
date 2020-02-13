@@ -24,7 +24,7 @@ joyent-rust-utils = { git = "https://github.com/joyent/rust-utils", tag = "v0.2.
 libmanta = { git = "https://github.com/joyent/rust-libmanta", tag = "v0.7.0" }
 mime = "0.3.13"
 md-5 = "0.8.0"
-prometheus = "0.5.0"
+prometheus = "0.7.0"
 quickcheck = "0.8.5"
 quickcheck_helpers = { git = "https://github.com/joyent/rust-quickcheck-helpers.git", tag = "v0.1.0" }
 reqwest = "0.9.18"

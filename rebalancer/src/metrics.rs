@@ -15,8 +15,8 @@ use prometheus::{
     opts, register_counter, register_counter_vec, Counter, CounterVec, Encoder,
     TextEncoder,
 };
-use slog::{error, info, Logger};
 use serde_derive::Deserialize;
+use slog::{error, info, Logger};
 
 #[derive(Clone, Deserialize)]
 pub struct MetricLabels {
@@ -81,10 +81,14 @@ pub fn register_metrics(labels: &MetricLabels) -> RegisteredMetrics {
 
     // The request counter maintains a list of requests received, broken down
     // by the type of request (e.g. op=GET, op=POST).
-    let request_counter = register_counter_vec!(opts!(
-        "incoming_request_count",
-        "Total number of requests handled."
-    ).const_labels(const_labels.clone()), &["op"])
+    let request_counter = register_counter_vec!(
+        opts!(
+            "incoming_request_count",
+            "Total number of requests handled."
+        )
+        .const_labels(const_labels.clone()),
+        &["op"]
+    )
     .expect("failed to register incoming_request_count counter");
 
     // The object counter maintains a count of the total number of objects that
@@ -92,7 +96,8 @@ pub fn register_metrics(labels: &MetricLabels) -> RegisteredMetrics {
     let object_counter = register_counter!(opts!(
         "object_count",
         "Total number of objects processed."
-    ).const_labels(const_labels.clone()))
+    )
+    .const_labels(const_labels.clone()))
     .expect("failed to register object_count counter");
 
     // The error counter maintains a list of errors encountered, broken down by
@@ -101,25 +106,18 @@ pub fn register_metrics(labels: &MetricLabels) -> RegisteredMetrics {
     // different kinds of possible errors that a given application could
     // encounter and in the event that there are too many possibilities, only
     // track certain error types and maintain the rest in a generic bucket.
-    let error_counter = register_counter_vec!(opts!(
-        "error_count",
-        "Errors encountered."
-    ).const_labels(const_labels.clone()), &["error"])
+    let error_counter = register_counter_vec!(
+        opts!("error_count", "Errors encountered.")
+            .const_labels(const_labels.clone()),
+        &["error"]
+    )
     .expect("failed to register error_count counter");
 
-    RegisteredMetrics::new(
-        request_counter,
-        object_counter,
-        error_counter
-    )
+    RegisteredMetrics::new(request_counter, object_counter, error_counter)
 }
 
 // Start the metrics server on the address and port specified by the caller.
-pub fn start_server(
-    address: &str,
-    port: u16,
-    log: &Logger,
-) {
+pub fn start_server(address: &str, port: u16, log: &Logger) {
     let addr = [&address, ":", &port.to_string()]
         .concat()
         .parse::<SocketAddr>()

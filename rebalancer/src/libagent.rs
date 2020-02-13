@@ -86,7 +86,10 @@ pub struct Agent {
 }
 
 impl Agent {
-    pub fn new(tx: Arc<Mutex<mpsc::Sender<String>>>, metrics: Arc<Mutex<RegisteredMetrics>>) -> Agent {
+    pub fn new(
+        tx: Arc<Mutex<mpsc::Sender<String>>>,
+        metrics: Arc<Mutex<RegisteredMetrics>>,
+    ) -> Agent {
         let assignments = Arc::new(Mutex::new(Assignments::new()));
         let quiescing = Arc::new(Mutex::new(HashSet::new()));
         Agent {
@@ -423,7 +426,10 @@ fn post(agent: Agent, mut state: State) -> Box<HandlerFuture> {
                             &state,
                             StatusCode::BAD_REQUEST,
                         );
-                        agent.metrics.lock().unwrap()
+                        agent
+                            .metrics
+                            .lock()
+                            .unwrap()
                             .error_count
                             .with_label_values(&[&e])
                             .inc();
@@ -437,7 +443,10 @@ fn post(agent: Agent, mut state: State) -> Box<HandlerFuture> {
                 if agent.assignment_exists(&uuid) {
                     let res =
                         create_empty_response(&state, StatusCode::CONFLICT);
-                    agent.metrics.lock().unwrap()
+                    agent
+                        .metrics
+                        .lock()
+                        .unwrap()
                         .error_count
                         .with_label_values(&["conflict"])
                         .inc();
@@ -479,12 +488,15 @@ fn post(agent: Agent, mut state: State) -> Box<HandlerFuture> {
             }
 
             Err(e) => {
-                agent.metrics.lock().unwrap()
+                agent
+                    .metrics
+                    .lock()
+                    .unwrap()
                     .error_count
                     .with_label_values(&[&e.to_string()])
                     .inc();
                 future::err((state, e.into_handler_error()))
-            },
+            }
         });
     Box::new(f)
 }
@@ -582,7 +594,9 @@ impl Handler for Agent {
     fn handle(self, state: State) -> Box<HandlerFuture> {
         let method = Method::borrow_from(&state);
 
-        self.metrics.lock().unwrap()
+        self.metrics
+            .lock()
+            .unwrap()
             .request_count
             .with_label_values(&[method.as_str()])
             .inc();
@@ -807,9 +821,7 @@ fn process_assignment(
             TaskStatus::Complete => tmp.stats.complete += 1,
             TaskStatus::Failed(e) => {
                 if let Some(m) = metrics.clone() {
-                    m.error_count
-                        .with_label_values(&[&e.to_string()])
-                        .inc();
+                    m.error_count.with_label_values(&[&e.to_string()]).inc();
                 }
                 tmp.stats.complete += 1;
                 tmp.stats.failed += 1;
@@ -844,20 +856,24 @@ pub fn router(f: fn(&mut Task)) -> Router {
         let metrics_host = config.host.clone();
         let metrics_port = config.port;
 
-        thread::spawn(move || {
-           metrics::start_server(
-                &metrics_host,
-                metrics_port,
-                &slog_scope::logger(),
-            )
-        });
+        let ms = thread::Builder::new()
+            .name(String::from("Rebalancer Metrics"))
+            .spawn(move || {
+                metrics::start_server(
+                    &metrics_host,
+                    metrics_port,
+                    &slog_scope::logger(),
+                )
+            });
+
+        assert!(ms.is_ok());
 
         let (w, r): (mpsc::Sender<String>, mpsc::Receiver<String>) =
             mpsc::channel();
         let tx = Arc::new(Mutex::new(w));
         let rx = Arc::new(Mutex::new(r));
-        let agent = Agent::new(tx.clone(),
-            Arc::new(Mutex::new(metrics.clone())));
+        let agent =
+            Agent::new(tx.clone(), Arc::new(Mutex::new(metrics.clone())));
         let pool = ThreadPool::new(1);
 
         create_dir(REBALANCER_SCHEDULED_DIR);
@@ -876,7 +892,12 @@ pub fn router(f: fn(&mut Task)) -> Router {
                         return;
                     }
                 };
-                process_assignment(Arc::clone(&assignments), uuid, f, m.clone());
+                process_assignment(
+                    Arc::clone(&assignments),
+                    uuid,
+                    f,
+                    m.clone(),
+                );
             });
         }
 
