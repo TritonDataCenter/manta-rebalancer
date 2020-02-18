@@ -189,7 +189,7 @@ fn fetch_sharks(host: &str) -> Vec<StorageNode> {
     let mut new_sharks = vec![];
     let mut done = false;
     let mut after_id = String::new();
-    let base_url = format!("http://{}/poll", host);
+    let base_url = format!("http://{}/storagenodes", host);
     let limit = 100;
 
     while !done {
