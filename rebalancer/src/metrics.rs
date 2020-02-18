@@ -19,7 +19,7 @@ use serde_derive::Deserialize;
 use slog::{error, info, Logger};
 
 #[derive(Clone, Deserialize)]
-pub struct MetricLabels {
+pub struct ConfigAgentMetrics {
     /// Rebalancer metrics server address
     pub host: String,
     /// Rebalancer metrics server port
@@ -29,7 +29,7 @@ pub struct MetricLabels {
     pub server: String,
 }
 
-impl Default for MetricLabels {
+impl Default for ConfigAgentMetrics {
     fn default() -> Self {
         Self {
             host: "127.0.0.1".into(),
@@ -64,12 +64,12 @@ impl RegisteredMetrics {
 
 // Given the service configuration information, create (i.e. register) the
 // desired metrics with prometheus.
-pub fn register_metrics(labels: &MetricLabels) -> RegisteredMetrics {
+pub fn register_metrics(labels: &ConfigAgentMetrics) -> RegisteredMetrics {
     let hostname = gethostname()
         .into_string()
         .unwrap_or_else(|_| String::from("unknown"));
 
-    // Convert our MetricLabels structure to a HashMap since that is what
+    // Convert our ConfigAgentMetrics structure to a HashMap since that is what
     // Prometheus requires when creating a new metric with labels.  It is a
     // Manta-wide convention to require the (below) labels at a minimum as a
     // part of all metrics.  Other labels can be added, but these are required.

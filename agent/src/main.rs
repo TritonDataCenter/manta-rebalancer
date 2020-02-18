@@ -52,7 +52,7 @@ fn main() {
     // that we process which will dictate the network on which to listen.  It is
     // worth mentioning that this will likely also be the case for the agent
     // port.
-    Agent::run("0.0.0.0:7878");
+    Agent::run(Some("config.json"));
 }
 
 #[cfg(test)]
@@ -68,7 +68,7 @@ pub mod agenttests {
     use rebalancer::agent_test_util::{get_progress, send_assignment_impl};
     use rebalancer::common::{ObjectSkippedReason, Task, TaskStatus};
     use rebalancer::libagent::{
-        process_task, router, AgentAssignmentState, Assignment,
+        process_task, router, AgentAssignmentState, Assignment, AgentConfig,
     };
     use rebalancer::util;
     use reqwest::StatusCode;
@@ -83,7 +83,8 @@ pub mod agenttests {
     lazy_static! {
         static ref INITIALIZED: Mutex<bool> = Mutex::new(false);
         static ref TEST_SERVER: Mutex<TestServer> =
-            Mutex::new(TestServer::new(router(process_task)).unwrap());
+            Mutex::new(TestServer::new(router(process_task,
+                AgentConfig::default())).unwrap());
     }
 
     // Very basic web server used to serve out files upon request.  This is

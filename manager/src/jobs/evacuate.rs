@@ -2728,7 +2728,8 @@ mod tests {
     use quickcheck::{Arbitrary, StdThreadGen};
     use quickcheck_helpers::random::string as random_string;
     use rand::Rng;
-    use rebalancer::libagent::{router as agent_router, AgentAssignmentStats};
+    use rebalancer::libagent::{
+        router as agent_router, AgentAssignmentStats, AgentConfig};
     use rebalancer::util;
 
     lazy_static! {
@@ -2743,6 +2744,8 @@ mod tests {
 
         thread::spawn(move || {
             let _guard = util::init_global_logger();
+            let config = AgentConfig::default();
+            let addr = format!("{}:{}", config.server.host, config.server.port);
 
             // The reason that we call gotham::start() to start the agent as
             // opposed to something like TestServer::new() in this case is
@@ -2754,8 +2757,8 @@ mod tests {
             // If or when it does, we can use gotham's TestServer as opposed to
             // explicitly calling gotham::start().
             gotham::start(
-                "127.0.0.1:7878",
-                agent_router(process_task_always_pass),
+                addr,
+                agent_router(process_task_always_pass, config)
             );
         });
 

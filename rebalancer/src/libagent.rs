@@ -8,7 +8,7 @@
  * Copyright 2020 Joyent, Inc.
  */
 use std::collections::{HashMap, HashSet};
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::fs::File;
 use std::path::Path;
@@ -31,7 +31,7 @@ use libmanta::moray::MantaObjectShark;
 
 use crate::common::{AssignmentPayload, ObjectSkippedReason, Task, TaskStatus};
 use crate::metrics;
-use crate::metrics::RegisteredMetrics;
+use crate::metrics::{ConfigAgentMetrics, RegisteredMetrics};
 
 use reqwest::StatusCode;
 use rusqlite;
@@ -44,6 +44,29 @@ type Assignments = HashMap<String, Arc<RwLock<Assignment>>>;
 
 static REBALANCER_SCHEDULED_DIR: &str = "/var/tmp/rebalancer/scheduled";
 static REBALANCER_FINISHED_DIR: &str = "/var/tmp/rebalancer/completed";
+
+#[derive(Clone, Default, Deserialize)]
+pub struct AgentConfig {
+    pub server: ConfigServer,
+    pub metrics: ConfigAgentMetrics,
+}
+
+#[derive(Clone, Deserialize)]
+pub struct ConfigServer {
+    // The IP address on which the agent should listen for incoming connections.
+    pub host: String,
+    // The port that the agent  should listen on for incoming connections.
+    pub port: u16,
+}
+
+impl Default for ConfigServer {
+    fn default() -> Self {
+        Self {
+            host: "0.0.0.0".into(),
+            port: 7889,
+        }
+    }
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum AgentAssignmentState {
@@ -100,9 +123,14 @@ impl Agent {
         }
     }
 
-    pub fn run(addr: &'static str) {
+    pub fn run(cfg_path: Option<&str>) {
+        let config = match cfg_path {
+            Some(c) => read_file(c),
+            None =>  AgentConfig::default(),
+        };
+        let addr = format!("{}:{}", config.server.host, config.server.port); 
         info!("Listening for requests at {}", addr);
-        gotham::start(addr, router(process_task));
+        gotham::start(addr, router(process_task, config));
     }
 
     // Given an assignment uuid, check for its presence in both the "scheduled"
@@ -846,15 +874,31 @@ fn process_assignment(
     assignment_complete(assignments, uuid);
 }
 
+pub fn read_file<F: AsRef<OsStr> + ?Sized>(f: &F) -> AgentConfig {
+    let s = match fs::read(Path::new(&f)) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Failed to read config file: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    let config = toml::from_slice(&s).unwrap_or_else(|e| {
+        eprintln!("Failed to parse config file: {}", e);
+        std::process::exit(1);
+    });
+
+    config
+}
+
 // Create a `Router`.  This function is public because it will have external
 // consumers, namely the rebalancer zone test framework.
 #[allow(clippy::many_single_char_names)]
-pub fn router(f: fn(&mut Task)) -> Router {
+pub fn router(f: fn(&mut Task), config: AgentConfig) -> Router {
     build_simple_router(|route| {
-        let config = metrics::MetricLabels::default();
-        let metrics = metrics::register_metrics(&config);
-        let metrics_host = config.host.clone();
-        let metrics_port = config.port;
+        let metrics = metrics::register_metrics(&config.metrics);
+        let metrics_host = config.metrics.host.clone();
+        let metrics_port = config.metrics.port;
 
         let ms = thread::Builder::new()
             .name(String::from("Rebalancer Metrics"))
