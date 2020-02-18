@@ -413,6 +413,26 @@ pub struct EvacuateJob {
     pub max_objects: Option<u32>,
 }
 
+// XXX: Temporary until we know the type of the SNAPLINKS_CLEANUP_REQUIRED
+// value.
+fn value_is_truthy(value: &Value) -> bool {
+    let value = value.to_owned();
+    match value {
+        Value::Null => false,
+        Value::Bool(b) => b,
+        Value::Number(n) => {
+            match n.as_u64() {
+                Some(num) => num != 0,
+                None => {
+                    n.as_i64().expect("pos or neg") != 0
+                }
+            }
+        },
+        Value::String(s) => s.len() > 0 && &s != "0" && &s != "false",
+        Value::Array(a) => a.len() > 0,
+        Value::Object(o) => o.len() > 0,
+    }
+}
 impl EvacuateJob {
     /// Create a new EvacuateJob instance.
     /// As part of this initialization also create a new PgConnection.
@@ -462,7 +482,11 @@ impl EvacuateJob {
     fn validate(&mut self, config: &Config) -> Result<(), Error>{
         let log = slog_scope::logger();
         let sapi = sapi::SAPI::new(&config.sapi_url, 60, log);
-        let applications = sapi.get_application_by_name("manta")?;
+        let applications = sapi.get_application_by_name("manta").map_err(|e| {
+            InternalError::new(
+                Some(InternalErrorCode::JobValidationError),
+                e.description())
+        })?;
 
         if applications.len() != 1 {
             let err_msg = format!(
@@ -474,37 +498,46 @@ impl EvacuateJob {
                 err_msg).into());
         }
 
-        let version_validation = applications
-            .first()
+        let version_validation = applications.first()
             .ok_or("Missing manta application".to_string())
             .and_then(|application| {
-                application
-                    .metadata
-                    .as_ref()
-                    .ok_or("Missing application metadata".to_string())
+                application.metadata.as_ref().ok_or("Missing application metadata".to_string())
             })
             .and_then(|metadata| {
-                metadata
-                    .get("MANTAV")
+                metadata.get("MANTAV")
                     .ok_or("Missing MantaV metadata entry".to_string())
-                    .and_then()
-            })
-            .and_then(|version| {
-                version
-                    .as_u64()
-                    .ok_or("Version is not a number".to_string())
-            })
-            .and_then(|ver| {
-                if ver < 2 {
-                    let msg = format!(
-                        "Rebalancer requires manta version 2 or \
-                     greater.  Found version {}",
-                        ver
-                    );
-                    Err(msg)
-                } else {
-                    Ok(())
-                }
+                    .and_then(|version| {
+                        version.as_u64().ok_or(
+                            "Version is not a positive number".to_string())
+                    })
+                    .and_then(|ver| {
+                        if ver < 2 {
+                            let msg = format!("Rebalancer requires manta version 2 or \
+                            greater.  Found version {}", ver);
+                            Err(msg)
+                        } else {
+                            if let Some(cleanup_req) = metadata
+                                .get("SNAPLINK_CLEANUP_REQUIRED") {
+
+                                cleanup_req
+                                    .as_bool()
+                                    .ok_or("SNAPLINK_CLEANUP_REQUIRED set to \
+                                    a non-boolean value")
+                                    .and_then(|c_req| {
+                                        if c_req {
+                                            Err("Snaplink clean up is required")
+                                        } else {
+                                            Ok(())
+                                        }
+                                    })
+                            } else {
+                                // We have already confirmed we are in
+                                // mantav2. If the SNAPLINK_CLEANUP_REQUIRED
+                                // metadata variable is missing all together
+                                Ok(())
+                            }
+                        }
+                    })
             });
 
         if let Err(error_msg) = version_validation {
@@ -512,8 +545,6 @@ impl EvacuateJob {
                 Some(InternalErrorCode::JobValidationError),
                 error_msg).into());
         }
-
-
 
         let from_shark = moray_client::get_manta_object_shark(
             &self.from_shark.manta_storage_id,
