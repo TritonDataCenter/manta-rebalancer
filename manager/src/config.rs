@@ -30,8 +30,8 @@ pub struct Shard {
 #[derive(Deserialize, Default, Debug, Clone)]
 pub struct Config {
     pub domain_name: String,
-    pub sapi_url: String,
     pub shards: Vec<Shard>,
+    pub snaplinks_cleanup_required: Option<bool>,
 }
 
 impl Config {

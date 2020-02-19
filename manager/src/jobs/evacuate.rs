@@ -498,6 +498,7 @@ impl EvacuateJob {
                 err_msg).into());
         }
 
+        /*
         let version_validation = applications.first()
             .ok_or("Missing manta application".to_string())
             .and_then(|application| {
@@ -545,6 +546,7 @@ impl EvacuateJob {
                 Some(InternalErrorCode::JobValidationError),
                 error_msg).into());
         }
+        */
 
         let from_shark = moray_client::get_manta_object_shark(
             &self.from_shark.manta_storage_id,

@@ -17,13 +17,15 @@ extern crate serde_derive;
 #[macro_use]
 extern crate rebalancer;
 
-use manager::config::{self, Config};
+use manager::config::Config;
 use manager::jobs::status::StatusError;
 use manager::jobs::{self, JobBuilder, JobDbEntry};
 use rebalancer::util;
 
 use std::collections::HashMap;
 use std::error::Error;
+use std::sync::Arc;
+use std::thread::{self, JoinHandle};
 
 use clap::{App, Arg, ArgMatches};
 use crossbeam_channel;
@@ -206,7 +208,7 @@ struct EvacuateJobPayload {
 #[derive(Clone)]
 struct JobCreateHandler {
     tx: crossbeam_channel::Sender<jobs::Job>,
-    config: Config,
+    config_file: Option<String>,
 }
 
 impl NewHandler for JobCreateHandler {
@@ -220,8 +222,56 @@ impl NewHandler for JobCreateHandler {
 impl Handler for JobCreateHandler {
     fn handle(self, mut state: State) -> Box<HandlerFuture> {
         info!("Post Job Request");
-        let job_builder = JobBuilder::new(self.config.clone());
 
+        // We need to determine if snaplinks are in play or not.  Because
+        // snaplinks could be cleaned up between the time when rebalancer
+        // started and when a user attempts to create a job, we need
+        // to know the latest value at job creation time.  So we essentially
+        // have two options.  Either we start a job on the thread pool and have
+        // that job check for SNAPLINK_CLEANUP_REQUIRED via a call to SAPI, and
+        // if so, fail the job... or we parse the config file for every job.
+        // The advantage of the later (as implemented below) is that we return
+        // failure directly to the user without starting the job (which will
+        // simply fail).
+        let config_file = self.config_file.as_ref().map(|cf| &**cf);
+        let config = match Config::parse_config(config_file) {
+            Ok(c) => c,
+            Err(e) => {
+                error!("Error parsing config: {}", e);
+
+                let error = invalid_server_error(
+                    &state,
+                    String::from(e.description()),
+                );
+                return Box::new(future::ok((state, error)));
+            }
+        };
+
+        // If snaplinks are still in play then we immediately return failure.
+        if let Some(sl_cleanup_req) = config.snaplinks_cleanup_required {
+            if sl_cleanup_req {
+                let error = invalid_server_error(
+                    &state,
+                    String::from("Snaplinks Cleanup Required")),
+                );
+                return Box::new(future::ok((state, error)));
+            }
+        }
+
+        /*
+        let config = Config::parse_config(self.config_file)
+            .map_err(|e| {
+                error!("Error parsing config: {}", e);
+
+                let error = invalid_server_error(
+                    &state,
+                    String::from(e.description()),
+                );
+                Box::new(future::ok((state, error)))
+            })?;
+        */
+
+        let job_builder = JobBuilder::new(config.clone());
         let f =
             Body::take_from(&mut state).concat2().then(
                 move |body| match body {
@@ -269,7 +319,7 @@ impl Handler for JobCreateHandler {
                 let job = match job_builder
                     .evacuate(
                         evac_payload.from_shark,
-                        &self.config.domain_name,
+                        &config.domain_name,
                         max_objects,
                     )
                     .commit()
@@ -303,9 +353,12 @@ impl Handler for JobCreateHandler {
     }
 }
 
-fn router(config: Config) -> Router {
+fn router<S>(config_file: Option<S>) -> Router
+    where S: Into<String>
+{
     let (tx, rx) = crossbeam_channel::bounded(5);
-    let job_create_handler = JobCreateHandler { tx, config };
+    let config_file = config_file.map(|s| s.into());
+    let job_create_handler = JobCreateHandler { tx, config_file };
 
     let pool = ThreadPool::new(THREAD_COUNT);
     for _ in 0..THREAD_COUNT {
@@ -362,21 +415,49 @@ fn main() {
         )
         .get_matches();
 
-    let config_file = matches.value_of("config_file");
+    let config_file= matches.value_of("config_file");
 
-    let config = config::Config::parse_config(config_file)
+    let config = Config::parse_config(config_file)
         .map_err(|e| {
             error!("Error parsing config: {}", e);
             std::process::exit(1);
         })
         .unwrap();
 
+    let config = Arc::new(config);
     if let Err(e) = jobs::create_job_database() {
         error!("Error creating Jobs database: {}", e);
         return;
     }
 
-    gotham::start(addr, router(config))
+    // start signal handler
+    // barrier wait
+    gotham::start(addr, router(Arc::clone(&config)))
+}
+
+fn config_update_signal_handler(tx: crossbeam_channel::Sender<()>)
+    -> JoinHandle<()>
+{
+    thread::Builder::new()
+        .name(String::from("config update signal handler"))
+        .spawn(move || {
+            // TODO: different signal
+            let signals = Signals::new(&[signal_hook::SIGTERM])
+                .expect("register signals");
+            for signal in signals.forever() {
+                match signal {
+                    signal_hook::SIGTERM => {
+                        trace!("Signal Received");
+                        // XXX: Should use try_send() here and check the error.
+                        if tx.send(()).is_err() {
+                            warn!("config_update listener is closed")
+                            break;
+                        }
+                    }
+                    _ => unreachable!(),
+                }
+            }
+        })
 }
 
 #[cfg(test)]
@@ -436,7 +517,8 @@ mod tests {
         let config =
             Config::parse_config(Some("src/config.json")).expect("config");
         let test_server =
-            TestServer::new(router(config.clone())).expect("test server");
+            TestServer::new(router(Some("src/config.json")))
+                .expect("test server");
 
         // Create a Job manually so that we know one exists regardless of the
         // ability of this API to create one, or the order in which tests are
@@ -470,9 +552,8 @@ mod tests {
     #[test]
     fn post_test() {
         unit_test_init();
-        let config =
-            Config::parse_config(Some("src/config.json")).expect("config");
-        let test_server = TestServer::new(router(config)).expect("test server");
+        let test_server = TestServer::new(router(Some("src/config.json")))
+            .expect("test server");
         let job_payload = JobPayload::Evacuate(EvacuateJobPayload {
             from_shark: String::from("fake_storage_id"),
             max_objects: Some(10),
