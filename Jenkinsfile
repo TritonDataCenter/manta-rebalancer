@@ -44,6 +44,18 @@ pipeline {
                joyBuildImageAndUpload()
            }
         }
+        stage('mako') {
+            // This only works for master branches. For development builds
+            // of the rebalancer, the developer should trigger a development
+            // branch build of mako with AGENT_PREBUILT_AGENT_BRANCH pointing
+            // at the corresponding development branch of the rebalancer.
+            when {
+                branch 'master'
+            }
+            steps {
+                build(job:'joyent-org/manta-mako/master', wait: false)
+            }
+        }
     }
 
     post {
