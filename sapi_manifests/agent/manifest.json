@@ -1,0 +1,5 @@
+{
+    "name": "rebalancer-agent",
+    "path": "/opt/smartdc/rebalancer-agent/etc/config.toml",
+    "master": true
+}
