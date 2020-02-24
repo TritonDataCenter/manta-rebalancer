@@ -210,25 +210,24 @@ parts.
 
 ```
 {
-  "action": {
-    "Evacuate": {
-      "from_shark": {
-        "datacenter": "ruidc0",
-        "manta_storage_id": "1.stor"
-      },
-      "domain_name": "fake.joyent.us",
-      "max_objects": null
+    "action": "evacuate",
+    "params": {
+        "from_shark": "1.stor"
     }
-  }
 }
 ```
 
 | Param      | Type                    | Description                                              |
 | ---------- | ----------------------- | -------------------------------------------------------- |
-| Evacuate(EvacuateJobPayload)  | [JobActionPayload](https://github.com/joyent/manta-rebalancer/blob/c61fdf438306a183b09337c738f1fb530b929749/src/manager.rs#L177-L180) | Contains all information required to perform an evacuation action. |
-| from_shark | [MantaObjectShark](https://github.com/joyent/rust-libmanta/blob/864eadcb0ae2e7442ab61abc6243e64aeb754cbe/src/moray.rs#L119-L123) | Part of the evacuate job payload containing information about the shark to be evacuated. |
-| domain_name | String (optional) | Domain name. |
-| max_objects | u32 (optional) | Maximum number of objects to be processed (i.e. evacuated). |
+| action | [JobAction](https://github.com/joyent/manta-rebalancer/blob/b5fe811bd53813e4051aef282cf80853fb5af434/manager/src/jobs/mod.rs#L208-L211) | The action that this job will take. |
+| params | Object | Parameters unique to each job action |
+
+
+#### Evacuate Job Parameters
+| Param      | Type                    | Description                                              |
+| ---------- | ----------------------- | -------------------------------------------------------- |
+| from_shark | String | The hostname of the shark to evacuate objects from. |
+
 
 ### Responses
 | Code | Description                                             |
