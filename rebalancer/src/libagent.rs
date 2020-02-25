@@ -792,7 +792,6 @@ fn process_assignment(
     assignments: Arc<Mutex<Assignments>>,
     uuid: String,
     f: fn(&mut Task),
-    //metrics: Option<RegisteredMetrics>,
     metrics: Option<HashMap<String, Metrics>>,
 ) {
     // If we are unsuccessful in loading the assignment from disk, there is
@@ -885,8 +884,6 @@ pub fn read_file<F: AsRef<OsStr> + ?Sized>(f: &F) -> AgentConfig {
         eprintln!("Failed to parse config file: {}", e);
         std::process::exit(1);
     })
-
-    // config
 }
 
 // Create a `Router`.  This function is public because it will have external
