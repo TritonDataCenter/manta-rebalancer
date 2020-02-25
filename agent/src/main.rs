@@ -52,7 +52,7 @@ fn main() {
     // that we process which will dictate the network on which to listen.  It is
     // worth mentioning that this will likely also be the case for the agent
     // port.
-    Agent::run(Some("config.json"));
+    Agent::run(Some("/opt/smartdc/rebalancer-agent/etc/config.toml"));
 }
 
 #[cfg(test)]
