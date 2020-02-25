@@ -891,7 +891,7 @@ pub fn read_file<F: AsRef<OsStr> + ?Sized>(f: &F) -> AgentConfig {
 #[allow(clippy::many_single_char_names)]
 pub fn router(f: fn(&mut Task), config: AgentConfig) -> Router {
     build_simple_router(|route| {
-        let metrics = metrics::register_metrics(&config.metrics);
+        let agent_metrics = metrics::register_metrics(&config.metrics);
         let metrics_host = config.metrics.host.clone();
         let metrics_port = config.metrics.port;
 
@@ -912,7 +912,7 @@ pub fn router(f: fn(&mut Task), config: AgentConfig) -> Router {
         let tx = Arc::new(Mutex::new(w));
         let rx = Arc::new(Mutex::new(r));
         let agent =
-            Agent::new(tx.clone(), Arc::new(Mutex::new(metrics.clone())));
+            Agent::new(tx.clone(), Arc::new(Mutex::new(agent_metrics.clone())));
         let pool = ThreadPool::new(1);
 
         create_dir(REBALANCER_SCHEDULED_DIR);
@@ -921,7 +921,7 @@ pub fn router(f: fn(&mut Task), config: AgentConfig) -> Router {
         for _ in 0..1 {
             let rx = Arc::clone(&rx);
             let assignments = Arc::clone(&agent.assignments);
-            let m = Some(metrics.clone());
+            let m = Some(agent_metrics.clone());
 
             pool.execute(move || loop {
                 let uuid = match rx.lock().unwrap().recv() {
