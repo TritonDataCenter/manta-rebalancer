@@ -51,7 +51,6 @@ pub enum Metrics {
     MetricsCounterVec(CounterVec),
 }
 
-//pub fn counter_inc(metrics: HashMap<String, Metrics>, key: &str) {
 pub fn counter_inc<S: ::std::hash::BuildHasher>(
     metrics: HashMap<String, Metrics, S>,
     key: &str,
