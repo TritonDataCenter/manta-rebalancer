@@ -8,7 +8,6 @@ members = [
 [profile.dev]
 panic = "abort"
 
-
 [patch.crates-io]
 # We require the use of certain constructs which unfortunately were not
 # included in the latest released version of diesel (1.4.3).  We are hopeful
