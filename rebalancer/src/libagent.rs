@@ -31,7 +31,7 @@ use libmanta::moray::MantaObjectShark;
 
 use crate::common::{AssignmentPayload, ObjectSkippedReason, Task, TaskStatus};
 use crate::metrics;
-use crate::metrics::{ConfigAgentMetrics, RegisteredMetrics};
+use crate::metrics::{counter_inc, counter_vec_inc, ConfigMetrics, Metrics};
 
 use reqwest::StatusCode;
 use rusqlite;
@@ -48,7 +48,7 @@ static REBALANCER_FINISHED_DIR: &str = "/var/tmp/rebalancer/completed";
 #[derive(Clone, Default, Deserialize)]
 pub struct AgentConfig {
     pub server: ConfigServer,
-    pub metrics: ConfigAgentMetrics,
+    pub metrics: ConfigMetrics,
 }
 
 #[derive(Clone, Deserialize)]
@@ -63,7 +63,7 @@ impl Default for ConfigServer {
     fn default() -> Self {
         Self {
             host: "0.0.0.0".into(),
-            port: 7889,
+            port: 7878,
         }
     }
 }
@@ -105,13 +105,13 @@ pub struct Agent {
     assignments: Arc<Mutex<Assignments>>,
     quiescing: Arc<Mutex<HashSet<String>>>,
     tx: Arc<Mutex<mpsc::Sender<String>>>,
-    metrics: Arc<Mutex<RegisteredMetrics>>,
+    metrics: Arc<Mutex<HashMap<String, Metrics>>>,
 }
 
 impl Agent {
     pub fn new(
         tx: Arc<Mutex<mpsc::Sender<String>>>,
-        metrics: Arc<Mutex<RegisteredMetrics>>,
+        metrics: Arc<Mutex<HashMap<String, Metrics>>>,
     ) -> Agent {
         let assignments = Arc::new(Mutex::new(Assignments::new()));
         let quiescing = Arc::new(Mutex::new(HashSet::new()));
@@ -126,9 +126,9 @@ impl Agent {
     pub fn run(cfg_path: Option<&str>) {
         let config = match cfg_path {
             Some(c) => read_file(c),
-            None =>  AgentConfig::default(),
+            None => AgentConfig::default(),
         };
-        let addr = format!("{}:{}", config.server.host, config.server.port); 
+        let addr = format!("{}:{}", config.server.host, config.server.port);
         info!("Listening for requests at {}", addr);
         gotham::start(addr, router(process_task, config));
     }
@@ -454,13 +454,12 @@ fn post(agent: Agent, mut state: State) -> Box<HandlerFuture> {
                             &state,
                             StatusCode::BAD_REQUEST,
                         );
-                        agent
-                            .metrics
-                            .lock()
-                            .unwrap()
-                            .error_count
-                            .with_label_values(&[&e])
-                            .inc();
+                        counter_vec_inc(
+                            agent.metrics.lock().unwrap().clone(),
+                            "error_count",
+                            &e,
+                        );
+
                         return future::ok((state, res));
                     }
                 };
@@ -471,13 +470,13 @@ fn post(agent: Agent, mut state: State) -> Box<HandlerFuture> {
                 if agent.assignment_exists(&uuid) {
                     let res =
                         create_empty_response(&state, StatusCode::CONFLICT);
-                    agent
-                        .metrics
-                        .lock()
-                        .unwrap()
-                        .error_count
-                        .with_label_values(&["conflict"])
-                        .inc();
+
+                    counter_vec_inc(
+                        agent.metrics.lock().unwrap().clone(),
+                        "error_count",
+                        "conflict",
+                    );
+
                     return future::ok((state, res));
                 }
 
@@ -516,13 +515,12 @@ fn post(agent: Agent, mut state: State) -> Box<HandlerFuture> {
             }
 
             Err(e) => {
-                agent
-                    .metrics
-                    .lock()
-                    .unwrap()
-                    .error_count
-                    .with_label_values(&[&e.to_string()])
-                    .inc();
+                counter_vec_inc(
+                    agent.metrics.lock().unwrap().clone(),
+                    "error_count",
+                    &e.to_string(),
+                );
+
                 future::err((state, e.into_handler_error()))
             }
         });
@@ -622,12 +620,11 @@ impl Handler for Agent {
     fn handle(self, state: State) -> Box<HandlerFuture> {
         let method = Method::borrow_from(&state);
 
-        self.metrics
-            .lock()
-            .unwrap()
-            .request_count
-            .with_label_values(&[method.as_str()])
-            .inc();
+        counter_vec_inc(
+            self.metrics.lock().unwrap().clone(),
+            "request_count",
+            method.as_str(),
+        );
 
         // If we are here, then the method must either be
         // POST or GET.  It can not be anything else.
@@ -795,7 +792,8 @@ fn process_assignment(
     assignments: Arc<Mutex<Assignments>>,
     uuid: String,
     f: fn(&mut Task),
-    metrics: Option<RegisteredMetrics>,
+    //metrics: Option<RegisteredMetrics>,
+    metrics: Option<HashMap<String, Metrics>>,
 ) {
     // If we are unsuccessful in loading the assignment from disk, there is
     // nothing left to do here, other than return.
@@ -839,7 +837,7 @@ fn process_assignment(
         // Update the total number of objects that have been processes, whether
         // successful or not.
         if let Some(m) = metrics.clone() {
-            m.object_count.inc();
+            counter_inc(m, "object_count");
         }
 
         // Update our stats.
@@ -849,7 +847,7 @@ fn process_assignment(
             TaskStatus::Complete => tmp.stats.complete += 1,
             TaskStatus::Failed(e) => {
                 if let Some(m) = metrics.clone() {
-                    m.error_count.with_label_values(&[&e.to_string()]).inc();
+                    counter_vec_inc(m, "error_count", &e.to_string());
                 }
                 tmp.stats.complete += 1;
                 tmp.stats.failed += 1;
@@ -883,12 +881,12 @@ pub fn read_file<F: AsRef<OsStr> + ?Sized>(f: &F) -> AgentConfig {
         }
     };
 
-    let config = toml::from_slice(&s).unwrap_or_else(|e| {
+    toml::from_slice(&s).unwrap_or_else(|e| {
         eprintln!("Failed to parse config file: {}", e);
         std::process::exit(1);
-    });
+    })
 
-    config
+    // config
 }
 
 // Create a `Router`.  This function is public because it will have external

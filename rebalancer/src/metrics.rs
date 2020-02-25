@@ -19,7 +19,7 @@ use serde_derive::Deserialize;
 use slog::{error, info, Logger};
 
 #[derive(Clone, Deserialize)]
-pub struct ConfigAgentMetrics {
+pub struct ConfigMetrics {
     /// Rebalancer metrics server address
     pub host: String,
     /// Rebalancer metrics server port
@@ -29,11 +29,11 @@ pub struct ConfigAgentMetrics {
     pub server: String,
 }
 
-impl Default for ConfigAgentMetrics {
+impl Default for ConfigMetrics {
     fn default() -> Self {
         Self {
             host: "127.0.0.1".into(),
-            port: 3020,
+            port: 8878,
             datacenter: "development".into(),
             service: "1.rebalancer.localhost".into(),
             server: "127.0.0.1".into(),
@@ -41,33 +41,54 @@ impl Default for ConfigAgentMetrics {
     }
 }
 
+// This enum exists so that we can take various prometheus counter types as the
+// same data type.  This is necessary so that we can store all metrics that we
+// create in the same hash map regardless of the type of counter.  Note, not
+// all prometheus counters are enumerated below.  Add them as needed.
 #[derive(Clone)]
-pub struct RegisteredMetrics {
-    pub request_count: CounterVec,
-    pub object_count: Counter,
-    pub error_count: CounterVec,
+pub enum Metrics {
+    MetricsCounter(Counter),
+    MetricsCounterVec(CounterVec),
 }
 
-impl RegisteredMetrics {
-    fn new(
-        request_count: CounterVec,
-        object_count: Counter,
-        error_count: CounterVec,
-    ) -> Self {
-        RegisteredMetrics {
-            request_count,
-            object_count,
-            error_count,
+//pub fn counter_inc(metrics: HashMap<String, Metrics>, key: &str) {
+pub fn counter_inc<S: ::std::hash::BuildHasher>(
+    metrics: HashMap<String, Metrics, S>,
+    key: &str,
+) {
+    match metrics.get(key) {
+        Some(metric) => {
+            if let Metrics::MetricsCounter(c) = metric {
+                c.inc();
+            }
         }
+        None => error!(slog_scope::logger(), "Invalid metric: {}", key),
+    }
+}
+
+pub fn counter_vec_inc<S: ::std::hash::BuildHasher>(
+    metrics: HashMap<String, Metrics, S>,
+    key: &str,
+    bucket: &str,
+) {
+    match metrics.get(key) {
+        Some(metric) => {
+            if let Metrics::MetricsCounterVec(c) = metric {
+                c.with_label_values(&[bucket]).inc();
+            }
+        }
+        None => error!(slog_scope::logger(), "Invalid metric: {}", key),
     }
 }
 
 // Given the service configuration information, create (i.e. register) the
 // desired metrics with prometheus.
-pub fn register_metrics(labels: &ConfigAgentMetrics) -> RegisteredMetrics {
+pub fn register_metrics(labels: &ConfigMetrics) -> HashMap<String, Metrics> {
     let hostname = gethostname()
         .into_string()
         .unwrap_or_else(|_| String::from("unknown"));
+
+    let mut metrics = HashMap::new();
 
     // Convert our ConfigAgentMetrics structure to a HashMap since that is what
     // Prometheus requires when creating a new metric with labels.  It is a
@@ -91,6 +112,11 @@ pub fn register_metrics(labels: &ConfigAgentMetrics) -> RegisteredMetrics {
     )
     .expect("failed to register incoming_request_count counter");
 
+    metrics.insert(
+        "request_count".to_string(),
+        Metrics::MetricsCounterVec(request_counter.clone()),
+    );
+
     // The object counter maintains a count of the total number of objects that
     // have been processed (whether successfully or not).
     let object_counter = register_counter!(opts!(
@@ -99,6 +125,11 @@ pub fn register_metrics(labels: &ConfigAgentMetrics) -> RegisteredMetrics {
     )
     .const_labels(const_labels.clone()))
     .expect("failed to register object_count counter");
+
+    metrics.insert(
+        "object_count".to_string(),
+        Metrics::MetricsCounter(object_counter.clone()),
+    );
 
     // The error counter maintains a list of errors encountered, broken down by
     // the type of error observed.  Note that in order to avoid a polynomial
@@ -113,7 +144,12 @@ pub fn register_metrics(labels: &ConfigAgentMetrics) -> RegisteredMetrics {
     )
     .expect("failed to register error_count counter");
 
-    RegisteredMetrics::new(request_counter, object_counter, error_counter)
+    metrics.insert(
+        "error_count".to_string(),
+        Metrics::MetricsCounterVec(error_counter.clone()),
+    );
+
+    metrics
 }
 
 // Start the metrics server on the address and port specified by the caller.

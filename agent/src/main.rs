@@ -68,7 +68,7 @@ pub mod agenttests {
     use rebalancer::agent_test_util::{get_progress, send_assignment_impl};
     use rebalancer::common::{ObjectSkippedReason, Task, TaskStatus};
     use rebalancer::libagent::{
-        process_task, router, AgentAssignmentState, Assignment, AgentConfig,
+        process_task, router, AgentAssignmentState, AgentConfig, Assignment,
     };
     use rebalancer::util;
     use reqwest::StatusCode;
@@ -82,9 +82,10 @@ pub mod agenttests {
 
     lazy_static! {
         static ref INITIALIZED: Mutex<bool> = Mutex::new(false);
-        static ref TEST_SERVER: Mutex<TestServer> =
-            Mutex::new(TestServer::new(router(process_task,
-                AgentConfig::default())).unwrap());
+        static ref TEST_SERVER: Mutex<TestServer> = Mutex::new(
+            TestServer::new(router(process_task, AgentConfig::default()))
+                .unwrap()
+        );
     }
 
     // Very basic web server used to serve out files upon request.  This is
