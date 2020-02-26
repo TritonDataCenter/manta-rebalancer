@@ -10,15 +10,21 @@
 
 extern crate clap;
 
-use clap::{App, AppSettings, Arg, ArgMatches, SubCommand as ClapSubCommand};
-use serde::Deserialize;
 use std::fs::File;
 use std::io::BufReader;
+use std::sync::{Arc, Barrier, Mutex};
+
+use clap::{App, AppSettings, Arg, ArgMatches, SubCommand as ClapSubCommand};
+use crossbeam_channel::TrySendError;
+use serde::Deserialize;
+use signal_hook::{self, iterator::Signals};
+use uuid::Uuid;
 
 use crate::jobs::{Job, JobBuilder};
 use rebalancer::error::Error;
 use rebalancer::util;
-use uuid::Uuid;
+use std::thread;
+use std::thread::JoinHandle;
 
 static DEFAULT_CONFIG_PATH: &str = "/var/tmp/config.json";
 
@@ -60,13 +66,94 @@ impl Config {
         })
     }
 
-    pub fn parse_config(config_path: Option<&str>) -> Result<Config, Error> {
-        let config_path = config_path.unwrap_or(DEFAULT_CONFIG_PATH);
+    pub fn parse_config(config_path: &Option<String>) -> Result<Config, Error> {
+        let config_path = config_path
+            .to_owned()
+            .unwrap_or(DEFAULT_CONFIG_PATH.to_string());
         let file = File::open(config_path)?;
         let reader = BufReader::new(file);
         let config: Config = serde_json::from_reader(reader)?;
 
         Ok(config)
+    }
+
+    pub fn config_updater(
+        config_update_rx: crossbeam_channel::Receiver<()>,
+        update_config: Arc<Mutex<Config>>,
+        config_file: Option<String>,
+    ) -> JoinHandle<()> {
+        thread::Builder::new()
+            .name(String::from("config updater"))
+            .spawn(move || {
+                loop {
+                    match config_update_rx.recv() {
+                        Ok(()) => {
+                            let new_config = match Config::parse_config(
+                                &config_file,
+                            ) {
+                                Ok(c) => c,
+                                Err(e) => {
+                                    error!(
+                                        "Error parsing config after signal \
+                                         received. Not updating: {}",
+                                        e
+                                    );
+                                    continue;
+                                }
+                            };
+                            let mut slcr = update_config
+                                .lock()
+                                .expect("Lock snaplinks_cleanup_required");
+
+                            *slcr = new_config;
+                        }
+                        Err(e) => {
+                            warn!(
+                                "Channel has been disconnected, exiting \
+                                 thread: {}",
+                                e
+                            );
+                            return;
+                        }
+                    }
+                }
+            })
+            .expect("Start config updater")
+    }
+
+    pub fn config_update_signal_handler(
+        config_update_tx: crossbeam_channel::Sender<()>,
+        update_barrier: Arc<Barrier>,
+    ) -> JoinHandle<()> {
+        thread::Builder::new()
+            .name(String::from("config update signal handler"))
+            .spawn(move || {
+                let signals = Signals::new(&[signal_hook::SIGHUP])
+                    .expect("register signals");
+
+                update_barrier.wait();
+
+                for signal in signals.forever() {
+                    match signal {
+                        signal_hook::SIGTERM => {
+                            trace!("Signal Received");
+                            // If there is already a message in the buffer
+                            // (i.e. TrySendError::Full), then the updater
+                            // thread will be doing an update anyway so no
+                            // sense in clogging things up further.
+                            match config_update_tx.try_send(()) {
+                                Err(TrySendError::Disconnected(_)) => {
+                                    warn!("config_update listener is closed");
+                                    break;
+                                },
+                                _ => ()
+                            }
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+            })
+            .expect("Start Config Update Signal Handler")
     }
 }
 
@@ -192,8 +279,9 @@ impl Command {
 
         let config_file = matches
             .value_of("config_file")
-            .expect("Missing config file name");
-        let config = Config::parse_config(Some(config_file))?;
+            .expect("Missing config file name")
+            .to_string();
+        let config = Config::parse_config(&Some(config_file))?;
 
         if matches.is_present("server") {
             subcommand = SubCommand::Server;

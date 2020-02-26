@@ -413,26 +413,6 @@ pub struct EvacuateJob {
     pub max_objects: Option<u32>,
 }
 
-// XXX: Temporary until we know the type of the SNAPLINKS_CLEANUP_REQUIRED
-// value.
-fn value_is_truthy(value: &Value) -> bool {
-    let value = value.to_owned();
-    match value {
-        Value::Null => false,
-        Value::Bool(b) => b,
-        Value::Number(n) => {
-            match n.as_u64() {
-                Some(num) => num != 0,
-                None => {
-                    n.as_i64().expect("pos or neg") != 0
-                }
-            }
-        },
-        Value::String(s) => s.len() > 0 && &s != "0" && &s != "false",
-        Value::Array(a) => a.len() > 0,
-        Value::Object(o) => o.len() > 0,
-    }
-}
 impl EvacuateJob {
     /// Create a new EvacuateJob instance.
     /// As part of this initialization also create a new PgConnection.
@@ -472,85 +452,13 @@ impl EvacuateJob {
         create_evacuateobjects_table(&*conn)
     }
 
-    // Validate that:
-    //  1. We are running in a Manta V2 (or greater) environment.
-    //  2. That Snaplinks are cleaned up.
-    //  3. The shark we are evacuating from exists.
-    // Note this is not purely a validation function.  We do set the
-    // from_shark field in here so that it has the complete manta_storage_id
-    // and datacenter.
-    fn validate(&mut self, config: &Config) -> Result<(), Error>{
-        let log = slog_scope::logger();
-        let sapi = sapi::SAPI::new(&config.sapi_url, 60, log);
-        let applications = sapi.get_application_by_name("manta").map_err(|e| {
-            InternalError::new(
-                Some(InternalErrorCode::JobValidationError),
-                e.description())
-        })?;
-
-        if applications.len() != 1 {
-            let err_msg = format!(
-                "There should be only one manta application.  Found {}",
-                applications.len()
-            );
-            return Err(InternalError::new(
-                Some(InternalErrorCode::JobValidationError),
-                err_msg).into());
-        }
-
-        /*
-        let version_validation = applications.first()
-            .ok_or("Missing manta application".to_string())
-            .and_then(|application| {
-                application.metadata.as_ref().ok_or("Missing application metadata".to_string())
-            })
-            .and_then(|metadata| {
-                metadata.get("MANTAV")
-                    .ok_or("Missing MantaV metadata entry".to_string())
-                    .and_then(|version| {
-                        version.as_u64().ok_or(
-                            "Version is not a positive number".to_string())
-                    })
-                    .and_then(|ver| {
-                        if ver < 2 {
-                            let msg = format!("Rebalancer requires manta version 2 or \
-                            greater.  Found version {}", ver);
-                            Err(msg)
-                        } else {
-                            if let Some(cleanup_req) = metadata
-                                .get("SNAPLINK_CLEANUP_REQUIRED") {
-
-                                cleanup_req
-                                    .as_bool()
-                                    .ok_or("SNAPLINK_CLEANUP_REQUIRED set to \
-                                    a non-boolean value")
-                                    .and_then(|c_req| {
-                                        if c_req {
-                                            Err("Snaplink clean up is required")
-                                        } else {
-                                            Ok(())
-                                        }
-                                    })
-                            } else {
-                                // We have already confirmed we are in
-                                // mantav2. If the SNAPLINK_CLEANUP_REQUIRED
-                                // metadata variable is missing all together
-                                Ok(())
-                            }
-                        }
-                    })
-            });
-
-        if let Err(error_msg) = version_validation {
-            return Err(InternalError::new(
-                Some(InternalErrorCode::JobValidationError),
-                error_msg).into());
-        }
-        */
-
+    // This is not purely a validation function.  We do set the from_shark field
+    // in here so that it has the complete manta_storage_id and datacenter.
+    fn validate(&mut self) -> Result<(), Error> {
         let from_shark = moray_client::get_manta_object_shark(
             &self.from_shark.manta_storage_id,
-            &self.domain_name,)?;
+            &self.domain_name,
+        )?;
 
         self.from_shark = from_shark;
 
@@ -558,8 +466,9 @@ impl EvacuateJob {
     }
 
     pub fn run(mut self, config: &Config) -> Result<(), Error> {
-        let mut ret = Ok(());
+        self.validate()?;
 
+        let mut ret = Ok(());
 
         // job_action will be shared between threads so create an Arc for it.
         let job_action = Arc::new(self);

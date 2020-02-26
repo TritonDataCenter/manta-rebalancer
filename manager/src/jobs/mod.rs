@@ -492,7 +492,8 @@ mod test {
     #[test]
     fn basic() {
         let _guard = util::init_global_logger();
-        let config = Config::parse_config(Some("src/config.json")).unwrap();
+        let config = Config::parse_config(&Some("src/config.json".to_string()))
+            .expect("parse config");
 
         let builder = JobBuilder::new(config);
         assert_eq!(builder.state, JobState::Init);
