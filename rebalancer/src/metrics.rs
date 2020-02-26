@@ -99,7 +99,7 @@ pub fn register_metrics(labels: &ConfigMetrics) -> MetricsMap {
     const_labels.insert("zonename".to_string(), hostname.clone());
 
     // The request counter maintains a list of requests received, broken down
-    // by the type of request (e.g. op=GET, op=POST).
+    // by the type of request (e.g. req=GET, req=POST).
     let request_counter = register_counter_vec!(
         opts!(REQUEST_COUNT, "Total number of requests handled.")
             .const_labels(const_labels.clone()),
