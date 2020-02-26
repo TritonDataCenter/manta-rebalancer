@@ -126,9 +126,24 @@ impl Agent {
         }
     }
 
+    fn read_config<F: AsRef<OsStr> + ?Sized>(f: &F) -> AgentConfig {
+        let s = match fs::read(Path::new(&f)) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("Failed to read config file: {}", e);
+                std::process::exit(1);
+            }
+        };
+
+        toml::from_slice(&s).unwrap_or_else(|e| {
+            eprintln!("Failed to parse config file: {}", e);
+            std::process::exit(1);
+        })
+    }
+
     pub fn run(cfg_path: Option<&str>) {
         let config = match cfg_path {
-            Some(c) => read_file(c),
+            Some(c) => Agent::read_config(c),
             None => AgentConfig::default(),
         };
         let addr = format!("{}:{}", config.server.host, config.server.port);
@@ -449,7 +464,7 @@ fn post(agent: Agent, mut state: State) -> Box<HandlerFuture> {
         .then(move |full_body| match full_body {
             Ok(valid_body) => {
                 // Ceremony for parsing the information needed to create an
-                // an assigment out of the message body.
+                // an assignment out of the message body.
                 let (uuid, v) = match validate_assignment(&valid_body) {
                     Ok(uv) => uv,
                     Err(e) => {
@@ -876,21 +891,6 @@ fn process_assignment(
 
     info!("Finished processing assignment {}.", &uuid);
     assignment_complete(assignments, uuid);
-}
-
-pub fn read_file<F: AsRef<OsStr> + ?Sized>(f: &F) -> AgentConfig {
-    let s = match fs::read(Path::new(&f)) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("Failed to read config file: {}", e);
-            std::process::exit(1);
-        }
-    };
-
-    toml::from_slice(&s).unwrap_or_else(|e| {
-        eprintln!("Failed to parse config file: {}", e);
-        std::process::exit(1);
-    })
 }
 
 // Create a `Router`.  This function is public because it will have external
