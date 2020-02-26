@@ -32,7 +32,7 @@ use libmanta::moray::MantaObjectShark;
 use crate::common::{AssignmentPayload, ObjectSkippedReason, Task, TaskStatus};
 use crate::metrics;
 use crate::metrics::{
-    counter_vec_inc, ConfigMetrics, Metrics, ERROR_COUNT, OBJECT_COUNT,
+    counter_vec_inc, ConfigMetrics, MetricsMap, ERROR_COUNT, OBJECT_COUNT,
     REQUEST_COUNT,
 };
 
@@ -108,13 +108,13 @@ pub struct Agent {
     assignments: Arc<Mutex<Assignments>>,
     quiescing: Arc<Mutex<HashSet<String>>>,
     tx: Arc<Mutex<mpsc::Sender<String>>>,
-    metrics: Arc<Mutex<HashMap<String, Metrics>>>,
+    metrics: Arc<Mutex<MetricsMap>>,
 }
 
 impl Agent {
     pub fn new(
         tx: Arc<Mutex<mpsc::Sender<String>>>,
-        metrics: Arc<Mutex<HashMap<String, Metrics>>>,
+        metrics: Arc<Mutex<MetricsMap>>,
     ) -> Agent {
         let assignments = Arc::new(Mutex::new(Assignments::new()));
         let quiescing = Arc::new(Mutex::new(HashSet::new()));
@@ -810,7 +810,7 @@ fn process_assignment(
     assignments: Arc<Mutex<Assignments>>,
     uuid: String,
     f: fn(&mut Task),
-    metrics: Option<HashMap<String, Metrics>>,
+    metrics: Option<MetricsMap>,
 ) {
     // If we are unsuccessful in loading the assignment from disk, there is
     // nothing left to do here, other than return.

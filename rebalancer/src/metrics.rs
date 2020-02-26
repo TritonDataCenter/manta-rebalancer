@@ -17,6 +17,8 @@ use prometheus::{
 use serde_derive::Deserialize;
 use slog::{error, info, Logger};
 
+pub type MetricsMap = HashMap<&'static str, Metrics>;
+
 pub static OBJECT_COUNT: &str = "object_count";
 pub static ERROR_COUNT: &str = "error_count";
 pub static REQUEST_COUNT: &str = "request_count";
@@ -55,7 +57,7 @@ pub enum Metrics {
 
 #[allow(irrefutable_let_patterns)]
 pub fn counter_vec_inc<S: ::std::hash::BuildHasher>(
-    metrics: &HashMap<String, Metrics, S>,
+    metrics: &HashMap<&'static str, Metrics, S>,
     key: &str,
     bucket: Option<&str>,
 ) {
@@ -79,7 +81,7 @@ pub fn counter_vec_inc<S: ::std::hash::BuildHasher>(
 
 // Given the service configuration information, create (i.e. register) the
 // desired metrics with prometheus.
-pub fn register_metrics(labels: &ConfigMetrics) -> HashMap<String, Metrics> {
+pub fn register_metrics(labels: &ConfigMetrics) -> MetricsMap {
     let hostname = gethostname()
         .into_string()
         .unwrap_or_else(|_| String::from("unknown"));
@@ -101,12 +103,12 @@ pub fn register_metrics(labels: &ConfigMetrics) -> HashMap<String, Metrics> {
     let request_counter = register_counter_vec!(
         opts!(REQUEST_COUNT, "Total number of requests handled.")
             .const_labels(const_labels.clone()),
-        &["op"]
+        &["req"]
     )
     .expect("failed to register incoming_request_count counter");
 
     metrics.insert(
-        REQUEST_COUNT.to_string(),
+        REQUEST_COUNT,
         Metrics::MetricsCounterVec(request_counter.clone()),
     );
 
@@ -120,7 +122,7 @@ pub fn register_metrics(labels: &ConfigMetrics) -> HashMap<String, Metrics> {
     .expect("failed to register object_count counter");
 
     metrics.insert(
-        OBJECT_COUNT.to_string(),
+        OBJECT_COUNT,
         Metrics::MetricsCounterVec(object_counter.clone()),
     );
 
@@ -138,7 +140,7 @@ pub fn register_metrics(labels: &ConfigMetrics) -> HashMap<String, Metrics> {
     .expect("failed to register error_count counter");
 
     metrics.insert(
-        ERROR_COUNT.to_string(),
+        ERROR_COUNT,
         Metrics::MetricsCounterVec(error_counter.clone()),
     );
 
