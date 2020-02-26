@@ -18,6 +18,10 @@ use prometheus::{
 use serde_derive::Deserialize;
 use slog::{error, info, Logger};
 
+pub static OBJECT_COUNT: &str = "object_count";
+pub static ERROR_COUNT: &str = "error_count";
+pub static REQUEST_COUNT: &str = "request_count";
+
 #[derive(Clone, Deserialize)]
 pub struct ConfigMetrics {
     /// Rebalancer metrics server address
@@ -103,7 +107,7 @@ pub fn register_metrics(labels: &ConfigMetrics) -> HashMap<String, Metrics> {
     // by the type of request (e.g. op=GET, op=POST).
     let request_counter = register_counter_vec!(
         opts!(
-            "incoming_request_count",
+            REQUEST_COUNT,
             "Total number of requests handled."
         )
         .const_labels(const_labels.clone()),
@@ -112,21 +116,21 @@ pub fn register_metrics(labels: &ConfigMetrics) -> HashMap<String, Metrics> {
     .expect("failed to register incoming_request_count counter");
 
     metrics.insert(
-        "request_count".to_string(),
+        REQUEST_COUNT.to_string(),
         Metrics::MetricsCounterVec(request_counter.clone()),
     );
 
     // The object counter maintains a count of the total number of objects that
     // have been processed (whether successfully or not).
     let object_counter = register_counter!(opts!(
-        "object_count",
+        OBJECT_COUNT,
         "Total number of objects processed."
     )
     .const_labels(const_labels.clone()))
     .expect("failed to register object_count counter");
 
     metrics.insert(
-        "object_count".to_string(),
+        OBJECT_COUNT.to_string(),
         Metrics::MetricsCounter(object_counter.clone()),
     );
 
@@ -137,14 +141,14 @@ pub fn register_metrics(labels: &ConfigMetrics) -> HashMap<String, Metrics> {
     // encounter and in the event that there are too many possibilities, only
     // track certain error types and maintain the rest in a generic bucket.
     let error_counter = register_counter_vec!(
-        opts!("error_count", "Errors encountered.")
+        opts!(ERROR_COUNT, "Errors encountered.")
             .const_labels(const_labels.clone()),
         &["error"]
     )
     .expect("failed to register error_count counter");
 
     metrics.insert(
-        "error_count".to_string(),
+        ERROR_COUNT.to_string(),
         Metrics::MetricsCounterVec(error_counter.clone()),
     );
 

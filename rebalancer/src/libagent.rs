@@ -31,7 +31,10 @@ use libmanta::moray::MantaObjectShark;
 
 use crate::common::{AssignmentPayload, ObjectSkippedReason, Task, TaskStatus};
 use crate::metrics;
-use crate::metrics::{counter_inc, counter_vec_inc, ConfigMetrics, Metrics};
+use crate::metrics::{
+    counter_inc, counter_vec_inc, ConfigMetrics, Metrics, ERROR_COUNT,
+    REQUEST_COUNT, OBJECT_COUNT
+};
 
 use reqwest::StatusCode;
 use rusqlite;
@@ -456,7 +459,7 @@ fn post(agent: Agent, mut state: State) -> Box<HandlerFuture> {
                         );
                         counter_vec_inc(
                             agent.metrics.lock().unwrap().clone(),
-                            "error_count",
+                            ERROR_COUNT,
                             &e,
                         );
 
@@ -473,7 +476,7 @@ fn post(agent: Agent, mut state: State) -> Box<HandlerFuture> {
 
                     counter_vec_inc(
                         agent.metrics.lock().unwrap().clone(),
-                        "error_count",
+                        ERROR_COUNT,
                         "conflict",
                     );
 
@@ -517,7 +520,7 @@ fn post(agent: Agent, mut state: State) -> Box<HandlerFuture> {
             Err(e) => {
                 counter_vec_inc(
                     agent.metrics.lock().unwrap().clone(),
-                    "error_count",
+                    ERROR_COUNT,
                     &e.to_string(),
                 );
 
@@ -622,7 +625,7 @@ impl Handler for Agent {
 
         counter_vec_inc(
             self.metrics.lock().unwrap().clone(),
-            "request_count",
+            REQUEST_COUNT,
             method.as_str(),
         );
 
@@ -836,7 +839,7 @@ fn process_assignment(
         // Update the total number of objects that have been processes, whether
         // successful or not.
         if let Some(m) = metrics.clone() {
-            counter_inc(m, "object_count");
+            counter_inc(m, OBJECT_COUNT);
         }
 
         // Update our stats.
@@ -846,7 +849,7 @@ fn process_assignment(
             TaskStatus::Complete => tmp.stats.complete += 1,
             TaskStatus::Failed(e) => {
                 if let Some(m) = metrics.clone() {
-                    counter_vec_inc(m, "error_count", &e.to_string());
+                    counter_vec_inc(m, ERROR_COUNT, &e.to_string());
                 }
                 tmp.stats.complete += 1;
                 tmp.stats.failed += 1;
