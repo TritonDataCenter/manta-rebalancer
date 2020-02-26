@@ -12,8 +12,7 @@ use hyper::Body;
 use hyper::StatusCode;
 use hyper::{Request, Response};
 use prometheus::{
-    opts, register_counter, register_counter_vec, Counter, CounterVec, Encoder,
-    TextEncoder,
+    opts, register_counter_vec, CounterVec, Encoder, TextEncoder,
 };
 use serde_derive::Deserialize;
 use slog::{error, info, Logger};
@@ -51,33 +50,27 @@ impl Default for ConfigMetrics {
 // all prometheus counters are enumerated below.  Add them as needed.
 #[derive(Clone)]
 pub enum Metrics {
-    MetricsCounter(Counter),
     MetricsCounterVec(CounterVec),
 }
 
-pub fn counter_inc<S: std::hash::BuildHasher>(
-    metrics: HashMap<String, Metrics, S>,
-    key: &str,
-) {
-    match metrics.get(key) {
-        Some(metric) => {
-            if let Metrics::MetricsCounter(c) = metric {
-                c.inc();
-            }
-        }
-        None => error!(slog_scope::logger(), "Invalid metric: {}", key),
-    }
-}
-
+#[allow(irrefutable_let_patterns)]
 pub fn counter_vec_inc<S: ::std::hash::BuildHasher>(
-    metrics: HashMap<String, Metrics, S>,
+    metrics: &HashMap<String, Metrics, S>,
     key: &str,
-    bucket: &str,
+    bucket: Option<&str>,
 ) {
     match metrics.get(key) {
         Some(metric) => {
             if let Metrics::MetricsCounterVec(c) = metric {
-                c.with_label_values(&[bucket]).inc();
+                // Increment the total.
+                c.with_label_values(&["total"]).inc();
+
+                // If a bucket was supplied, increment that as well.  The
+                // bucket will represent some subset of the total for the
+                // metric.
+                if let Some(b) = bucket {
+                    c.with_label_values(&[b]).inc();
+                }
             }
         }
         None => error!(slog_scope::logger(), "Invalid metric: {}", key),
@@ -106,11 +99,8 @@ pub fn register_metrics(labels: &ConfigMetrics) -> HashMap<String, Metrics> {
     // The request counter maintains a list of requests received, broken down
     // by the type of request (e.g. op=GET, op=POST).
     let request_counter = register_counter_vec!(
-        opts!(
-            REQUEST_COUNT,
-            "Total number of requests handled."
-        )
-        .const_labels(const_labels.clone()),
+        opts!(REQUEST_COUNT, "Total number of requests handled.")
+            .const_labels(const_labels.clone()),
         &["op"]
     )
     .expect("failed to register incoming_request_count counter");
@@ -122,16 +112,16 @@ pub fn register_metrics(labels: &ConfigMetrics) -> HashMap<String, Metrics> {
 
     // The object counter maintains a count of the total number of objects that
     // have been processed (whether successfully or not).
-    let object_counter = register_counter!(opts!(
-        OBJECT_COUNT,
-        "Total number of objects processed."
+    let object_counter = register_counter_vec!(
+        opts!(OBJECT_COUNT, "Total number of objects processed.")
+            .const_labels(const_labels.clone()),
+        &["type"]
     )
-    .const_labels(const_labels.clone()))
     .expect("failed to register object_count counter");
 
     metrics.insert(
         OBJECT_COUNT.to_string(),
-        Metrics::MetricsCounter(object_counter.clone()),
+        Metrics::MetricsCounterVec(object_counter.clone()),
     );
 
     // The error counter maintains a list of errors encountered, broken down by

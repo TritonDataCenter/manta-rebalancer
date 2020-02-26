@@ -32,8 +32,8 @@ use libmanta::moray::MantaObjectShark;
 use crate::common::{AssignmentPayload, ObjectSkippedReason, Task, TaskStatus};
 use crate::metrics;
 use crate::metrics::{
-    counter_inc, counter_vec_inc, ConfigMetrics, Metrics, ERROR_COUNT,
-    REQUEST_COUNT, OBJECT_COUNT
+    counter_vec_inc, ConfigMetrics, Metrics, ERROR_COUNT, OBJECT_COUNT,
+    REQUEST_COUNT,
 };
 
 use reqwest::StatusCode;
@@ -458,9 +458,9 @@ fn post(agent: Agent, mut state: State) -> Box<HandlerFuture> {
                             StatusCode::BAD_REQUEST,
                         );
                         counter_vec_inc(
-                            agent.metrics.lock().unwrap().clone(),
+                            &agent.metrics.lock().unwrap(),
                             ERROR_COUNT,
-                            &e,
+                            Some(&e),
                         );
 
                         return future::ok((state, res));
@@ -475,9 +475,9 @@ fn post(agent: Agent, mut state: State) -> Box<HandlerFuture> {
                         create_empty_response(&state, StatusCode::CONFLICT);
 
                     counter_vec_inc(
-                        agent.metrics.lock().unwrap().clone(),
+                        &agent.metrics.lock().unwrap(),
                         ERROR_COUNT,
-                        "conflict",
+                        Some("conflict"),
                     );
 
                     return future::ok((state, res));
@@ -519,9 +519,9 @@ fn post(agent: Agent, mut state: State) -> Box<HandlerFuture> {
 
             Err(e) => {
                 counter_vec_inc(
-                    agent.metrics.lock().unwrap().clone(),
+                    &agent.metrics.lock().unwrap(),
                     ERROR_COUNT,
-                    &e.to_string(),
+                    Some(&e.to_string()),
                 );
 
                 future::err((state, e.into_handler_error()))
@@ -624,9 +624,9 @@ impl Handler for Agent {
         let method = Method::borrow_from(&state);
 
         counter_vec_inc(
-            self.metrics.lock().unwrap().clone(),
+            &self.metrics.lock().unwrap(),
             REQUEST_COUNT,
-            method.as_str(),
+            Some(method.as_str()),
         );
 
         // If we are here, then the method must either be
@@ -839,7 +839,11 @@ fn process_assignment(
         // Update the total number of objects that have been processes, whether
         // successful or not.
         if let Some(m) = metrics.clone() {
-            counter_inc(m, OBJECT_COUNT);
+            // Note: The rebalncer agent does not currently break down this
+            // metric by anything meaningful, so we don't supply a bucket.
+            // That is, the only thing we track here is the total number of
+            // objects processed.
+            counter_vec_inc(&m, OBJECT_COUNT, None);
         }
 
         // Update our stats.
@@ -849,7 +853,7 @@ fn process_assignment(
             TaskStatus::Complete => tmp.stats.complete += 1,
             TaskStatus::Failed(e) => {
                 if let Some(m) = metrics.clone() {
-                    counter_vec_inc(m, ERROR_COUNT, &e.to_string());
+                    counter_vec_inc(&m, ERROR_COUNT, Some(&e.to_string()));
                 }
                 tmp.stats.complete += 1;
                 tmp.stats.failed += 1;
