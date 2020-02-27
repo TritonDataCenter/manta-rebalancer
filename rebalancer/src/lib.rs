@@ -8,6 +8,11 @@
  * Copyright 2020 Joyent, Inc.
  */
 
+pub mod metrics;
+
+#[macro_use]
+extern crate prometheus;
+
 #[macro_use]
 extern crate diesel;
 

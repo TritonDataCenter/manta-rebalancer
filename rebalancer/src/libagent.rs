@@ -8,11 +8,12 @@
  * Copyright 2020 Joyent, Inc.
  */
 use std::collections::{HashMap, HashSet};
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::fs::File;
 use std::path::Path;
 use std::sync::{mpsc, Arc, Mutex, RwLock};
+use std::thread;
 
 use futures::future;
 use futures::future::*;
@@ -29,6 +30,11 @@ use joyent_rust_utils::file::calculate_md5;
 use libmanta::moray::MantaObjectShark;
 
 use crate::common::{AssignmentPayload, ObjectSkippedReason, Task, TaskStatus};
+use crate::metrics;
+use crate::metrics::{
+    counter_vec_inc, ConfigMetrics, MetricsMap, ERROR_COUNT, OBJECT_COUNT,
+    REQUEST_COUNT,
+};
 
 use reqwest::StatusCode;
 use rusqlite;
@@ -41,6 +47,29 @@ type Assignments = HashMap<String, Arc<RwLock<Assignment>>>;
 
 static REBALANCER_SCHEDULED_DIR: &str = "/var/tmp/rebalancer/scheduled";
 static REBALANCER_FINISHED_DIR: &str = "/var/tmp/rebalancer/completed";
+
+#[derive(Clone, Default, Deserialize)]
+pub struct AgentConfig {
+    pub server: ConfigServer,
+    pub metrics: ConfigMetrics,
+}
+
+#[derive(Clone, Deserialize)]
+pub struct ConfigServer {
+    // The IP address on which the agent should listen for incoming connections.
+    pub host: String,
+    // The port that the agent  should listen on for incoming connections.
+    pub port: u16,
+}
+
+impl Default for ConfigServer {
+    fn default() -> Self {
+        Self {
+            host: "0.0.0.0".into(),
+            port: 7878,
+        }
+    }
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum AgentAssignmentState {
@@ -74,27 +103,52 @@ struct PathExtractor {
     parts: Vec<String>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Agent {
     assignments: Arc<Mutex<Assignments>>,
     quiescing: Arc<Mutex<HashSet<String>>>,
     tx: Arc<Mutex<mpsc::Sender<String>>>,
+    metrics: Arc<Mutex<MetricsMap>>,
 }
 
 impl Agent {
-    pub fn new(tx: Arc<Mutex<mpsc::Sender<String>>>) -> Agent {
+    pub fn new(
+        tx: Arc<Mutex<mpsc::Sender<String>>>,
+        metrics: Arc<Mutex<MetricsMap>>,
+    ) -> Agent {
         let assignments = Arc::new(Mutex::new(Assignments::new()));
         let quiescing = Arc::new(Mutex::new(HashSet::new()));
         Agent {
             assignments,
             quiescing,
             tx,
+            metrics,
         }
     }
 
-    pub fn run(addr: &'static str) {
+    fn read_config<F: AsRef<OsStr> + ?Sized>(f: &F) -> AgentConfig {
+        let s = match fs::read(Path::new(&f)) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("Failed to read config file: {}", e);
+                std::process::exit(1);
+            }
+        };
+
+        toml::from_slice(&s).unwrap_or_else(|e| {
+            eprintln!("Failed to parse config file: {}", e);
+            std::process::exit(1);
+        })
+    }
+
+    pub fn run(cfg_path: Option<&str>) {
+        let config = match cfg_path {
+            Some(c) => Agent::read_config(c),
+            None => AgentConfig::default(),
+        };
+        let addr = format!("{}:{}", config.server.host, config.server.port);
         info!("Listening for requests at {}", addr);
-        gotham::start(addr, router(process_task));
+        gotham::start(addr, router(process_task, config));
     }
 
     // Given an assignment uuid, check for its presence in both the "scheduled"
@@ -410,14 +464,20 @@ fn post(agent: Agent, mut state: State) -> Box<HandlerFuture> {
         .then(move |full_body| match full_body {
             Ok(valid_body) => {
                 // Ceremony for parsing the information needed to create an
-                // an assignent out of the message body.
+                // an assignment out of the message body.
                 let (uuid, v) = match validate_assignment(&valid_body) {
                     Ok(uv) => uv,
-                    Err(_e) => {
+                    Err(e) => {
                         let res = create_empty_response(
                             &state,
                             StatusCode::BAD_REQUEST,
                         );
+                        counter_vec_inc(
+                            &agent.metrics.lock().unwrap(),
+                            ERROR_COUNT,
+                            Some(&e),
+                        );
+
                         return future::ok((state, res));
                     }
                 };
@@ -428,6 +488,13 @@ fn post(agent: Agent, mut state: State) -> Box<HandlerFuture> {
                 if agent.assignment_exists(&uuid) {
                     let res =
                         create_empty_response(&state, StatusCode::CONFLICT);
+
+                    counter_vec_inc(
+                        &agent.metrics.lock().unwrap(),
+                        ERROR_COUNT,
+                        Some("conflict"),
+                    );
+
                     return future::ok((state, res));
                 }
 
@@ -464,7 +531,16 @@ fn post(agent: Agent, mut state: State) -> Box<HandlerFuture> {
                 assignment_signal(&agent, &uuid);
                 future::ok((state, res))
             }
-            Err(e) => future::err((state, e.into_handler_error())),
+
+            Err(e) => {
+                counter_vec_inc(
+                    &agent.metrics.lock().unwrap(),
+                    ERROR_COUNT,
+                    Some(&e.to_string()),
+                );
+
+                future::err((state, e.into_handler_error()))
+            }
         });
     Box::new(f)
 }
@@ -561,6 +637,12 @@ fn validate_assignment(body: &Chunk) -> Result<(String, Vec<Task>), String> {
 impl Handler for Agent {
     fn handle(self, state: State) -> Box<HandlerFuture> {
         let method = Method::borrow_from(&state);
+
+        counter_vec_inc(
+            &self.metrics.lock().unwrap(),
+            REQUEST_COUNT,
+            Some(method.as_str()),
+        );
 
         // If we are here, then the method must either be
         // POST or GET.  It can not be anything else.
@@ -728,6 +810,7 @@ fn process_assignment(
     assignments: Arc<Mutex<Assignments>>,
     uuid: String,
     f: fn(&mut Task),
+    metrics: Option<MetricsMap>,
 ) {
     // If we are unsuccessful in loading the assignment from disk, there is
     // nothing left to do here, other than return.
@@ -768,12 +851,25 @@ fn process_assignment(
         // the end of the loop (which is not for very long).
         let tmp = &mut assn.write().unwrap();
 
+        // Update the total number of objects that have been processes, whether
+        // successful or not.
+        if let Some(m) = metrics.clone() {
+            // Note: The rebalncer agent does not currently break down this
+            // metric by anything meaningful, so we don't supply a bucket.
+            // That is, the only thing we track here is the total number of
+            // objects processed.
+            counter_vec_inc(&m, OBJECT_COUNT, None);
+        }
+
         // Update our stats.
         match t.status {
             TaskStatus::Pending => (),
             TaskStatus::Running => (),
             TaskStatus::Complete => tmp.stats.complete += 1,
-            TaskStatus::Failed(_) => {
+            TaskStatus::Failed(e) => {
+                if let Some(m) = metrics.clone() {
+                    counter_vec_inc(&m, ERROR_COUNT, Some(&e.to_string()));
+                }
                 tmp.stats.complete += 1;
                 tmp.stats.failed += 1;
                 failures.push(t.clone());
@@ -799,13 +895,31 @@ fn process_assignment(
 
 // Create a `Router`.  This function is public because it will have external
 // consumers, namely the rebalancer zone test framework.
-pub fn router(f: fn(&mut Task)) -> Router {
+#[allow(clippy::many_single_char_names)]
+pub fn router(f: fn(&mut Task), config: AgentConfig) -> Router {
     build_simple_router(|route| {
+        let agent_metrics = metrics::register_metrics(&config.metrics);
+        let metrics_host = config.metrics.host.clone();
+        let metrics_port = config.metrics.port;
+
+        let ms = thread::Builder::new()
+            .name(String::from("Rebalancer Metrics"))
+            .spawn(move || {
+                metrics::start_server(
+                    &metrics_host,
+                    metrics_port,
+                    &slog_scope::logger(),
+                )
+            });
+
+        assert!(ms.is_ok());
+
         let (w, r): (mpsc::Sender<String>, mpsc::Receiver<String>) =
             mpsc::channel();
         let tx = Arc::new(Mutex::new(w));
         let rx = Arc::new(Mutex::new(r));
-        let agent = Agent::new(tx.clone());
+        let agent =
+            Agent::new(tx.clone(), Arc::new(Mutex::new(agent_metrics.clone())));
         let pool = ThreadPool::new(1);
 
         create_dir(REBALANCER_SCHEDULED_DIR);
@@ -814,6 +928,8 @@ pub fn router(f: fn(&mut Task)) -> Router {
         for _ in 0..1 {
             let rx = Arc::clone(&rx);
             let assignments = Arc::clone(&agent.assignments);
+            let m = Some(agent_metrics.clone());
+
             pool.execute(move || loop {
                 let uuid = match rx.lock().unwrap().recv() {
                     Ok(r) => r,
@@ -822,7 +938,12 @@ pub fn router(f: fn(&mut Task)) -> Router {
                         return;
                     }
                 };
-                process_assignment(Arc::clone(&assignments), uuid, f);
+                process_assignment(
+                    Arc::clone(&assignments),
+                    uuid,
+                    f,
+                    m.clone(),
+                );
             });
         }
 
