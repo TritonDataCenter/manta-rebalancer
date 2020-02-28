@@ -69,7 +69,7 @@ impl Config {
     pub fn parse_config(config_path: &Option<String>) -> Result<Config, Error> {
         let config_path = config_path
             .to_owned()
-            .unwrap_or(DEFAULT_CONFIG_PATH.to_string());
+            .unwrap_or_else(|| DEFAULT_CONFIG_PATH.to_string());
         let file = File::open(config_path)?;
         let reader = BufReader::new(file);
         let config: Config = serde_json::from_reader(reader)?;
@@ -84,13 +84,11 @@ impl Config {
     ) -> JoinHandle<()> {
         thread::Builder::new()
             .name(String::from("config updater"))
-            .spawn(move || {
-                loop {
-                    match config_update_rx.recv() {
-                        Ok(()) => {
-                            let new_config = match Config::parse_config(
-                                &config_file,
-                            ) {
+            .spawn(move || loop {
+                match config_update_rx.recv() {
+                    Ok(()) => {
+                        let new_config =
+                            match Config::parse_config(&config_file) {
                                 Ok(c) => c,
                                 Err(e) => {
                                     error!(
@@ -101,20 +99,19 @@ impl Config {
                                     continue;
                                 }
                             };
-                            let mut slcr = update_config
-                                .lock()
-                                .expect("Lock snaplinks_cleanup_required");
+                        let mut slcr = update_config
+                            .lock()
+                            .expect("Lock snaplinks_cleanup_required");
 
-                            *slcr = new_config;
-                        }
-                        Err(e) => {
-                            warn!(
-                                "Channel has been disconnected, exiting \
-                                 thread: {}",
-                                e
-                            );
-                            return;
-                        }
+                        *slcr = new_config;
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Channel has been disconnected, exiting \
+                             thread: {}",
+                            e
+                        );
+                        return;
                     }
                 }
             })
@@ -128,32 +125,42 @@ impl Config {
         thread::Builder::new()
             .name(String::from("config update signal handler"))
             .spawn(move || {
-                let signals = Signals::new(&[signal_hook::SIGHUP])
-                    .expect("register signals");
-
-                update_barrier.wait();
-
-                for signal in signals.forever() {
-                    match signal {
-                        signal_hook::SIGTERM => {
-                            trace!("Signal Received");
-                            // If there is already a message in the buffer
-                            // (i.e. TrySendError::Full), then the updater
-                            // thread will be doing an update anyway so no
-                            // sense in clogging things up further.
-                            match config_update_tx.try_send(()) {
-                                Err(TrySendError::Disconnected(_)) => {
-                                    warn!("config_update listener is closed");
-                                    break;
-                                },
-                                _ => ()
-                            }
-                        }
-                        _ => unreachable!(),
-                    }
-                }
+                _config_update_signal_handler(config_update_tx, update_barrier)
             })
             .expect("Start Config Update Signal Handler")
+    }
+
+    // This thread spawns two other threads.  One of them handles the SIGUSR1
+    // signal and in turn notifies the other that the config file needs to be
+    // re-parsed.  This function returns a JoinHandle that will only join
+    // after both of the other threads have completed.
+    pub fn start_config_watcher(
+        config: Arc<Mutex<Config>>,
+        config_file: Option<String>,
+    ) -> JoinHandle<()> {
+        thread::Builder::new()
+            .name("config watcher".to_string())
+            .spawn(move || {
+                let (update_tx, update_rx) = crossbeam_channel::bounded(1);
+                let barrier = Arc::new(Barrier::new(2));
+                let update_barrier = Arc::clone(&barrier);
+                let sig_handler_handle = Config::config_update_signal_handler(
+                    update_tx,
+                    update_barrier,
+                );
+                barrier.wait();
+
+                let update_config = Arc::clone(&config);
+                let config_updater_handle = Config::config_updater(
+                    update_rx,
+                    update_config,
+                    config_file,
+                );
+
+                config_updater_handle.join().expect("join config updater");
+                sig_handler_handle.join().expect("join signal handler");
+            })
+            .expect("start config watcher")
     }
 }
 
@@ -348,4 +355,171 @@ fn job_create_subcommand_handler(
         .commit()?;
 
     Ok(SubCommand::DoJob(Box::new(job)))
+}
+
+// Run a thread that listens for the SIGUSR1 signal which config-agent should
+// be sending us via SMF when the config file is updated.  When a signal is
+// trapped it simply sends an empty message to the updater thread which
+// handles updating the configuration state in memory.  We don't want to
+// block or take any locks here because the signal is asynchronous.
+fn _config_update_signal_handler(
+    config_update_tx: crossbeam_channel::Sender<()>,
+    update_barrier: Arc<Barrier>,
+) {
+    let signals = Signals::new(&[signal_hook::SIGUSR1])
+        .expect("register signals");
+
+    update_barrier.wait();
+
+    for signal in signals.forever() {
+        trace!("Signal Received: {}", signal);
+        match signal {
+            signal_hook::SIGUSR1 => {
+                // If there is already a message in the buffer
+                // (i.e. TrySendError::Full), then the updater
+                // thread will be doing an update anyway so no
+                // sense in clogging things up further.
+                if let Err(TrySendError::Disconnected(_)) =
+                    config_update_tx.try_send(())
+                {
+                    warn!("config_update listener is closed");
+                    break;
+                }
+            }
+            _ => unreachable!(), // Ignore other signals
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lazy_static::lazy_static;
+    use libc;
+    use mustache::{Data, MapBuilder};
+    use std::fs::File;
+    use std::io::Write;
+
+    static TEST_CONFIG_FILE: &str = "config.test.json";
+
+    lazy_static! {
+            static ref INITIALIZED: Mutex<bool> = Mutex::new(false);
+            pub static ref TEMPLATE_PATH: String = format!("{}/{}",
+                env!("CARGO_MANIFEST_DIR"),
+                "../sapi_manifests/rebalancer/template");
+        }
+
+    fn unit_test_init() {
+        let mut init = INITIALIZED.lock().unwrap();
+        if *init {
+            return;
+        }
+
+        *init = true;
+
+        thread::spawn(move || {
+            let _guard = util::init_global_logger();
+            loop {
+                std::thread::sleep(std::time::Duration::from_millis(1))
+            }
+        });
+    }
+
+    // Update our test config file with new variables
+    fn update_test_config_with_vars(vars: &Data) -> Config {
+        let template_str = std::fs::read_to_string(TEMPLATE_PATH.to_string())
+            .expect("template string");
+
+        let config_data = mustache::compile_str(&template_str)
+            .and_then(|t| t.render_data_to_string(vars))
+            .expect("render template");
+
+        File::create(TEST_CONFIG_FILE)
+            .and_then(|mut f| f.write_all(config_data.as_bytes()))
+            .map_err(Error::from)
+            .and_then(|_| {
+                Config::parse_config(&Some(TEST_CONFIG_FILE.to_string()))
+            })
+            .expect("file write")
+    }
+
+    // Initialize a test configuration file by parsing and rendering the
+    // same configuration template used in production.
+    fn config_init() -> Config {
+        assert!(*INITIALIZED.lock().unwrap());
+
+        std::fs::remove_file(TEST_CONFIG_FILE).unwrap_or(());
+
+        let vars = MapBuilder::new()
+            .insert_str("DOMAIN_NAME", "fake.joyent.us")
+            .insert_bool("SNAPLINKS_CLEANUP_REQUIRED", true)
+            .insert_vec("INDEX_MORAY_SHARDS", |builder| {
+                builder.push_map(|bld| {
+                    bld.insert_str("host", "1.fake.joyent.us")
+                        .insert_bool("last", true)
+                })
+            })
+            .build();
+
+        update_test_config_with_vars(&vars)
+    }
+
+    fn config_fini() {
+        std::fs::remove_file(TEST_CONFIG_FILE)
+            .expect("attempt to delete missing file")
+    }
+
+    #[test]
+    // 1. Create a config (both file and in memory).
+    // 2. Start the config watcher.
+    // 3. Update the config file we created in step 1.
+    // 4. Send a signal to the config watcher (what config-agent would do in
+    //    production).
+    // 5. Confirm that our in memory config reflects that changes from step 3.
+    fn signal_handler_config_update() {
+        unit_test_init();
+        println!("{}", env!("CARGO_MANIFEST_DIR"));
+
+        // Generate a config with snaplinks_cleanup_required=true.
+        let config = Arc::new(Mutex::new(config_init()));
+
+        assert!(config
+            .lock()
+            .expect("config lock")
+            .snaplinks_cleanup_required
+            .expect("Some SLCR"));
+
+        let update_config = Arc::clone(&config);
+
+        // Start the config watcher.
+        let _watcher_handle = Config::start_config_watcher(
+            update_config,
+            Some(TEST_CONFIG_FILE.to_string()),
+        );
+
+        // Change SNAPLINKS_CLEANUP_REQUIRED to false
+        let vars = MapBuilder::new()
+            .insert_str("DOMAIN_NAME", "fake.joyent.us")
+            .insert_bool("SNAPLINKS_CLEANUP_REQUIRED", false)
+            .insert_vec("INDEX_MORAY_SHARDS", |builder| {
+                builder.push_map(|bld| {
+                    bld.insert_str("host", "1.fake.joyent.us")
+                        .insert_bool("last", true)
+                })
+            })
+            .build();
+        let _ = update_test_config_with_vars(&vars);
+
+        // Send a signal letting the watcher know that we've updated the
+        // config file and it needs to reparse and update our in memory state.
+        unsafe { libc::raise(signal_hook::SIGUSR1) };
+        thread::sleep(std::time::Duration::from_secs(2));
+
+        // Assert that our in memory config's snaplinks_cleanup_required field
+        // has changed to false.
+        let check_config = config.lock().expect("config lock");
+        assert!(!check_config.snaplinks_cleanup_required.expect("Some SNR"));
+
+        config_fini();
+    }
 }

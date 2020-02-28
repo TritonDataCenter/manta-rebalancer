@@ -1,6 +1,6 @@
 {
     "domain_name": "{{DOMAIN_NAME}}",
-    "sapi_url": "{{SAPI_URL}}"
+    "snaplinks_cleanup_required": {{SNAPLINKS_CLEANUP_REQUIRED}},
     "shards": [{{#INDEX_MORAY_SHARDS}}
         {
             "host": "{{host}}"

@@ -24,7 +24,7 @@ use rebalancer::util;
 
 use std::collections::HashMap;
 use std::error::Error;
-use std::sync::{Arc, Barrier, Mutex};
+use std::sync::{Arc, Mutex};
 
 use clap::{App, Arg, ArgMatches};
 use crossbeam_channel;
@@ -361,9 +361,13 @@ fn router(config: Arc<Mutex<Config>>) -> Router {
 fn main() {
     let _guard = util::init_global_logger();
     let addr = "0.0.0.0:8888";
-    let (config_update_tx, config_update_rx) = crossbeam_channel::bounded(1);
 
     info!("Initializing...");
+
+    if let Err(e) = jobs::create_job_database() {
+        error!("Error creating Jobs database: {}", e);
+        return;
+    }
 
     let matches: ArgMatches = App::new("rebalancer")
         .version("0.1.0")
@@ -379,36 +383,21 @@ fn main() {
         .get_matches();
 
     let config_file = matches.value_of("config_file").map(|s| s.to_string());
-
-    let config = Mutex::new(
+    let config = Arc::new(Mutex::new(
         Config::parse_config(&config_file)
             .map_err(|e| {
                 error!("Error parsing config: {}", e);
                 std::process::exit(1);
             })
             .unwrap(),
-    );
+    ));
 
-    let config = Arc::new(config);
-    if let Err(e) = jobs::create_job_database() {
-        error!("Error creating Jobs database: {}", e);
-        return;
-    }
-
-    let barrier = Arc::new(Barrier::new(2));
-    let update_barrier = Arc::clone(&barrier);
-    let sig_handler_handle =
-        Config::config_update_signal_handler(config_update_tx, update_barrier);
-    barrier.wait();
-
-    let update_config = Arc::clone(&config);
-    let config_updater_handle =
-        Config::config_updater(config_update_rx, update_config, config_file);
+    let config_watcher_handle =
+        Config::start_config_watcher(Arc::clone(&config), config_file);
 
     gotham::start(addr, router(Arc::clone(&config)));
 
-    config_updater_handle.join().expect("join config updater");
-    sig_handler_handle.join().expect("join signal handler");
+    config_watcher_handle.join().expect("join config watcher");
 }
 
 #[cfg(test)]
