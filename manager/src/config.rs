@@ -77,7 +77,7 @@ impl Config {
         Ok(config)
     }
 
-    pub fn config_updater(
+    fn config_updater(
         config_update_rx: crossbeam_channel::Receiver<()>,
         update_config: Arc<Mutex<Config>>,
         config_file: Option<String>,
@@ -118,7 +118,7 @@ impl Config {
             .expect("Start config updater")
     }
 
-    pub fn config_update_signal_handler(
+    fn config_update_signal_handler(
         config_update_tx: crossbeam_channel::Sender<()>,
         update_barrier: Arc<Barrier>,
     ) -> JoinHandle<()> {
@@ -366,8 +366,8 @@ fn _config_update_signal_handler(
     config_update_tx: crossbeam_channel::Sender<()>,
     update_barrier: Arc<Barrier>,
 ) {
-    let signals = Signals::new(&[signal_hook::SIGUSR1])
-        .expect("register signals");
+    let signals =
+        Signals::new(&[signal_hook::SIGUSR1]).expect("register signals");
 
     update_barrier.wait();
 
@@ -403,11 +403,13 @@ mod tests {
     static TEST_CONFIG_FILE: &str = "config.test.json";
 
     lazy_static! {
-            static ref INITIALIZED: Mutex<bool> = Mutex::new(false);
-            pub static ref TEMPLATE_PATH: String = format!("{}/{}",
-                env!("CARGO_MANIFEST_DIR"),
-                "../sapi_manifests/rebalancer/template");
-        }
+        static ref INITIALIZED: Mutex<bool> = Mutex::new(false);
+        pub static ref TEMPLATE_PATH: String = format!(
+            "{}/{}",
+            env!("CARGO_MANIFEST_DIR"),
+            "../sapi_manifests/rebalancer/template"
+        );
+    }
 
     fn unit_test_init() {
         let mut init = INITIALIZED.lock().unwrap();
