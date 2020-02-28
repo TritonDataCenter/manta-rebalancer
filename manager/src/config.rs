@@ -432,10 +432,13 @@ mod tests {
         let template_str = std::fs::read_to_string(TEMPLATE_PATH.to_string())
             .expect("template string");
 
+        println!("{}", template_str);
+
         let config_data = mustache::compile_str(&template_str)
             .and_then(|t| t.render_data_to_string(vars))
             .expect("render template");
 
+        println!("{}", &config_data);
         File::create(TEST_CONFIG_FILE)
             .and_then(|mut f| f.write_all(config_data.as_bytes()))
             .map_err(Error::from)
@@ -469,6 +472,26 @@ mod tests {
     fn config_fini() {
         std::fs::remove_file(TEST_CONFIG_FILE)
             .expect("attempt to delete missing file")
+    }
+
+    #[test]
+    fn missing_snaplinks_cleanup_required() {
+        unit_test_init();
+        std::fs::remove_file(TEST_CONFIG_FILE).unwrap_or(());
+
+        let vars = MapBuilder::new()
+            .insert_str("DOMAIN_NAME", "fake.joyent.us")
+            .insert_vec("INDEX_MORAY_SHARDS", |builder| {
+                builder.push_map(|bld| {
+                    bld.insert_str("host", "1.fake.joyent.us")
+                        .insert_bool("last", true)
+                })
+            })
+            .build();
+
+        let config = update_test_config_with_vars(&vars);
+
+        assert!(config.snaplinks_cleanup_required.is_none());
     }
 
     #[test]
@@ -520,7 +543,7 @@ mod tests {
         // Assert that our in memory config's snaplinks_cleanup_required field
         // has changed to false.
         let check_config = config.lock().expect("config lock");
-        assert!(!check_config.snaplinks_cleanup_required.expect("Some SNR"));
+        assert!(check_config.snaplinks_cleanup_required.is_none());
 
         config_fini();
     }
