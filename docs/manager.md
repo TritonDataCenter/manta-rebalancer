@@ -282,3 +282,30 @@ cargo test --features "postgres" <module name>
 ```
 cargo test manager --features "postgres"
 ```
+
+## Internals
+
+### Database Schema
+The rebalancer manager saves information about the state of all rebalance
+ jobs in a local database.
+
+#### `jobs` Table
+| Column  | Type | Description  |
+|---|---|---|
+| id | TEXT | Job UUID |
+| action | TEXT(enum) | JobAction |
+| state | TEXT(enum) | JobState |
+
+
+### `evacuateobjects` Table
+| Column  | Type | Description  |
+|---|---|---|
+| id  | TEXT  | UUID of object  |
+| assignment_id | TEXT  | UUID of assignment |
+| object  | JSONB | JSON blob of object metadata  |
+| shard | INTEGER| shard number  |
+| dest_shark | TEXT | shark(mako) hostname|
+| etag | TEXT | object etag for putting metadata back to moray |
+| status | TEXT(enum)  | EvacuateObjectStatus |
+| skipped_reason | TEXT(enum)(nullable)  | ObjectSkippedReason  |
+| error | TEXT(enum)(nullable)  | EvacuateObjectError |
