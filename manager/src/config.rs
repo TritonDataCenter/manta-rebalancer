@@ -37,7 +37,8 @@ pub struct Shard {
 pub struct Config {
     pub domain_name: String,
     pub shards: Vec<Shard>,
-    pub snaplinks_cleanup_required: Option<bool>,
+    #[serde(default)]
+    pub snaplinks_cleanup_required: bool,
 }
 
 impl Config {
@@ -379,11 +380,14 @@ fn _config_update_signal_handler(
                 // (i.e. TrySendError::Full), then the updater
                 // thread will be doing an update anyway so no
                 // sense in clogging things up further.
-                if let Err(TrySendError::Disconnected(_)) =
-                    config_update_tx.try_send(())
-                {
-                    warn!("config_update listener is closed");
-                    break;
+                match config_update_tx.try_send(()) {
+                    Err(TrySendError::Disconnected(_)) => {
+                        warn!("config_update listener is closed");
+                        break;
+                    }
+                    Ok(()) | Err(TrySendError::Full(_)) => {
+                        continue;
+                    }
                 }
             }
             _ => unreachable!(), // Ignore other signals
@@ -422,7 +426,8 @@ mod tests {
         thread::spawn(move || {
             let _guard = util::init_global_logger();
             loop {
-                std::thread::sleep(std::time::Duration::from_millis(1))
+                // Loop around ::park() in the event of spurious wake ups.
+                std::thread::park();
             }
         });
     }
@@ -491,7 +496,7 @@ mod tests {
 
         let config = update_test_config_with_vars(&vars);
 
-        assert!(config.snaplinks_cleanup_required.is_none());
+        assert_eq!(config.snaplinks_cleanup_required, false);
     }
 
     #[test]
@@ -508,11 +513,12 @@ mod tests {
         // Generate a config with snaplinks_cleanup_required=true.
         let config = Arc::new(Mutex::new(config_init()));
 
-        assert!(config
-            .lock()
-            .expect("config lock")
-            .snaplinks_cleanup_required
-            .expect("Some SLCR"));
+        assert!(
+            config
+                .lock()
+                .expect("config lock")
+                .snaplinks_cleanup_required
+        );
 
         let update_config = Arc::clone(&config);
 
@@ -543,7 +549,7 @@ mod tests {
         // Assert that our in memory config's snaplinks_cleanup_required field
         // has changed to false.
         let check_config = config.lock().expect("config lock");
-        assert!(check_config.snaplinks_cleanup_required.is_none());
+        assert_eq!(check_config.snaplinks_cleanup_required, false);
 
         config_fini();
     }

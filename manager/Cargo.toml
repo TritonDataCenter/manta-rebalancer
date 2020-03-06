@@ -40,7 +40,7 @@ signal-hook = "0.1.13"
 
 [dev-dependencies]
 # Unfortuantely there is a long standing bug in mustache version 0.9.0 that has
-# fix which hasn't been integrated yet.  We are only using this for testing so
+# a fix which hasn't been integrated yet.  We are only using this for testing so
 # it should be fine to grab this crate from the branch for now.
 # https://github.com/nickel-org/rust-mustache/issues/60
 mustache = {git = "https://github.com/nickel-org/rust-mustache", branch = "issue-60" }
