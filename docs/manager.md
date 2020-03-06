@@ -284,20 +284,28 @@ cargo test manager --features "postgres"
 ```
 
 ## Internals
-### `jobs` schema
-| Column  | Type | Description  |
-|---|---|---|
-| | | |
 
-### `evacuateobjects` schema
+### Database Schema
+The rebalancer manager saves information about the state of all rebalance
+ jobs in a local database.
+
+#### `jobs` Table
 | Column  | Type | Description  |
 |---|---|---|
-| id  | text  | UUID of object  |
-| assignment_id | text  | UUID of assignment |
-| object  | jsonb | JSON blob of object metadata  |
-| shard | integer | shard number  |
-| dest_shark | text | MantaStorageNode of destination |
-| etag | text | object etag for putting metadata back to moray |
-| status | text(enum)  | EvacuateObjectStatus |
-| skipped_reason | text(enum)(nullable)  | ObjectSkippedReason  |
-| error | text(enum)(nullable)  | EvacuateObjectError |
+| id | TEXT | Job UUID |
+| action | TEXT(enum) | JobAction |
+| state | TEXT(enum) | JobState |
+
+
+### `evacuateobjects` Table
+| Column  | Type | Description  |
+|---|---|---|
+| id  | TEXT  | UUID of object  |
+| assignment_id | TEXT  | UUID of assignment |
+| object  | JSONB | JSON blob of object metadata  |
+| shard | INTEGER| shard number  |
+| dest_shark | TEXT | shark(mako) hostname|
+| etag | TEXT | object etag for putting metadata back to moray |
+| status | TEXT(enum)  | EvacuateObjectStatus |
+| skipped_reason | TEXT(enum)(nullable)  | ObjectSkippedReason  |
+| error | TEXT(enum)(nullable)  | EvacuateObjectError |
