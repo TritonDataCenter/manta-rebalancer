@@ -542,7 +542,7 @@ mod tests {
         let _ = update_test_config_with_vars(&vars);
 
         // Send a signal letting the watcher know that we've updated the
-        // config file and it needs to reparse and update our in memory state.
+        // config file and it needs to re-parse and update our in memory state.
         unsafe { libc::raise(signal_hook::SIGUSR1) };
         thread::sleep(std::time::Duration::from_secs(2));
 

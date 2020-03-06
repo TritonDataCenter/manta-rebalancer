@@ -22,7 +22,7 @@
 
         <exec_method type="method" name="start" exec="/opt/smartdc/rebalancer/bin/rebalancer-manager &amp;" timeout_seconds="30" />
         <exec_method type="method" name="stop" exec=":kill" timeout_seconds="30" />
-        <exec_method type="method" name="refresh" exec=":kill -SIGUSR1" timeout_seconds="30" />
+        <exec_method type="method" name="refresh" exec="kill -SIGUSR1" timeout_seconds="30" />
 
         <instance name="default" enabled="true" />
 
