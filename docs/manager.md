@@ -282,3 +282,22 @@ cargo test --features "postgres" <module name>
 ```
 cargo test manager --features "postgres"
 ```
+
+## Internals
+### `jobs` schema
+| Column  | Type | Description  |
+|---|---|---|
+| | | |
+
+### `evacuateobjects` schema
+| Column  | Type | Description  |
+|---|---|---|
+| id  | text  | UUID of object  |
+| assignment_id | text  | UUID of assignment |
+| object  | jsonb | JSON blob of object metadata  |
+| shard | integer | shard number  |
+| dest_shark | text | MantaStorageNode of destination |
+| etag | text | object etag for putting metadata back to moray |
+| status | text(enum)  | EvacuateObjectStatus |
+| skipped_reason | text(enum)(nullable)  | ObjectSkippedReason  |
+| error | text(enum)(nullable)  | EvacuateObjectError |
