@@ -119,6 +119,11 @@ impl Config {
             .expect("Start config updater")
     }
 
+    // Run a thread that listens for the SIGUSR1 signal which config-agent
+    // should be sending us via SMF when the config file is updated.  When a
+    // signal is trapped it simply sends an empty message to the updater thread
+    // which handles updating the configuration state in memory.  We don't want
+    // to block or take any locks here because the signal is asynchronous.
     fn config_update_signal_handler(
         config_update_tx: crossbeam_channel::Sender<()>,
         update_barrier: Arc<Barrier>,
@@ -358,11 +363,6 @@ fn job_create_subcommand_handler(
     Ok(SubCommand::DoJob(Box::new(job)))
 }
 
-// Run a thread that listens for the SIGUSR1 signal which config-agent should
-// be sending us via SMF when the config file is updated.  When a signal is
-// trapped it simply sends an empty message to the updater thread which
-// handles updating the configuration state in memory.  We don't want to
-// block or take any locks here because the signal is asynchronous.
 fn _config_update_signal_handler(
     config_update_tx: crossbeam_channel::Sender<()>,
     update_barrier: Arc<Barrier>,
