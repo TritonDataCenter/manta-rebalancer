@@ -16,7 +16,7 @@ ENGBLD_REQUIRE       := $(shell git submodule update --init deps/eng)
 include ./deps/eng/tools/mk/Makefile.defs
 TOP ?= $(error Unable to access eng.git submodule Makefiles.)
 
-SMF_MANIFESTS =     smf/manifests/rebalancer-manager.xml \
+SMF_MANIFESTS =     smf/manifests/rebalancer.xml \
                     smf/manifests/rebalancer-agent.xml
 
 AGENT_TARBALL       := $(NAME)-agent-$(STAMP).tar.gz
@@ -69,7 +69,7 @@ release: all deps/manta-scripts/.git $(SMF_MANIFESTS)
 	    target/release/rebalancer-adm \
 	    $(RELSTAGEDIR)/root/opt/smartdc/$(NAME)/bin/
 	cp -R \
-	    $(TOP)/smf/manifests/rebalancer-manager.xml \
+	    $(TOP)/smf/manifests/rebalancer.xml \
 	    $(RELSTAGEDIR)/root/opt/smartdc/$(NAME)/smf/manifests/
 	# boot
 	@mkdir -p $(RELSTAGEDIR)/root/opt/smartdc/boot/scripts
