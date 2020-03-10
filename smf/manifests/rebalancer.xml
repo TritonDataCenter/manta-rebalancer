@@ -10,8 +10,8 @@
     Copyright 2020 Joyent, Inc.
 -->
 
-<service_bundle type="manifest" name="rebalancer-manager">
-    <service name="manta/application/rebalancer-manager" type="service" version="1">
+<service_bundle type="manifest" name="rebalancer">
+    <service name="manta/application/rebalancer" type="service" version="1">
 
         <dependency name="network" grouping="require_all" restart_on="error" type="service">
             <service_fmri value="svc:/network/physical" />

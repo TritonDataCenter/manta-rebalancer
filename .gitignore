@@ -8,3 +8,4 @@
 .idea/*
 cscope.*
 *.db
+.DS_Store

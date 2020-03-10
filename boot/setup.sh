@@ -6,7 +6,7 @@
 #
 
 #
-# Copyright 2019 Joyent, Inc.
+# Copyright 2020 Joyent, Inc.
 #
 
 export PS4='[\D{%FT%TZ}] ${BASH_SOURCE}:${LINENO}: ${FUNCNAME[0]:+${FUNCNAME[0]}(): }'
@@ -21,14 +21,14 @@ source /opt/smartdc/boot/scripts/services.sh
 
 manta_common_presetup
 manta_add_manifest_dir "/opt/smartdc/rebalancer"
-manta_common2_setup "rebalancer-manager"
+manta_common2_setup "rebalancer"
 
-echo "Setting up rebalancer-manager"
+echo "Setting up rebalancer manager"
 /usr/sbin/svccfg import /opt/local/lib/svc/manifest/postgresql.xml
 /usr/sbin/svcadm enable svc:/pkgsrc/postgresql:default
-/usr/sbin/svccfg import /opt/smartdc/rebalancer/smf/manifests/rebalancer-manager.xml
+/usr/sbin/svccfg import /opt/smartdc/rebalancer/smf/manifests/rebalancer.xml
 
-manta_common2_setup_log_rotation "rebalancer-manager"
+manta_common2_setup_log_rotation "rebalancer"
 manta_common2_setup_end
 
 exit 0
