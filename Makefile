@@ -123,14 +123,17 @@ pkg_agent:
 clippy-deps:
 	rustup component add clippy
 
-jobtests:
+managertests:
 	RUST_LOG=remora=trace $(CARGO) test tests --bin rebalancer-manager -- --test-threads=1
+
+jobtests:
 	RUST_LOG=remora=trace $(CARGO) test job -- --test-threads=1
+	RUST_LOG=remora=trace $(CARGO) test config -- --test-threads=1
 
 agenttests:
 	RUST_LOG=remora=trace $(CARGO) test agenttests
 
-test: agenttests jobtests
+test: agenttests jobtests managertests
 
 #
 # Included target definitions.

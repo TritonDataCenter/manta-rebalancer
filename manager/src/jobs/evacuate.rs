@@ -452,16 +452,23 @@ impl EvacuateJob {
         create_evacuateobjects_table(&*conn)
     }
 
-    pub fn run(mut self, config: &Config) -> Result<(), Error> {
-        let mut ret = Ok(());
-
-        // Validate the shark upfront.
+    // This is not purely a validation function.  We do set the from_shark field
+    // in here so that it has the complete manta_storage_id and datacenter.
+    fn validate(&mut self) -> Result<(), Error> {
         let from_shark = moray_client::get_manta_object_shark(
             &self.from_shark.manta_storage_id,
             &self.domain_name,
         )?;
 
         self.from_shark = from_shark;
+
+        Ok(())
+    }
+
+    pub fn run(mut self, config: &Config) -> Result<(), Error> {
+        self.validate()?;
+
+        let mut ret = Ok(());
 
         // job_action will be shared between threads so create an Arc for it.
         let job_action = Arc::new(self);

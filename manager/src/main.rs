@@ -17,13 +17,14 @@ extern crate serde_derive;
 #[macro_use]
 extern crate rebalancer;
 
-use manager::config::{self, Config};
+use manager::config::Config;
 use manager::jobs::status::StatusError;
 use manager::jobs::{self, JobBuilder, JobDbEntry};
 use rebalancer::util;
 
 use std::collections::HashMap;
 use std::error::Error;
+use std::sync::{Arc, Mutex};
 
 use clap::{App, Arg, ArgMatches};
 use crossbeam_channel;
@@ -206,7 +207,7 @@ struct EvacuateJobPayload {
 #[derive(Clone)]
 struct JobCreateHandler {
     tx: crossbeam_channel::Sender<jobs::Job>,
-    config: Config,
+    config: Arc<Mutex<Config>>,
 }
 
 impl NewHandler for JobCreateHandler {
@@ -220,8 +221,20 @@ impl NewHandler for JobCreateHandler {
 impl Handler for JobCreateHandler {
     fn handle(self, mut state: State) -> Box<HandlerFuture> {
         info!("Post Job Request");
-        let job_builder = JobBuilder::new(self.config.clone());
 
+        let config = self.config.lock().expect("config lock").clone();
+        let domain_name = config.domain_name.clone();
+
+        // If snaplinks are still in play then we immediately return failure.
+        if config.snaplinks_cleanup_required {
+            let error = invalid_server_error(
+                &state,
+                String::from("Snaplinks Cleanup Required"),
+            );
+            return Box::new(future::ok((state, error)));
+        }
+
+        let job_builder = JobBuilder::new(config);
         let f =
             Body::take_from(&mut state).concat2().then(
                 move |body| match body {
@@ -269,7 +282,7 @@ impl Handler for JobCreateHandler {
                 let job = match job_builder
                     .evacuate(
                         evac_payload.from_shark,
-                        &self.config.domain_name,
+                        &domain_name,
                         max_objects,
                     )
                     .commit()
@@ -303,7 +316,7 @@ impl Handler for JobCreateHandler {
     }
 }
 
-fn router(config: Config) -> Router {
+fn router(config: Arc<Mutex<Config>>) -> Router {
     let (tx, rx) = crossbeam_channel::bounded(5);
     let job_create_handler = JobCreateHandler { tx, config };
 
@@ -349,6 +362,11 @@ fn main() {
 
     info!("Initializing...");
 
+    if let Err(e) = jobs::create_job_database() {
+        error!("Error creating Jobs database: {}", e);
+        return;
+    }
+
     let matches: ArgMatches = App::new("rebalancer")
         .version("0.1.0")
         .about("Rebalancer")
@@ -362,21 +380,22 @@ fn main() {
         )
         .get_matches();
 
-    let config_file = matches.value_of("config_file");
+    let config_file = matches.value_of("config_file").map(|s| s.to_string());
+    let config = Arc::new(Mutex::new(
+        Config::parse_config(&config_file)
+            .map_err(|e| {
+                error!("Error parsing config: {}", e);
+                std::process::exit(1);
+            })
+            .unwrap(),
+    ));
 
-    let config = config::Config::parse_config(config_file)
-        .map_err(|e| {
-            error!("Error parsing config: {}", e);
-            std::process::exit(1);
-        })
-        .unwrap();
+    let config_watcher_handle =
+        Config::start_config_watcher(Arc::clone(&config), config_file);
 
-    if let Err(e) = jobs::create_job_database() {
-        error!("Error creating Jobs database: {}", e);
-        return;
-    }
+    gotham::start(addr, router(Arc::clone(&config)));
 
-    gotham::start(addr, router(config))
+    config_watcher_handle.join().expect("join config watcher");
 }
 
 #[cfg(test)]
@@ -430,18 +449,27 @@ mod tests {
         jobs.iter().any(|j| j.id.to_string() == id)
     }
 
+    fn test_server_init() -> (Arc<Mutex<Config>>, TestServer) {
+        let config = Mutex::new(
+            Config::parse_config(&Some("src/config.json".to_string()))
+                .expect("config"),
+        );
+        let config = Arc::new(config);
+        let test_server =
+            TestServer::new(router(Arc::clone(&config))).expect("test server");
+        (config, test_server)
+    }
+
     #[test]
     fn basic() {
         unit_test_init();
-        let config =
-            Config::parse_config(Some("src/config.json")).expect("config");
-        let test_server =
-            TestServer::new(router(config.clone())).expect("test server");
+        let (config, test_server) = test_server_init();
 
         // Create a Job manually so that we know one exists regardless of the
         // ability of this API to create one, or the order in which tests are
         // run.
-        let job_builder = JobBuilder::new(config.clone());
+        let config = config.lock().expect("lock config").clone();
+        let job_builder = JobBuilder::new(config);
         let job = job_builder
             .evacuate(String::from("fake_storage_id"), "fake.joyent.us", None)
             .commit()
@@ -470,9 +498,7 @@ mod tests {
     #[test]
     fn post_test() {
         unit_test_init();
-        let config =
-            Config::parse_config(Some("src/config.json")).expect("config");
-        let test_server = TestServer::new(router(config)).expect("test server");
+        let (_, test_server) = test_server_init();
         let job_payload = JobPayload::Evacuate(EvacuateJobPayload {
             from_shark: String::from("fake_storage_id"),
             max_objects: Some(10),

@@ -1,5 +1,8 @@
 {
     "domain_name": "{{DOMAIN_NAME}}",
+    {{#SNAPLINKS_CLEANUP_REQUIRED}}
+    "snaplinks_cleanup_required": true,
+    {{/SNAPLINKS_CLEANUP_REQUIRED}}
     "shards": [{{#INDEX_MORAY_SHARDS}}
         {
             "host": "{{host}}"

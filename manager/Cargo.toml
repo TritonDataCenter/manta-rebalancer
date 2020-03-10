@@ -36,6 +36,15 @@ slog-bunyan = { git = "https://github.com/slog-rs/bunyan" }
 slog-scope = "4.1.2"
 threadpool = "1.7.1"
 resolve = "0.2.0"
+signal-hook = "0.1.13"
+
+[dev-dependencies]
+# Unfortuantely there is a long standing bug in mustache version 0.9.0 that has
+# a fix which hasn't been integrated yet.  We are only using this for testing so
+# it should be fine to grab this crate from the branch for now.
+# https://github.com/nickel-org/rust-mustache/issues/60
+mustache = {git = "https://github.com/rjloura/rust-mustache", branch = "issue-60" }
+libc = "0.2.67"
 
 [[bin]]
 name = "rebalancer-manager"

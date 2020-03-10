@@ -11,7 +11,7 @@
 use quickcheck::{Arbitrary, Gen};
 use quickcheck_helpers::random::string as random_string;
 use rebalancer::error::Error;
-use reqwest;
+use reqwest::{self, StatusCode};
 use serde::{Deserialize, Serialize};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -205,6 +205,17 @@ fn fetch_sharks(host: &str) -> Vec<StorageNode> {
                 return vec![];
             }
         };
+
+        trace!("Got picker response: {:#?}", response);
+
+        // Storinfo, or our connection to it, is sick.  So instead of
+        // breaking out of the loop and possibly returning partial results we
+        // return an empty Vec.
+        if response.status() != StatusCode::OK {
+            error!("Could not contact storinfo service {:#?}", response);
+            return vec![];
+        }
+
         let result: Vec<StorageNode> =
             response.json().expect("picker response format");
 
