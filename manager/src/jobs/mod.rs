@@ -76,6 +76,7 @@ impl JobBuilder {
             from_shark,
             domain_name,
             &self.id.to_string(),
+            self.config.options,
             max_objects,
         ) {
             Ok(j) => {

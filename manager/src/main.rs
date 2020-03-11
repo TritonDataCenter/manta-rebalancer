@@ -283,8 +283,6 @@ impl Handler for JobCreateHandler {
                     .evacuate(
                         evac_payload.from_shark,
                         &domain_name,
-                        &job_uuid,
-                        self.config.options.clone(),
                         max_objects,
                     )
                     .commit()

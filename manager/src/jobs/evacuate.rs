@@ -423,7 +423,7 @@ impl EvacuateJob {
         storage_id: String,
         domain_name: &str,
         db_name: &str,
-        config_options: ConfigOptions,
+        options: ConfigOptions,
         max_objects: Option<u32>,
     ) -> Result<Self, Error> {
         let mut from_shark = MantaObjectShark::default();
@@ -447,7 +447,7 @@ impl EvacuateJob {
             conn: Mutex::new(conn),
             total_db_time: Mutex::new(0),
             domain_name: domain_name.to_string(),
-            options: config_options,
+            options: options,
             max_objects,
         })
     }
@@ -2890,6 +2890,7 @@ mod tests {
             from_shark,
             "fakedomain.us",
             &Uuid::new_v4().to_string(),
+            ConfigOptions::default(),
             Some(100),
         )
         .expect("initialize evacuate job");
@@ -3083,6 +3084,7 @@ mod tests {
             String::new(),
             "fakedomain.us",
             &Uuid::new_v4().to_string(),
+            ConfigOptions::default(),
             None,
         )
         .expect("initialize evacuate job");
@@ -3213,6 +3215,7 @@ mod tests {
             String::new(),
             "fakedomain.us",
             &Uuid::new_v4().to_string(),
+            ConfigOptions::default(),
             None,
         )
         .expect("initialize evacuate job");
@@ -3343,6 +3346,7 @@ mod tests {
             String::new(),
             "region.fakedomain.us",
             &Uuid::new_v4().to_string(),
+            ConfigOptions::default(),
             None,
         )
         .expect("initialize evacuate job");

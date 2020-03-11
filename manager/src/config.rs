@@ -36,7 +36,7 @@ pub struct Shard {
     pub host: String,
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, Debug, Clone, Copy)]
 #[serde(default)]
 pub struct ConfigOptions {
     pub max_assignment_size: usize,
