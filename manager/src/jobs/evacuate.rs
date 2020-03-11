@@ -2744,7 +2744,8 @@ mod tests {
     use quickcheck_helpers::random::string as random_string;
     use rand::Rng;
     use rebalancer::libagent::{
-        router as agent_router, AgentAssignmentStats, AgentConfig};
+        router as agent_router, AgentAssignmentStats, AgentConfig,
+    };
     use rebalancer::util;
 
     lazy_static! {
@@ -2771,10 +2772,7 @@ mod tests {
             // way down to the threads that contact the agent does not exist.
             // If or when it does, we can use gotham's TestServer as opposed to
             // explicitly calling gotham::start().
-            gotham::start(
-                addr,
-                agent_router(process_task_always_pass, config)
-            );
+            gotham::start(addr, agent_router(process_task_always_pass, config));
         });
 
         *init = true;

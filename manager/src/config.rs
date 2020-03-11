@@ -26,7 +26,7 @@ use rebalancer::util;
 use std::thread;
 use std::thread::JoinHandle;
 
-static DEFAULT_CONFIG_PATH: &str = "/var/tmp/config.json";
+static DEFAULT_CONFIG_PATH: &str = "/opt/smartdc/rebalancer/config.json";
 static DEFAULT_MAX_ASSIGNMENT_SIZE: usize = 50;
 static DEFAULT_MAX_METADATA_UPDATE_THREADS: usize = 2;
 static DEFAULT_MAX_SHARKS: usize = 5;
