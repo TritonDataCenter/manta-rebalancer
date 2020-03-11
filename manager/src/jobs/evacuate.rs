@@ -2659,9 +2659,7 @@ fn start_metadata_update_broker(
     job_action: Arc<EvacuateJob>,
     md_update_rx: crossbeam::Receiver<Assignment>,
 ) -> Result<thread::JoinHandle<Result<(), Error>>, Error> {
-    let pool = ThreadPool::new(
-        job_action.options.max_metadata_update_threads
-    );
+    let pool = ThreadPool::new(job_action.options.max_metadata_update_threads);
     let queue = Arc::new(Injector::<Assignment>::new());
     let queue_back = Arc::clone(&queue);
 

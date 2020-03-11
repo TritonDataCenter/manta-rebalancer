@@ -427,7 +427,7 @@ mod tests {
     use libc;
     use mustache::{Data, MapBuilder};
     use std::fs::File;
-    use std::io::Write;
+    use std::io::{BufRead, BufReader, Write};
 
     static TEST_CONFIG_FILE: &str = "config.test.json";
 
@@ -457,6 +457,16 @@ mod tests {
         });
     }
 
+    fn write_config_file(buf: &[u8]) -> Config {
+        File::create(TEST_CONFIG_FILE)
+            .and_then(|mut f| f.write_all(buf))
+            .map_err(Error::from)
+            .and_then(|_| {
+                Config::parse_config(&Some(TEST_CONFIG_FILE.to_string()))
+            })
+            .expect("file write")
+    }
+
     // Update our test config file with new variables
     fn update_test_config_with_vars(vars: &Data) -> Config {
         let template_str = std::fs::read_to_string(TEMPLATE_PATH.to_string())
@@ -469,13 +479,7 @@ mod tests {
             .expect("render template");
 
         println!("{}", &config_data);
-        File::create(TEST_CONFIG_FILE)
-            .and_then(|mut f| f.write_all(config_data.as_bytes()))
-            .map_err(Error::from)
-            .and_then(|_| {
-                Config::parse_config(&Some(TEST_CONFIG_FILE.to_string()))
-            })
-            .expect("file write")
+        write_config_file(config_data.as_bytes())
     }
 
     // Initialize a test configuration file by parsing and rendering the
@@ -502,6 +506,58 @@ mod tests {
     fn config_fini() {
         std::fs::remove_file(TEST_CONFIG_FILE)
             .expect("attempt to delete missing file")
+    }
+
+    #[test]
+    fn config_basic_test() {
+        unit_test_init();
+        config_init();
+
+        File::open(TEST_CONFIG_FILE)
+            .and_then(|f| {
+                for line in BufReader::new(f).lines() {
+                    let l = line.expect("line reader");
+                    println!("{}", l);
+
+                    assert!(!l.contains("options"));
+                    assert!(!l.contains("max_assignment_size"));
+                    assert!(!l.contains("max_metadata_update_threads"));
+                    assert!(!l.contains("max_sharks"));
+                }
+                Ok(())
+            })
+            .expect("config_basic_test");
+
+        config_fini();
+    }
+
+    #[test]
+    fn config_options_test() {
+        unit_test_init();
+
+        let file_contents = r#"{
+                "options": {
+                    "max_assignment_size": 1111,
+                    "max_metadata_update_threads": 2222,
+                    "max_sharks": 3333
+                },
+                "domain_name": "perf1.scloud.host",
+                "shards": [
+                    {
+                        "host": "1.moray.perf1.scloud.host"
+                    }
+                ]
+            }
+        "#;
+
+        std::fs::remove_file(TEST_CONFIG_FILE).unwrap_or(());
+        let config = write_config_file(file_contents.as_bytes());
+
+        assert_eq!(config.options.max_assignment_size, 1111);
+        assert_eq!(config.options.max_metadata_update_threads, 2222);
+        assert_eq!(config.options.max_sharks, 3333);
+
+        config_fini();
     }
 
     #[test]
