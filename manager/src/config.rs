@@ -36,6 +36,8 @@ pub struct Shard {
     pub host: String,
 }
 
+// Until we can determine a reasonable set of defaults and limits these
+// tunables are intentionally not exposed in the documentation.
 #[derive(Deserialize, Debug, Clone, Copy)]
 #[serde(default)]
 pub struct ConfigOptions {

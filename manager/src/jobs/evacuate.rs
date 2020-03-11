@@ -447,7 +447,7 @@ impl EvacuateJob {
             conn: Mutex::new(conn),
             total_db_time: Mutex::new(0),
             domain_name: domain_name.to_string(),
-            options: options,
+            options,
             max_objects,
         })
     }
