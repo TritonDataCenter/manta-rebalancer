@@ -1692,17 +1692,18 @@ where
     thread::Builder::new()
         .name(String::from("assignment_manager"))
         .spawn(move || {
+            let mut done = false;
+            let max_sharks = job_action.options.max_sharks;
+            let max_assignment_size = job_action.options.max_assignment_size;
+
             let algo = mod_storinfo::DefaultChooseAlgorithm {
                 min_avail_mb: job_action.min_avail_mb,
                 blacklist: vec![],
             };
 
-            let max_sharks = job_action.options.max_sharks;
-            let max_assignment_size = job_action.options.max_assignment_size;
-
             let mut shark_hash: HashMap<StorageId, SharkHashEntry> =
                 HashMap::new();
-            let mut done = false;
+
             while !done {
                 // TODO: MANTA-4519
                 // get a fresh shark list
@@ -1769,7 +1770,6 @@ where
                 //      * find first entry that is not either shark in object
                 //      * send object to that shark's thread
                 // end loop
-                // TODO: file ticket, max number of outstanding objects
                 for _ in 0..max_assignment_size {
                     // Get an object
                     let mut eobj = match obj_rx.recv() {
@@ -2659,8 +2659,9 @@ fn start_metadata_update_broker(
     job_action: Arc<EvacuateJob>,
     md_update_rx: crossbeam::Receiver<Assignment>,
 ) -> Result<thread::JoinHandle<Result<(), Error>>, Error> {
-    let max_md_threads = job_action.options.max_metadata_update_threads;
-    let pool = ThreadPool::new(max_md_threads);
+    let pool = ThreadPool::new(
+        job_action.options.max_metadata_update_threads
+    );
     let queue = Arc::new(Injector::<Assignment>::new());
     let queue_back = Arc::clone(&queue);
 
