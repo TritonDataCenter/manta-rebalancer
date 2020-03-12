@@ -26,11 +26,34 @@ use rebalancer::util;
 use std::thread;
 use std::thread::JoinHandle;
 
-static DEFAULT_CONFIG_PATH: &str = "/var/tmp/config.json";
+static DEFAULT_CONFIG_PATH: &str = "/opt/smartdc/rebalancer/config.json";
+static DEFAULT_MAX_ASSIGNMENT_SIZE: usize = 50;
+static DEFAULT_MAX_METADATA_UPDATE_THREADS: usize = 2;
+static DEFAULT_MAX_SHARKS: usize = 5;
 
 #[derive(Deserialize, Default, Debug, Clone)]
 pub struct Shard {
     pub host: String,
+}
+
+// Until we can determine a reasonable set of defaults and limits these
+// tunables are intentionally not exposed in the documentation.
+#[derive(Deserialize, Debug, Clone, Copy)]
+#[serde(default)]
+pub struct ConfigOptions {
+    pub max_assignment_size: usize,
+    pub max_metadata_update_threads: usize,
+    pub max_sharks: usize,
+}
+
+impl Default for ConfigOptions {
+    fn default() -> ConfigOptions {
+        ConfigOptions {
+            max_assignment_size: DEFAULT_MAX_ASSIGNMENT_SIZE,
+            max_metadata_update_threads: DEFAULT_MAX_METADATA_UPDATE_THREADS,
+            max_sharks: DEFAULT_MAX_SHARKS,
+        }
+    }
 }
 
 #[derive(Deserialize, Default, Debug, Clone)]
@@ -39,6 +62,8 @@ pub struct Config {
     pub shards: Vec<Shard>,
     #[serde(default)]
     pub snaplinks_cleanup_required: bool,
+    #[serde(default)]
+    pub options: ConfigOptions,
 }
 
 impl Config {
@@ -402,7 +427,7 @@ mod tests {
     use libc;
     use mustache::{Data, MapBuilder};
     use std::fs::File;
-    use std::io::Write;
+    use std::io::{BufRead, BufReader, Write};
 
     static TEST_CONFIG_FILE: &str = "config.test.json";
 
@@ -432,6 +457,16 @@ mod tests {
         });
     }
 
+    fn write_config_file(buf: &[u8]) -> Config {
+        File::create(TEST_CONFIG_FILE)
+            .and_then(|mut f| f.write_all(buf))
+            .map_err(Error::from)
+            .and_then(|_| {
+                Config::parse_config(&Some(TEST_CONFIG_FILE.to_string()))
+            })
+            .expect("file write")
+    }
+
     // Update our test config file with new variables
     fn update_test_config_with_vars(vars: &Data) -> Config {
         let template_str = std::fs::read_to_string(TEMPLATE_PATH.to_string())
@@ -444,13 +479,7 @@ mod tests {
             .expect("render template");
 
         println!("{}", &config_data);
-        File::create(TEST_CONFIG_FILE)
-            .and_then(|mut f| f.write_all(config_data.as_bytes()))
-            .map_err(Error::from)
-            .and_then(|_| {
-                Config::parse_config(&Some(TEST_CONFIG_FILE.to_string()))
-            })
-            .expect("file write")
+        write_config_file(config_data.as_bytes())
     }
 
     // Initialize a test configuration file by parsing and rendering the
@@ -480,6 +509,58 @@ mod tests {
     }
 
     #[test]
+    fn config_basic_test() {
+        unit_test_init();
+        config_init();
+
+        File::open(TEST_CONFIG_FILE)
+            .and_then(|f| {
+                for line in BufReader::new(f).lines() {
+                    let l = line.expect("line reader");
+                    println!("{}", l);
+
+                    assert!(!l.contains("options"));
+                    assert!(!l.contains("max_assignment_size"));
+                    assert!(!l.contains("max_metadata_update_threads"));
+                    assert!(!l.contains("max_sharks"));
+                }
+                Ok(())
+            })
+            .expect("config_basic_test");
+
+        config_fini();
+    }
+
+    #[test]
+    fn config_options_test() {
+        unit_test_init();
+
+        let file_contents = r#"{
+                "options": {
+                    "max_assignment_size": 1111,
+                    "max_metadata_update_threads": 2222,
+                    "max_sharks": 3333
+                },
+                "domain_name": "perf1.scloud.host",
+                "shards": [
+                    {
+                        "host": "1.moray.perf1.scloud.host"
+                    }
+                ]
+            }
+        "#;
+
+        std::fs::remove_file(TEST_CONFIG_FILE).unwrap_or(());
+        let config = write_config_file(file_contents.as_bytes());
+
+        assert_eq!(config.options.max_assignment_size, 1111);
+        assert_eq!(config.options.max_metadata_update_threads, 2222);
+        assert_eq!(config.options.max_sharks, 3333);
+
+        config_fini();
+    }
+
+    #[test]
     fn missing_snaplinks_cleanup_required() {
         unit_test_init();
         std::fs::remove_file(TEST_CONFIG_FILE).unwrap_or(());
@@ -497,6 +578,7 @@ mod tests {
         let config = update_test_config_with_vars(&vars);
 
         assert_eq!(config.snaplinks_cleanup_required, false);
+        config_fini();
     }
 
     #[test]

@@ -19,7 +19,7 @@ use rebalancer::libagent::{
 };
 use rebalancer::util::{MAX_HTTP_STATUS_CODE, MIN_HTTP_STATUS_CODE};
 
-use crate::config::Config;
+use crate::config::{Config, ConfigOptions};
 use crate::jobs::{Assignment, AssignmentId, AssignmentState, StorageId};
 use crate::moray_client;
 use crate::pg_db;
@@ -409,6 +409,9 @@ pub struct EvacuateJob {
     /// Accumulator for total time spent on DB inserts. (test/dev)
     pub total_db_time: Mutex<u128>,
 
+    /// Tunable options
+    pub options: ConfigOptions,
+
     /// TESTING ONLY
     pub max_objects: Option<u32>,
 }
@@ -420,6 +423,7 @@ impl EvacuateJob {
         storage_id: String,
         domain_name: &str,
         db_name: &str,
+        options: ConfigOptions,
         max_objects: Option<u32>,
     ) -> Result<Self, Error> {
         let mut from_shark = MantaObjectShark::default();
@@ -443,6 +447,7 @@ impl EvacuateJob {
             conn: Mutex::new(conn),
             total_db_time: Mutex::new(0),
             domain_name: domain_name.to_string(),
+            options,
             max_objects,
         })
     }
@@ -1687,6 +1692,10 @@ where
     thread::Builder::new()
         .name(String::from("assignment_manager"))
         .spawn(move || {
+            let mut done = false;
+            let max_sharks = job_action.options.max_sharks;
+            let max_assignment_size = job_action.options.max_assignment_size;
+
             let algo = mod_storinfo::DefaultChooseAlgorithm {
                 min_avail_mb: job_action.min_avail_mb,
                 blacklist: vec![],
@@ -1694,7 +1703,7 @@ where
 
             let mut shark_hash: HashMap<StorageId, SharkHashEntry> =
                 HashMap::new();
-            let mut done = false;
+
             while !done {
                 // TODO: MANTA-4519
                 // get a fresh shark list
@@ -1706,7 +1715,7 @@ where
 
                 // TODO: file ticket, tunable number of sharks which implies
                 // number of threads.
-                shark_list.truncate(5);
+                shark_list.truncate(max_sharks);
 
                 // For any active sharks that are not in the list remove them
                 // from the hash, send the stop command, join the associated
@@ -1761,8 +1770,7 @@ where
                 //      * find first entry that is not either shark in object
                 //      * send object to that shark's thread
                 // end loop
-                // TODO: file ticket, max number of outstanding objects
-                for _ in 0..50 {
+                for _ in 0..max_assignment_size {
                     // Get an object
                     let mut eobj = match obj_rx.recv() {
                         Ok(obj) => {
@@ -2651,8 +2659,7 @@ fn start_metadata_update_broker(
     job_action: Arc<EvacuateJob>,
     md_update_rx: crossbeam::Receiver<Assignment>,
 ) -> Result<thread::JoinHandle<Result<(), Error>>, Error> {
-    // TODO: tunable
-    let pool = ThreadPool::new(3);
+    let pool = ThreadPool::new(job_action.options.max_metadata_update_threads);
     let queue = Arc::new(Injector::<Assignment>::new());
     let queue_back = Arc::clone(&queue);
 
@@ -2736,7 +2743,8 @@ mod tests {
     use quickcheck_helpers::random::string as random_string;
     use rand::Rng;
     use rebalancer::libagent::{
-        router as agent_router, AgentAssignmentStats, AgentConfig};
+        router as agent_router, AgentAssignmentStats, AgentConfig,
+    };
     use rebalancer::util;
 
     lazy_static! {
@@ -2763,10 +2771,7 @@ mod tests {
             // way down to the threads that contact the agent does not exist.
             // If or when it does, we can use gotham's TestServer as opposed to
             // explicitly calling gotham::start().
-            gotham::start(
-                addr,
-                agent_router(process_task_always_pass, config)
-            );
+            gotham::start(addr, agent_router(process_task_always_pass, config));
         });
 
         *init = true;
@@ -2882,6 +2887,7 @@ mod tests {
             from_shark,
             "fakedomain.us",
             &Uuid::new_v4().to_string(),
+            ConfigOptions::default(),
             Some(100),
         )
         .expect("initialize evacuate job");
@@ -3075,6 +3081,7 @@ mod tests {
             String::new(),
             "fakedomain.us",
             &Uuid::new_v4().to_string(),
+            ConfigOptions::default(),
             None,
         )
         .expect("initialize evacuate job");
@@ -3205,6 +3212,7 @@ mod tests {
             String::new(),
             "fakedomain.us",
             &Uuid::new_v4().to_string(),
+            ConfigOptions::default(),
             None,
         )
         .expect("initialize evacuate job");
@@ -3335,6 +3343,7 @@ mod tests {
             String::new(),
             "region.fakedomain.us",
             &Uuid::new_v4().to_string(),
+            ConfigOptions::default(),
             None,
         )
         .expect("initialize evacuate job");
