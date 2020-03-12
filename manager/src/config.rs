@@ -578,6 +578,7 @@ mod tests {
         let config = update_test_config_with_vars(&vars);
 
         assert_eq!(config.snaplinks_cleanup_required, false);
+        config_fini();
     }
 
     #[test]
