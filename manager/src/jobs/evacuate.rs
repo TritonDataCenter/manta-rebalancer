@@ -80,6 +80,12 @@ struct UpdateEvacuateObject<'a> {
     id: &'a str,
 }
 
+#[derive(Debug)]
+struct MetadataUpdateMessage {
+    assignment_id: AssignmentId,
+    dest_shark: StorageNode,
+}
+
 // The fields in this struct are a subset of those found in
 // libmanta::MantaObject.  Unfortunately the schema for Manta Objects in
 // the "manta" moray bucket is not consistent.  However each entry should
@@ -2219,7 +2225,7 @@ where
 fn start_assignment_checker(
     job_action: Arc<EvacuateJob>,
     checker_fini_rx: crossbeam::Receiver<FiniMsg>,
-    md_update_tx: crossbeam::Sender<Assignment>,
+    md_update_tx: crossbeam::Sender<MetadataUpdateMessage>,
 ) -> Result<thread::JoinHandle<Result<(), Error>>, Error> {
     thread::Builder::new()
         .name(String::from("Assignment Checker"))
@@ -2349,16 +2355,11 @@ fn start_assignment_checker(
                         DestSharkStatus::Ready,
                     );
 
-                    // XXX: We only really need the assignment ID and the
-                    // dest_shark, so maybe we should create a new struct to
-                    // send this data.  Also, the assignment state is
-                    // probably out of date since we just ran process above.
-                    // Some alternate approaches would be for the
-                    // job_action.process() to return an updated assignment
-                    // and pass that along, or pass this Crossbeam::Sender to
-                    // job_action.process() and send it from there.  The
-                    // latter approach may make testing a bit more difficult.
-                    match md_update_tx.send(assignment.to_owned()) {
+                    let mdum = MetadataUpdateMessage {
+                        assignment_id: assignment.id.to_owned(),
+                        dest_shark: assignment.dest_shark.to_owned(),
+                    };
+                    match md_update_tx.send(mdum) {
                         Ok(()) => (),
                         Err(e) => {
                             job_action.mark_assignment_error(
@@ -2435,7 +2436,7 @@ fn reconnect_and_reupdate(
 // queue is empty the worker exits.
 fn metadata_update_worker(
     job_action: Arc<EvacuateJob>,
-    queue_front: Arc<Injector<Assignment>>,
+    queue_front: Arc<Injector<MetadataUpdateMessage>>,
 ) -> impl Fn() {
     move || {
         // For each worker we create a hash of moray clients indexed by shard.
@@ -2451,18 +2452,19 @@ fn metadata_update_worker(
             thread::current().id()
         );
         loop {
-            let assignment = match queue_front.steal() {
-                Steal::Success(a) => a,
+            let mdum = match queue_front.steal() {
+                Steal::Success(m) => m,
                 Steal::Retry => continue,
                 Steal::Empty => break,
             };
 
-            info!("Updating metadata for assignment: {}", assignment.id);
+            info!("Updating metadata for assignment: {}", mdum.assignment_id);
 
             let mut updated_objects = vec![];
-            let dest_shark = &assignment.dest_shark;
+            let dest_shark = &mdum.dest_shark;
+            let assignment_id = &mdum.assignment_id;
             let objects = job_action.load_assignment_objects(
-                &assignment.id,
+                assignment_id,
                 EvacuateObjectStatus::PostProcessing,
             );
 
@@ -2587,25 +2589,25 @@ fn metadata_update_worker(
             // next instruction below, or if we do want to save off the
             // information from the assignment in the DB.
             match job_action.set_assignment_state(
-                &assignment.id,
+                assignment_id,
                 AssignmentState::PostProcessed,
             ) {
                 Ok(()) => (),
                 Err(e) => panic!("{}", e),
             }
 
-            info!("Assignment Complete: {}", &assignment.id);
+            info!("Assignment Complete: {}", assignment_id);
 
             let removal = job_action
                 .assignments
                 .write()
                 .expect("assignments write")
-                .remove(&assignment.id);
+                .remove(assignment_id);
 
             if removal.is_none() {
                 warn!(
                     "Attempt to remove assignment not in hash: {}",
-                    &assignment.id
+                    assignment_id
                 );
             }
 
@@ -2657,18 +2659,18 @@ fn metadata_update_worker(
 // re-implement it.
 fn start_metadata_update_broker(
     job_action: Arc<EvacuateJob>,
-    md_update_rx: crossbeam::Receiver<Assignment>,
+    md_update_rx: crossbeam::Receiver<MetadataUpdateMessage>,
 ) -> Result<thread::JoinHandle<Result<(), Error>>, Error> {
     let pool = ThreadPool::new(job_action.options.max_metadata_update_threads);
-    let queue = Arc::new(Injector::<Assignment>::new());
+    let queue = Arc::new(Injector::<MetadataUpdateMessage>::new());
     let queue_back = Arc::clone(&queue);
 
     thread::Builder::new()
         .name(String::from("Metadata Update broker"))
         .spawn(move || {
             loop {
-                let assignment = match md_update_rx.recv() {
-                    Ok(assignment) => assignment,
+                let mdum = match md_update_rx.recv() {
+                    Ok(mdum) => mdum,
                     Err(e) => {
                         // If the queue is empty and there are no active or
                         // queued threads, kick one off to drain the queue.
@@ -2692,7 +2694,7 @@ fn start_metadata_update_broker(
                     }
                 };
 
-                queue_back.push(assignment);
+                queue_back.push(mdum);
 
                 // If all the pools threads are devoted to workers there's
                 // really no reason to queue up a new worker.
