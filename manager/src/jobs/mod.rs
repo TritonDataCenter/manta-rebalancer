@@ -14,22 +14,21 @@ pub mod status;
 use crate::config::Config;
 use crate::pg_db::connect_or_create_db;
 use crate::storinfo::StorageNode;
+use evacuate::EvacuateJob;
 use rebalancer::common::{ObjectId, Task};
 use rebalancer::error::{Error, InternalError, InternalErrorCode};
 
 use std::collections::HashMap;
 use std::fmt;
+use std::io::Write;
+use std::str::FromStr;
 
 use diesel::deserialize::{self, FromSql};
 use diesel::pg::{Pg, PgValue};
 use diesel::prelude::*;
 use diesel::serialize::{self, IsNull, Output, ToSql};
 use diesel::sql_types;
-use evacuate::EvacuateJob;
 use serde::{Deserialize, Serialize};
-use std::io::Write;
-use std::str::FromStr;
-
 use uuid::Uuid;
 
 pub type StorageId = String; // Hostname
@@ -294,7 +293,7 @@ enum AssignmentState {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Assignment {
-    id: String,
+    id: AssignmentId,
     dest_shark: StorageNode,
     tasks: HashMap<ObjectId, Task>,
     max_size: u64,
@@ -313,6 +312,23 @@ impl Assignment {
             total_size: 0,
             tasks: HashMap::new(),
             state: AssignmentState::Init,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct AssignmentCacheEnt {
+    id: AssignmentId,
+    dest_shark: StorageNode,
+    state: AssignmentState,
+}
+
+impl From<Assignment> for AssignmentCacheEnt {
+    fn from(assignment: Assignment) -> AssignmentCacheEnt {
+        AssignmentCacheEnt {
+            id: assignment.id,
+            dest_shark: assignment.dest_shark,
+            state: assignment.state,
         }
     }
 }
