@@ -60,7 +60,9 @@ release: all deps/manta-scripts/.git $(SMF_MANIFESTS)
 	@echo "Building $(RELEASE_TARBALL)"
 	# application dir
 	@mkdir -p $(RELSTAGEDIR)/root/opt/smartdc/$(NAME)/bin
+	@mkdir -p $(RELSTAGEDIR)/root/opt/smartdc/$(NAME)/etc
 	@mkdir -p $(RELSTAGEDIR)/root/opt/smartdc/$(NAME)/smf/manifests
+	cp $(TOP)/etc/postgresql.conf $(RELSTAGEDIR)/root/opt/smartdc/$(NAME)/etc/
 	cp -R \
 	    $(TOP)/sapi_manifests \
 	    $(RELSTAGEDIR)/root/opt/smartdc/$(NAME)/
