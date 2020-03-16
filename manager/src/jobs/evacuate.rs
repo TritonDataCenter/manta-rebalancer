@@ -640,6 +640,28 @@ impl EvacuateJob {
             });
     }
 
+    // Removes assignment cache entry from cache.  The cache entry is
+    // implicitly dropped when the function returns.
+    fn remove_assignment_from_cache(&self, assignment_id: &str) {
+        let mut removal =
+            self.assignments.write().expect("assignments write");
+
+        trace!(
+            "Assignment Cache size: {} bytes",
+            std::mem::size_of::<AssignmentCacheEnt>() * removal.len()
+        );
+
+        let removed = removal.remove(assignment_id);
+        if removed.is_none() {
+            warn!(
+                "Attempt to remove assignment not in hash: {}",
+                assignment_id
+            );
+        }
+
+        debug_assert!(removed.is_some(), "Remove assignment not in hash");
+    }
+
     fn skip_object(
         &self,
         eobj: &mut EvacuateObject,
@@ -2586,30 +2608,7 @@ fn metadata_update_worker(
 
             info!("Assignment Complete: {}", &ace.id);
 
-            // Assignment cache write lock critical section.
-            {
-                let mut removal =
-                    job_action.assignments.write().expect("assignments write");
-
-                // XXX
-                trace!(
-                    "Assignment Cache size: {} bytes",
-                    std::mem::size_of::<AssignmentCacheEnt>() * removal.len()
-                );
-
-                let removed = removal.remove(&ace.id);
-                if removed.is_none() {
-                    warn!(
-                        "Attempt to remove assignment not in hash: {}",
-                        &ace.id
-                    );
-                }
-
-                debug_assert!(
-                    removed.is_some(),
-                    "Remove assignment not in hash"
-                );
-            } // The cache lock and cache entry are implicitly dropped here.
+            job_action.remove_assignment_from_cache(&ace.id);
 
             // TODO: check for DB insert error
             job_action.mark_many_objects(
