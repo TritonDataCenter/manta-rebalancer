@@ -20,7 +20,9 @@ use rebalancer::libagent::{
 use rebalancer::util::{MAX_HTTP_STATUS_CODE, MIN_HTTP_STATUS_CODE};
 
 use crate::config::{Config, ConfigOptions};
-use crate::jobs::{Assignment, AssignmentId, AssignmentState, StorageId};
+use crate::jobs::{
+    Assignment, AssignmentCacheEntry, AssignmentId, AssignmentState, StorageId,
+};
 use crate::moray_client;
 use crate::pg_db;
 use crate::storinfo::{self as mod_storinfo, SharkSource, StorageNode};
@@ -387,7 +389,7 @@ pub struct EvacuateJob {
     pub dest_shark_list: RwLock<HashMap<StorageId, EvacuateDestShark>>,
 
     /// Hash of in progress assignments.
-    pub assignments: RwLock<HashMap<AssignmentId, Assignment>>,
+    pub assignments: RwLock<HashMap<AssignmentId, AssignmentCacheEntry>>,
 
     /// The shark to evacuate.
     pub from_shark: MantaObjectShark,
@@ -636,6 +638,31 @@ impl EvacuateJob {
                 // TODO: should we panic? if so just replace with expect()
                 panic!("{}", e);
             });
+    }
+
+    // Removes assignment cache entry from cache.  The cache entry is
+    // implicitly dropped when the function returns.
+    fn remove_assignment_from_cache(&self, assignment_id: &str) {
+        let mut assignments =
+            self.assignments.write().expect("assignments write");
+
+        trace!(
+            "Assignment Cache size: {} bytes",
+            std::mem::size_of::<AssignmentCacheEntry>() * assignments.len()
+        );
+
+        let entry = assignments.remove(assignment_id);
+        if entry.is_none() {
+            warn!(
+                "Attempt to remove assignment not in cache: {}",
+                assignment_id
+            );
+        }
+
+        debug_assert!(
+            entry.is_some(),
+            format!("Remove assignment not in hash: {}", assignment_id)
+        );
     }
 
     fn skip_object(
@@ -1049,8 +1076,9 @@ impl EvacuateJob {
 
 /// 1. Set AssignmentState to Assigned.
 /// 2. Update assignment that has been successfully posted to the Agent into the
-///    EvacauteJob's hash of assignments.
+///    EvacauteJob's assignment cache.
 /// 3. Update shark available_mb.
+/// 4. Implicitly drop (free) the Assignment on return.
 fn assignment_post_success(
     job_action: &EvacuateJob,
     mut assignment: Assignment,
@@ -1093,8 +1121,11 @@ fn assignment_post_success(
         .write()
         .expect("Assignments hash write lock");
 
-    // TODO: update assinment state instead?
-    assignments.insert(assignment.id.clone(), assignment);
+    // '.into()' converts the Assignment to its cache entry type and insert
+    // that into the cache.  Since this function takes ownership of the
+    // Assignment, the Assignment passed in is implicitly dropped (freed)
+    // when this function returns.
+    assignments.insert(assignment.id.clone(), assignment.into());
 }
 
 impl PostAssignment for EvacuateJob {
@@ -1152,10 +1183,13 @@ impl PostAssignment for EvacuateJob {
 }
 
 impl GetAssignment for EvacuateJob {
-    fn get(&self, assignment: &Assignment) -> Result<AgentAssignment, Error> {
+    fn get(
+        &self,
+        ace: &AssignmentCacheEntry,
+    ) -> Result<AgentAssignment, Error> {
         let uri = format!(
             "http://{}:7878/assignments/{}",
-            assignment.dest_shark.manta_storage_id, assignment.id
+            ace.dest_shark.manta_storage_id, ace.id
         );
 
         debug!("Getting Assignment: {:?}", uri);
@@ -1163,7 +1197,7 @@ impl GetAssignment for EvacuateJob {
             Ok(mut resp) => {
                 if !resp.status().is_success() {
                     self.skip_assignment(
-                        &assignment.id,
+                        &ace.id,
                         ObjectSkippedReason::AgentAssignmentNoEnt,
                         AssignmentState::AgentUnavailable,
                     );
@@ -1178,12 +1212,12 @@ impl GetAssignment for EvacuateJob {
                     )
                     .into());
                 }
-                debug!("RET: {:#?}", resp);
+                debug!("Assignment Get Response: {:#?}", resp);
                 resp.json::<AgentAssignment>().map_err(Error::from)
             }
             Err(e) => {
                 self.skip_assignment(
-                    &assignment.id,
+                    &ace.id,
                     ObjectSkippedReason::NetworkError,
                     AssignmentState::AgentUnavailable,
                 );
@@ -1284,7 +1318,7 @@ impl ProcessAssignment for EvacuateJob {
             self.assignments.write().expect("assignments read lock");
 
         // std::option::NoneError is still nightly-only experimental
-        let assignment = match assignments.get_mut(uuid) {
+        let ace = match assignments.get_mut(uuid) {
             Some(a) => a,
             None => {
                 let msg = format!(
@@ -1314,17 +1348,17 @@ impl ProcessAssignment for EvacuateJob {
 
         // If for some reason this assignment is in the wrong state don't
         // update it.
-        match assignment.state {
+        match ace.state {
             AssignmentState::Assigned => (),
             _ => {
                 warn!(
                     "Assignment in unexpected state '{:?}', skipping",
-                    assignment.state
+                    ace.state
                 );
                 // TODO: this should never happen but should we panic?
                 // If we create more threads to check for assignments or
                 // process them this may be possible.
-                panic!("Assignment in wrong state {:?}", assignment);
+                panic!("Assignment in wrong state {:?}", ace);
             }
         }
 
@@ -1347,32 +1381,35 @@ impl ProcessAssignment for EvacuateJob {
                 // mark all EvacuateObjects with this assignment id as
                 // successful
                 self.mark_assignment_objects(
-                    &assignment.id,
+                    &ace.id,
                     EvacuateObjectStatus::PostProcessing,
                 );
-                assignment.state = AssignmentState::AgentComplete;
+                ace.state = AssignmentState::AgentComplete;
             }
             AgentAssignmentState::Complete(Some(failed_tasks)) => {
                 info!(
                     "Assignment {} resulted in {} failed tasks.",
-                    &assignment.id,
+                    &ace.id,
                     failed_tasks.len()
                 );
                 trace!("{:#?}", &failed_tasks);
 
+                let objects = self.load_assignment_objects(
+                    &ace.id,
+                    EvacuateObjectStatus::Assigned,
+                );
+
                 // failed_tasks: Vec<Task>
-                // assignment.tasks: HashMap<ObjectId, Vec<Task>>
+                // objects: Vec<EvacuateObject>
                 //
-                // So we iterate over the keys of assignment.tasks (which
-                // are object ids), and filter out those that are in the
-                // failed_tasks Vec.
-                let successful_tasks: Vec<ObjectId> = assignment
-                    .tasks
-                    .keys()
+                // We iterate over the object IDs, and filter out those that are
+                // in the failed_tasks Vec.
+                let successful_tasks: Vec<ObjectId> = objects
+                    .iter()
+                    .map(|obj| obj.id.clone())
                     .filter(|obj_id| {
-                        !failed_tasks.iter().any(|ft| &ft.object_id == *obj_id)
+                        !failed_tasks.iter().any(|ft| &ft.object_id == obj_id)
                     })
-                    .cloned()
                     .collect();
 
                 self.mark_many_task_objects_skipped(failed_tasks);
@@ -1381,7 +1418,7 @@ impl ProcessAssignment for EvacuateJob {
                     EvacuateObjectStatus::PostProcessing,
                 );
 
-                assignment.state = AssignmentState::AgentComplete;
+                ace.state = AssignmentState::AgentComplete;
             }
         }
 
@@ -1850,37 +1887,38 @@ where
         .map_err(Error::from)
 }
 
+// Insert the assignment into the assignment cache then send it to the post
+// thread.
 fn _channel_send_assignment(
     job_action: Arc<EvacuateJob>,
     full_assignment_tx: &crossbeam_channel::Sender<Assignment>,
-    assignment: &Assignment,
+    assignment: Assignment,
 ) -> Result<(), Error> {
     if !assignment.tasks.is_empty() {
         // Insert the Assignment into the hash of assignments so
         // that the assignment checker thread knows to wait for
         // it to be posted and to check for it later on.
+        let assignment_uuid = assignment.id.clone();
+
         job_action
             .assignments
             .write()
             .expect("assignments write lock")
-            .insert(assignment.id.clone(), assignment.clone());
+            .insert(assignment_uuid.clone(), assignment.clone().into());
 
-        let assignment_uuid = assignment.id.clone();
         info!("Sending Assignment: {}", assignment_uuid);
-        full_assignment_tx
-            .send(assignment.to_owned())
-            .map_err(|e| {
-                error!("Error sending assignment to be posted: {}", e);
+        full_assignment_tx.send(assignment).map_err(|e| {
+            error!("Error sending assignment to be posted: {}", e);
 
-                job_action.mark_assignment_error(
-                    &assignment_uuid,
-                    EvacuateObjectError::InternalError,
-                );
-                InternalError::new(
-                    Some(InternalErrorCode::Crossbeam),
-                    CrossbeamError::from(e).description(),
-                )
-            })?;
+            job_action.mark_assignment_error(
+                &assignment_uuid,
+                EvacuateObjectError::InternalError,
+            );
+            InternalError::new(
+                Some(InternalErrorCode::Crossbeam),
+                CrossbeamError::from(e).description(),
+            )
+        })?;
     }
 
     Ok(())
@@ -1933,7 +1971,7 @@ fn shark_assignment_generator(
                     _channel_send_assignment(
                         Arc::clone(&job_action),
                         &full_assignment_tx,
-                        &assignment,
+                        assignment,
                     )?;
 
                     job_action.insert_many_into_db(&eobj_vec)?;
@@ -2034,6 +2072,8 @@ fn shark_assignment_generator(
                 || stop
                 || !_continue_adding_tasks(max_tasks, &assignment)
             {
+                let assignment_size = assignment.total_size;
+
                 flush = false;
                 job_action.mark_dest_shark(
                     &shark.manta_storage_id,
@@ -2042,14 +2082,13 @@ fn shark_assignment_generator(
                 _channel_send_assignment(
                     Arc::clone(&job_action),
                     &full_assignment_tx,
-                    &assignment,
+                    assignment,
                 )?;
 
                 // Re-set the available space to half of what is remaining.
                 // See comment above where we initialize 'available_space'
                 // for details.
-                available_space =
-                    shark.available_mb - assignment.total_size / 2;
+                available_space = (shark.available_mb - assignment_size) / 2;
                 assignment = Assignment::new(shark.clone());
                 assignment.max_size = available_space;
 
@@ -2190,17 +2229,18 @@ trait UpdateMetadata: Sync + Send {
 /// Structures implementing this trait are able to get assignments from an
 /// agent.
 trait GetAssignment: Sync + Send {
-    fn get(&self, assignment: &Assignment) -> Result<AgentAssignment, Error>;
+    fn get(&self, ace: &AssignmentCacheEntry)
+        -> Result<AgentAssignment, Error>;
 }
 
 fn assignment_get<T>(
     job_action: Arc<T>,
-    assignment: &Assignment,
+    ace: &AssignmentCacheEntry,
 ) -> Result<AgentAssignment, Error>
 where
     T: GetAssignment,
 {
-    job_action.get(assignment)
+    job_action.get(ace)
 }
 
 /// Responsible for:
@@ -2219,7 +2259,7 @@ where
 fn start_assignment_checker(
     job_action: Arc<EvacuateJob>,
     checker_fini_rx: crossbeam::Receiver<FiniMsg>,
-    md_update_tx: crossbeam::Sender<Assignment>,
+    md_update_tx: crossbeam::Sender<AssignmentCacheEntry>,
 ) -> Result<thread::JoinHandle<Result<(), Error>>, Error> {
     thread::Builder::new()
         .name(String::from("Assignment Checker"))
@@ -2279,9 +2319,9 @@ fn start_assignment_checker(
                 debug!("Checking Assignments");
 
                 let outstanding_assignments = || {
-                    assignments.values().any(|a| {
-                        a.state == AssignmentState::Assigned
-                            || a.state == AssignmentState::Init
+                    assignments.values().any(|ace| {
+                        ace.state == AssignmentState::Assigned
+                            || ace.state == AssignmentState::Init
                     })
                 };
 
@@ -2294,35 +2334,29 @@ fn start_assignment_checker(
                     break;
                 }
 
-                for assignment in assignments.values() {
-                    if assignment.state != AssignmentState::Assigned {
-                        trace!(
-                            "Skipping unassigned assignment {:?}",
-                            assignment
-                        );
+                for ace in assignments.values() {
+                    if ace.state != AssignmentState::Assigned {
+                        trace!("Skipping unassigned assignment {:?}", ace);
                         continue;
                     }
 
                     debug!(
                         "Assignment Checker, checking: {} | {:?}",
-                        assignment.id, assignment.state
+                        ace.id, ace.state
                     );
 
                     // TODO: Async/await candidate
-                    let ag_assignment = match assignment_get(
-                        Arc::clone(&job_action),
-                        &assignment,
-                    ) {
-                        Ok(a) => a,
-                        Err(e) => {
-                            // Assignment and its associated objects are
-                            // marked as skipped in the get() function.
-                            // TODO: Should the assignment marking happen
-                            // here instead?
-                            error!("{}", e);
-                            continue;
-                        }
-                    };
+                    let ag_assignment =
+                        match assignment_get(Arc::clone(&job_action), &ace) {
+                            Ok(a) => a,
+                            Err(e) => {
+                                // If necessary the assignment and its associated
+                                // objects are marked as skipped in the get()
+                                // method.
+                                error!("{}", e);
+                                continue;
+                            }
+                        };
 
                     debug!("Got Assignment: {:?}", ag_assignment);
                     // If agent assignment is complete, process it and pass
@@ -2345,24 +2379,15 @@ fn start_assignment_checker(
 
                     // Mark the shark associated with this assignment as Ready
                     job_action.mark_dest_shark(
-                        &assignment.dest_shark.manta_storage_id,
+                        &ace.dest_shark.manta_storage_id,
                         DestSharkStatus::Ready,
                     );
 
-                    // XXX: We only really need the assignment ID and the
-                    // dest_shark, so maybe we should create a new struct to
-                    // send this data.  Also, the assignment state is
-                    // probably out of date since we just ran process above.
-                    // Some alternate approaches would be for the
-                    // job_action.process() to return an updated assignment
-                    // and pass that along, or pass this Crossbeam::Sender to
-                    // job_action.process() and send it from there.  The
-                    // latter approach may make testing a bit more difficult.
-                    match md_update_tx.send(assignment.to_owned()) {
+                    match md_update_tx.send(ace.to_owned()) {
                         Ok(()) => (),
                         Err(e) => {
                             job_action.mark_assignment_error(
-                                &assignment.id,
+                                &ace.id,
                                 EvacuateObjectError::InternalError,
                             );
                             error!(
@@ -2380,8 +2405,8 @@ fn start_assignment_checker(
                     }
                 }
 
-                // TODO: Tunable?
-                thread::sleep(Duration::from_secs(5));
+                // TODO: MANTA-5106
+                thread::sleep(Duration::from_secs(1));
             }
             Ok(())
         })
@@ -2435,7 +2460,7 @@ fn reconnect_and_reupdate(
 // queue is empty the worker exits.
 fn metadata_update_worker(
     job_action: Arc<EvacuateJob>,
-    queue_front: Arc<Injector<Assignment>>,
+    queue_front: Arc<Injector<AssignmentCacheEntry>>,
 ) -> impl Fn() {
     move || {
         // For each worker we create a hash of moray clients indexed by shard.
@@ -2451,18 +2476,18 @@ fn metadata_update_worker(
             thread::current().id()
         );
         loop {
-            let assignment = match queue_front.steal() {
+            let ace = match queue_front.steal() {
                 Steal::Success(a) => a,
                 Steal::Retry => continue,
                 Steal::Empty => break,
             };
 
-            info!("Updating metadata for assignment: {}", assignment.id);
+            info!("Updating metadata for assignment: {}", ace.id);
 
             let mut updated_objects = vec![];
-            let dest_shark = &assignment.dest_shark;
+            let dest_shark = &ace.dest_shark;
             let objects = job_action.load_assignment_objects(
-                &assignment.id,
+                &ace.id,
                 EvacuateObjectStatus::PostProcessing,
             );
 
@@ -2586,30 +2611,16 @@ fn metadata_update_worker(
             // Mark this assignment in the event that we do dump core on the
             // next instruction below, or if we do want to save off the
             // information from the assignment in the DB.
-            match job_action.set_assignment_state(
-                &assignment.id,
-                AssignmentState::PostProcessed,
-            ) {
+            match job_action
+                .set_assignment_state(&ace.id, AssignmentState::PostProcessed)
+            {
                 Ok(()) => (),
                 Err(e) => panic!("{}", e),
             }
 
-            info!("Assignment Complete: {}", &assignment.id);
+            info!("Assignment Complete: {}", &ace.id);
 
-            let removal = job_action
-                .assignments
-                .write()
-                .expect("assignments write")
-                .remove(&assignment.id);
-
-            if removal.is_none() {
-                warn!(
-                    "Attempt to remove assignment not in hash: {}",
-                    &assignment.id
-                );
-            }
-
-            debug_assert!(removal.is_some(), "Remove assignment not in hash");
+            job_action.remove_assignment_from_cache(&ace.id);
 
             // TODO: check for DB insert error
             job_action.mark_many_objects(
@@ -2657,18 +2668,18 @@ fn metadata_update_worker(
 // re-implement it.
 fn start_metadata_update_broker(
     job_action: Arc<EvacuateJob>,
-    md_update_rx: crossbeam::Receiver<Assignment>,
+    md_update_rx: crossbeam::Receiver<AssignmentCacheEntry>,
 ) -> Result<thread::JoinHandle<Result<(), Error>>, Error> {
     let pool = ThreadPool::new(job_action.options.max_metadata_update_threads);
-    let queue = Arc::new(Injector::<Assignment>::new());
+    let queue = Arc::new(Injector::<AssignmentCacheEntry>::new());
     let queue_back = Arc::clone(&queue);
 
     thread::Builder::new()
         .name(String::from("Metadata Update broker"))
         .spawn(move || {
             loop {
-                let assignment = match md_update_rx.recv() {
-                    Ok(assignment) => assignment,
+                let ace = match md_update_rx.recv() {
+                    Ok(ace) => ace,
                     Err(e) => {
                         // If the queue is empty and there are no active or
                         // queued threads, kick one off to drain the queue.
@@ -2692,7 +2703,7 @@ fn start_metadata_update_broker(
                     }
                 };
 
-                queue_back.push(assignment);
+                queue_back.push(ace);
 
                 // If all the pools threads are devoted to workers there's
                 // really no reason to queue up a new worker.
@@ -3152,7 +3163,7 @@ mod tests {
 
         let mut assignments =
             job_action.assignments.write().expect("write lock");
-        assignments.insert(uuid.clone(), assignment);
+        assignments.insert(uuid.clone(), assignment.clone().into());
 
         drop(assignments);
 
