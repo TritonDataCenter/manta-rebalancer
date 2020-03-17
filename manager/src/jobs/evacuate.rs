@@ -21,7 +21,7 @@ use rebalancer::util::{MAX_HTTP_STATUS_CODE, MIN_HTTP_STATUS_CODE};
 
 use crate::config::{Config, ConfigOptions};
 use crate::jobs::{
-    Assignment, AssignmentCacheEnt, AssignmentId, AssignmentState, StorageId,
+    Assignment, AssignmentCacheEntry, AssignmentId, AssignmentState, StorageId,
 };
 use crate::moray_client;
 use crate::pg_db;
@@ -389,7 +389,7 @@ pub struct EvacuateJob {
     pub dest_shark_list: RwLock<HashMap<StorageId, EvacuateDestShark>>,
 
     /// Hash of in progress assignments.
-    pub assignments: RwLock<HashMap<AssignmentId, AssignmentCacheEnt>>,
+    pub assignments: RwLock<HashMap<AssignmentId, AssignmentCacheEntry>>,
 
     /// The shark to evacuate.
     pub from_shark: MantaObjectShark,
@@ -643,23 +643,26 @@ impl EvacuateJob {
     // Removes assignment cache entry from cache.  The cache entry is
     // implicitly dropped when the function returns.
     fn remove_assignment_from_cache(&self, assignment_id: &str) {
-        let mut removal =
+        let mut assignments =
             self.assignments.write().expect("assignments write");
 
         trace!(
             "Assignment Cache size: {} bytes",
-            std::mem::size_of::<AssignmentCacheEnt>() * removal.len()
+            std::mem::size_of::<AssignmentCacheEntry>() * assignments.len()
         );
 
-        let removed = removal.remove(assignment_id);
-        if removed.is_none() {
+        let entry = assignments.remove(assignment_id);
+        if entry.is_none() {
             warn!(
-                "Attempt to remove assignment not in hash: {}",
+                "Attempt to remove assignment not in cache: {}",
                 assignment_id
             );
         }
 
-        debug_assert!(removed.is_some(), "Remove assignment not in hash");
+        debug_assert!(
+            entry.is_some(),
+            format!("Remove assignment not in hash: {}", assignment_id)
+        );
     }
 
     fn skip_object(
@@ -1073,8 +1076,9 @@ impl EvacuateJob {
 
 /// 1. Set AssignmentState to Assigned.
 /// 2. Update assignment that has been successfully posted to the Agent into the
-///    EvacauteJob's hash of assignments.
+///    EvacauteJob's assignment cache.
 /// 3. Update shark available_mb.
+/// 4. Implicitly drop (free) the Assignment on return.
 fn assignment_post_success(
     job_action: &EvacuateJob,
     mut assignment: Assignment,
@@ -1117,6 +1121,10 @@ fn assignment_post_success(
         .write()
         .expect("Assignments hash write lock");
 
+    // '.into()' converts the Assignment to its cache entry type and insert
+    // that into the cache.  Since this function takes ownership of the
+    // Assignment, the Assignment passed in is implicitly dropped (freed)
+    // when this function returns.
     assignments.insert(assignment.id.clone(), assignment.into());
 }
 
@@ -1175,7 +1183,10 @@ impl PostAssignment for EvacuateJob {
 }
 
 impl GetAssignment for EvacuateJob {
-    fn get(&self, ace: &AssignmentCacheEnt) -> Result<AgentAssignment, Error> {
+    fn get(
+        &self,
+        ace: &AssignmentCacheEntry,
+    ) -> Result<AgentAssignment, Error> {
         let uri = format!(
             "http://{}:7878/assignments/{}",
             ace.dest_shark.manta_storage_id, ace.id
@@ -2218,12 +2229,13 @@ trait UpdateMetadata: Sync + Send {
 /// Structures implementing this trait are able to get assignments from an
 /// agent.
 trait GetAssignment: Sync + Send {
-    fn get(&self, ace: &AssignmentCacheEnt) -> Result<AgentAssignment, Error>;
+    fn get(&self, ace: &AssignmentCacheEntry)
+        -> Result<AgentAssignment, Error>;
 }
 
 fn assignment_get<T>(
     job_action: Arc<T>,
-    ace: &AssignmentCacheEnt,
+    ace: &AssignmentCacheEntry,
 ) -> Result<AgentAssignment, Error>
 where
     T: GetAssignment,
@@ -2247,7 +2259,7 @@ where
 fn start_assignment_checker(
     job_action: Arc<EvacuateJob>,
     checker_fini_rx: crossbeam::Receiver<FiniMsg>,
-    md_update_tx: crossbeam::Sender<AssignmentCacheEnt>,
+    md_update_tx: crossbeam::Sender<AssignmentCacheEntry>,
 ) -> Result<thread::JoinHandle<Result<(), Error>>, Error> {
     thread::Builder::new()
         .name(String::from("Assignment Checker"))
@@ -2448,7 +2460,7 @@ fn reconnect_and_reupdate(
 // queue is empty the worker exits.
 fn metadata_update_worker(
     job_action: Arc<EvacuateJob>,
-    queue_front: Arc<Injector<AssignmentCacheEnt>>,
+    queue_front: Arc<Injector<AssignmentCacheEntry>>,
 ) -> impl Fn() {
     move || {
         // For each worker we create a hash of moray clients indexed by shard.
@@ -2656,10 +2668,10 @@ fn metadata_update_worker(
 // re-implement it.
 fn start_metadata_update_broker(
     job_action: Arc<EvacuateJob>,
-    md_update_rx: crossbeam::Receiver<AssignmentCacheEnt>,
+    md_update_rx: crossbeam::Receiver<AssignmentCacheEntry>,
 ) -> Result<thread::JoinHandle<Result<(), Error>>, Error> {
     let pool = ThreadPool::new(job_action.options.max_metadata_update_threads);
-    let queue = Arc::new(Injector::<AssignmentCacheEnt>::new());
+    let queue = Arc::new(Injector::<AssignmentCacheEntry>::new());
     let queue_back = Arc::clone(&queue);
 
     thread::Builder::new()

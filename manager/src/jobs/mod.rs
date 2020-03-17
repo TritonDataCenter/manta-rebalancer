@@ -317,15 +317,15 @@ impl Assignment {
 }
 
 #[derive(Clone, Debug)]
-pub struct AssignmentCacheEnt {
+pub struct AssignmentCacheEntry {
     id: AssignmentId,
     dest_shark: StorageNode,
     state: AssignmentState,
 }
 
-impl From<Assignment> for AssignmentCacheEnt {
-    fn from(assignment: Assignment) -> AssignmentCacheEnt {
-        AssignmentCacheEnt {
+impl From<Assignment> for AssignmentCacheEntry {
+    fn from(assignment: Assignment) -> AssignmentCacheEntry {
+        AssignmentCacheEntry {
             id: assignment.id,
             dest_shark: assignment.dest_shark,
             state: assignment.state,
