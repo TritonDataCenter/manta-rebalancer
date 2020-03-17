@@ -13,6 +13,7 @@ use moray::{
     client::MorayClient,
     objects::{Etag, MethodOptions as ObjectMethodOptions},
 };
+use rand::seq::SliceRandom;
 use rebalancer::error::{Error, InternalError, InternalErrorCode};
 use serde_json::Value;
 use slog_scope;
@@ -32,7 +33,10 @@ use resolve::{record::Srv, DnsConfig, DnsResolver};
 fn get_srv_record(svc: &str, proto: &str, host: &str) -> Result<Srv, Error> {
     let query = format!("{}.{}.{}", svc, proto, host);
     let r = DnsResolver::new(DnsConfig::load_default()?)?;
-    match r.resolve_record::<Srv>(&query)?.first() {
+    match r
+        .resolve_record::<Srv>(&query)?
+        .choose(&mut rand::thread_rng())
+    {
         Some(rec) => {
             dbg!(&rec);
             Ok(rec.clone())
