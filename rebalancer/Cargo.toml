@@ -14,11 +14,11 @@ base64 = "0.10.1"
 clap = "2.33.0"
 crossbeam-channel = "0.3.8"
 diesel = {version = "1.4.2", features = ["sqlite"]}
-futures = "0.1.27"
+futures = "0.1.29"
 gethostname = "0.2.1"
 uuid = { version = "0.7.4", features = ["v4"] }
-gotham = "0.3.0"
-gotham_derive = "0.3.0"
+gotham = "0.4.0"
+gotham_derive = "0.4.0"
 hyper = "0.12"
 joyent-rust-utils = { git = "https://github.com/joyent/rust-utils", tag = "v0.2.0" }
 libmanta = { git = "https://github.com/joyent/rust-libmanta", tag = "v0.7.0" }
