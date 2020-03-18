@@ -25,6 +25,7 @@ manta_common2_setup "rebalancer"
 
 echo "Setting up rebalancer manager"
 /usr/sbin/svccfg import /opt/local/lib/svc/manifest/postgresql.xml
+cp /opt/smartdc/rebalancer/etc/postgresql.conf /var/pgsql/data/postgresql.conf
 /usr/sbin/svcadm enable svc:/pkgsrc/postgresql:default
 /usr/sbin/svccfg import /opt/smartdc/rebalancer/smf/manifests/rebalancer.xml
 
