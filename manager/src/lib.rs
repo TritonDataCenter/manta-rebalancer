@@ -21,6 +21,7 @@ extern crate rebalancer;
 
 pub mod config;
 pub mod jobs;
+pub mod metrics;
 pub mod moray_client;
 pub mod pg_db;
 pub mod storinfo;

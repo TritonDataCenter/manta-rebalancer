@@ -83,7 +83,7 @@ pub mod agenttests {
     lazy_static! {
         static ref INITIALIZED: Mutex<bool> = Mutex::new(false);
         static ref TEST_SERVER: Mutex<TestServer> = Mutex::new(
-            TestServer::new(router(process_task, AgentConfig::default()))
+            TestServer::new(router(process_task, Some(AgentConfig::default())))
                 .unwrap()
         );
     }
