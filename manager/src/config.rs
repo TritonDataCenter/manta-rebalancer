@@ -61,7 +61,7 @@ pub struct Config {
     pub domain_name: String,
     pub shards: Vec<Shard>,
     #[serde(default)]
-    pub snaplinks_cleanup_required: bool,
+    pub snaplink_cleanup_required: bool,
     #[serde(default)]
     pub options: ConfigOptions,
 }
@@ -127,7 +127,7 @@ impl Config {
                             };
                         let mut slcr = update_config
                             .lock()
-                            .expect("Lock snaplinks_cleanup_required");
+                            .expect("Lock snaplink_cleanup_required");
 
                         *slcr = new_config;
                     }
@@ -491,7 +491,7 @@ mod tests {
 
         let vars = MapBuilder::new()
             .insert_str("DOMAIN_NAME", "fake.joyent.us")
-            .insert_bool("SNAPLINKS_CLEANUP_REQUIRED", true)
+            .insert_bool("SNAPLINK_CLEANUP_REQUIRED", true)
             .insert_vec("INDEX_MORAY_SHARDS", |builder| {
                 builder.push_map(|bld| {
                     bld.insert_str("host", "1.fake.joyent.us")
@@ -561,7 +561,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_snaplinks_cleanup_required() {
+    fn missing_snaplink_cleanup_required() {
         unit_test_init();
         std::fs::remove_file(TEST_CONFIG_FILE).unwrap_or(());
 
@@ -577,7 +577,7 @@ mod tests {
 
         let config = update_test_config_with_vars(&vars);
 
-        assert_eq!(config.snaplinks_cleanup_required, false);
+        assert_eq!(config.snaplink_cleanup_required, false);
         config_fini();
     }
 
@@ -592,14 +592,14 @@ mod tests {
         unit_test_init();
         println!("{}", env!("CARGO_MANIFEST_DIR"));
 
-        // Generate a config with snaplinks_cleanup_required=true.
+        // Generate a config with snaplink_cleanup_required=true.
         let config = Arc::new(Mutex::new(config_init()));
 
         assert!(
             config
                 .lock()
                 .expect("config lock")
-                .snaplinks_cleanup_required
+                .snaplink_cleanup_required
         );
 
         let update_config = Arc::clone(&config);
@@ -610,10 +610,10 @@ mod tests {
             Some(TEST_CONFIG_FILE.to_string()),
         );
 
-        // Change SNAPLINKS_CLEANUP_REQUIRED to false
+        // Change SNAPLINK_CLEANUP_REQUIRED to false
         let vars = MapBuilder::new()
             .insert_str("DOMAIN_NAME", "fake.joyent.us")
-            .insert_bool("SNAPLINKS_CLEANUP_REQUIRED", false)
+            .insert_bool("SNAPLINK_CLEANUP_REQUIRED", false)
             .insert_vec("INDEX_MORAY_SHARDS", |builder| {
                 builder.push_map(|bld| {
                     bld.insert_str("host", "1.fake.joyent.us")
@@ -628,10 +628,10 @@ mod tests {
         unsafe { libc::raise(signal_hook::SIGUSR1) };
         thread::sleep(std::time::Duration::from_secs(2));
 
-        // Assert that our in memory config's snaplinks_cleanup_required field
+        // Assert that our in memory config's snaplink_cleanup_required field
         // has changed to false.
         let check_config = config.lock().expect("config lock");
-        assert_eq!(check_config.snaplinks_cleanup_required, false);
+        assert_eq!(check_config.snaplink_cleanup_required, false);
 
         config_fini();
     }

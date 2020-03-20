@@ -226,10 +226,10 @@ impl Handler for JobCreateHandler {
         let domain_name = config.domain_name.clone();
 
         // If snaplinks are still in play then we immediately return failure.
-        if config.snaplinks_cleanup_required {
+        if config.snaplink_cleanup_required {
             let error = invalid_server_error(
                 &state,
-                String::from("Snaplinks Cleanup Required"),
+                String::from("Snaplink Cleanup Required"),
             );
             return Box::new(future::ok((state, error)));
         }
