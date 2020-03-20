@@ -331,7 +331,6 @@ fn router(config: Arc<Mutex<Config>>) -> Router {
 
     // Start the metrics server.
     manager_metrics_init(metrics::ConfigMetrics::default());
-    //manager_metrics_init(metrics::ConfigMetrics::default());
 
     let pool = ThreadPool::new(THREAD_COUNT);
     for _ in 0..THREAD_COUNT {
