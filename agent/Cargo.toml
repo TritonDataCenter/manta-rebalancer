@@ -20,7 +20,7 @@ libmanta = { git = "https://github.com/joyent/rust-libmanta", tag = "v0.7.0" }
 mime = "0.3.13"
 moray = { git = "https://github.com/joyent/rust-moray", tag = "v0.9.2" }
 rebalancer = { path = "../rebalancer" }
-reqwest = "0.9.18"
+reqwest = "0.9.24"
 rusqlite = "0.19.0"
 serde = { version = "1.0.91", features = ["derive"] }
 serde_derive = "1.0.91"
