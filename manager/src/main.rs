@@ -401,7 +401,7 @@ fn main() {
     let config_watcher_handle =
         Config::start_config_watcher(Arc::clone(&config), config_file);
 
-    gotham::start(addr, router(Arc::clone(&config)));
+    gotham::start_with_num_threads(addr, router(Arc::clone(&config)), 1);
 
     config_watcher_handle.join().expect("join config watcher");
 }
