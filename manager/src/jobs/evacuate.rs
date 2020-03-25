@@ -8,7 +8,9 @@
  * Copyright 2020 Joyent, Inc.
  */
 
-use crate::metrics::{manager_metrics_error_inc, manager_metrics_object_inc};
+use crate::metrics::{
+    metrics_error_inc, metrics_object_inc_by, ACTION_EVACUATE
+};
 use rebalancer::common::{
     self, AssignmentPayload, ObjectId, ObjectSkippedReason, Task, TaskStatus,
 };
@@ -1386,7 +1388,6 @@ impl ProcessAssignment for EvacuateJob {
                     EvacuateObjectStatus::PostProcessing,
                 );
                 ace.state = AssignmentState::AgentComplete;
-                manager_metrics_object_inc(Some("evacuate"));
             }
             AgentAssignmentState::Complete(Some(failed_tasks)) => {
                 info!(
@@ -2624,6 +2625,8 @@ fn metadata_update_worker(
 
             job_action.remove_assignment_from_cache(&ace.id);
 
+            metrics_object_inc_by(Some(ACTION_EVACUATE), updated_objects.len());
+
             // TODO: check for DB insert error
             job_action.mark_many_objects(
                 updated_objects,
@@ -2751,8 +2754,7 @@ where
 mod tests {
     use super::*;
     use crate::metrics::{
-        manager_metrics_error_inc, manager_metrics_init,
-        manager_metrics_object_inc,
+        metrics_error_inc, metrics_init, metrics_object_inc
     };
     use crate::storinfo::ChooseAlgorithm;
     use lazy_static::lazy_static;
@@ -2774,7 +2776,7 @@ mod tests {
             return;
         }
 
-        manager_metrics_init(rebalancer::metrics::ConfigMetrics::default());
+        metrics_init(rebalancer::metrics::ConfigMetrics::default());
 
         thread::spawn(move || {
             let _guard = util::init_global_logger();

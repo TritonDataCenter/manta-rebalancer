@@ -10,9 +10,9 @@
 use lazy_static::lazy_static;
 use rebalancer::metrics;
 use rebalancer::metrics::{
-    counter_vec_inc, MetricsMap, ERROR_COUNT, OBJECT_COUNT, REQUEST_COUNT,
+    counter_vec_inc, counter_vec_inc_by, MetricsMap, ERROR_COUNT, OBJECT_COUNT,
+    REQUEST_COUNT,
 };
-use std::sync::atomic::AtomicBool;
 use std::sync::Mutex;
 use std::thread;
 
@@ -51,11 +51,11 @@ pub static ACTION_EVACUATE: &str = "evacuate";
 
 // This method may come in handy if it is necessary to add more metrics to
 // our collector.
-pub fn manager_metrics_get() -> &'static Mutex<Option<MetricsMap>> {
+pub fn metrics_get() -> &'static Mutex<Option<MetricsMap>> {
     &METRICS
 }
 
-pub fn manager_metrics_init(cfg: metrics::ConfigMetrics) {
+pub fn metrics_init(cfg: metrics::ConfigMetrics) {
     let mut metrics_init = METRICS_INIT.lock().unwrap();
 
     if metrics_init.init {
@@ -83,22 +83,28 @@ pub fn manager_metrics_init(cfg: metrics::ConfigMetrics) {
 //
 
 // Errors broken down by error type.
-pub fn manager_metrics_error_inc(reason: Option<&str>) {
-    manager_metrics_vec_inc(ERROR_COUNT, reason);
+pub fn metrics_error_inc(reason: Option<&str>) {
+    metrics_vec_inc_by(ERROR_COUNT, reason, 1);
 }
 
 // Requests broken down by request type.
-pub fn manager_metrics_request_inc(request: Option<&str>) {
-    manager_metrics_vec_inc(REQUEST_COUNT, request);
+pub fn metrics_request_inc(request: Option<&str>) {
+    metrics_vec_inc_by(REQUEST_COUNT, request, 1);
 }
 
 // Objects processed, classified by action type.
-pub fn manager_metrics_object_inc(action: Option<&str>) {
-    manager_metrics_vec_inc(OBJECT_COUNT, action);
+pub fn metrics_object_inc(action: Option<&str>) {
+    metrics_vec_inc_by(OBJECT_COUNT, action, 1);
+}
+
+// Objects processed, classified by action type.  This is used when we increment
+// the value by more than one at a time.
+pub fn metrics_object_inc_by(action: Option<&str>, val: usize) {
+    metrics_vec_inc_by(OBJECT_COUNT, action, val);
 }
 
 // Private method that directly accesses the metrics structure.
-fn manager_metrics_vec_inc(key: &str, bucket: Option<&str>) {
+fn metrics_vec_inc_by(key: &str, bucket: Option<&str>, val: usize) {
     let metrics = METRICS.lock().unwrap().clone();
-    counter_vec_inc(&metrics.unwrap(), key, bucket);
+    counter_vec_inc_by(&metrics.unwrap(), key, bucket, val);
 }

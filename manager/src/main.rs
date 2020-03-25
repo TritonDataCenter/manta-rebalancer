@@ -21,8 +21,7 @@ use manager::config::Config;
 use manager::jobs::status::StatusError;
 use manager::jobs::{self, JobBuilder, JobDbEntry};
 use manager::metrics::{
-    manager_metrics_error_inc, manager_metrics_init,
-    manager_metrics_request_inc,
+    metrics_error_inc, metrics_init, metrics_request_inc
 };
 use rebalancer::util;
 
@@ -41,7 +40,6 @@ use gotham::router::builder::{
 use gotham::router::Router;
 use gotham::state::{FromState, State};
 use hyper::{Body, Response, StatusCode};
-use rebalancer::metrics;
 use threadpool::ThreadPool;
 use uuid::Uuid;
 
@@ -88,7 +86,7 @@ fn get_status(uuid: Uuid) -> GetJobFuture {
 }
 
 fn get_job(mut state: State) -> Box<HandlerFuture> {
-    manager_metrics_request_inc(Some("get_job"));
+    metrics_request_inc(Some("get_job"));
     info!("Get Job Request");
     let get_job_params = GetJobParams::take_from(&mut state);
     let uuid = match Uuid::parse_str(&get_job_params.uuid) {
@@ -160,7 +158,7 @@ fn get_job_list() -> JobListFuture {
 }
 
 fn list_jobs(state: State) -> Box<HandlerFuture> {
-    manager_metrics_request_inc(Some("list_jobs"));
+    metrics_request_inc(Some("list_jobs"));
     info!("List Jobs Request");
     let job_list_future = get_job_list();
     Box::new(job_list_future.then(move |result| match result {
@@ -273,7 +271,7 @@ impl Handler for JobCreateHandler {
 
         let ret = match payload {
             JobPayload::Evacuate(evac_payload) => {
-                manager_metrics_request_inc(Some("evacuate"));
+                metrics_request_inc(Some("evacuate"));
 
                 let max_objects = match evac_payload.max_objects {
                     Some(val) => {
@@ -330,7 +328,7 @@ fn router(config: Arc<Mutex<Config>>) -> Router {
     let job_create_handler = JobCreateHandler { tx, config };
 
     // Start the metrics server.
-    manager_metrics_init(metrics::ConfigMetrics::default());
+    metrics_init(rebalancer::metrics::ConfigMetrics::default());
 
     let pool = ThreadPool::new(THREAD_COUNT);
     for _ in 0..THREAD_COUNT {

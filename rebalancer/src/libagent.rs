@@ -343,7 +343,7 @@ fn assignment_save(
 // Given the path of a particular assignment, extract its contents from
 // persistent storage.  All assignements on disk are stored in separate
 // files named after their uuid.  The format is an sqlite database.  We
-// contruct a vector of tasks based on the contents of the only table
+// construct a vector of tasks based on the contents of the only table
 // in the file called `tasks'.
 fn assignment_recall<S: Into<String>>(
     path: S,

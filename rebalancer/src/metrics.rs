@@ -61,17 +61,28 @@ pub fn counter_vec_inc<S: ::std::hash::BuildHasher>(
     key: &str,
     bucket: Option<&str>,
 ) {
+    counter_vec_inc_by(metrics, key, bucket, 1);
+}
+
+#[allow(irrefutable_let_patterns)]
+pub fn counter_vec_inc_by<S: ::std::hash::BuildHasher>(
+    metrics: &HashMap<&'static str, Metrics, S>,
+    key: &str,
+    bucket: Option<&str>,
+    val: usize,
+) {
+    let num = val as f64;
     match metrics.get(key) {
         Some(metric) => {
             if let Metrics::MetricsCounterVec(c) = metric {
                 // Increment the total.
-                c.with_label_values(&["total"]).inc();
+                c.with_label_values(&["total"]).inc_by(num);
 
                 // If a bucket was supplied, increment that as well.  The
                 // bucket will represent some subset of the total for the
                 // metric.
                 if let Some(b) = bucket {
-                    c.with_label_values(&[b]).inc();
+                    c.with_label_values(&[b]).inc_by(num);
                 }
             }
         }
