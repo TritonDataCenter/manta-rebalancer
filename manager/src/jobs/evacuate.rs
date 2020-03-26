@@ -415,6 +415,10 @@ pub struct EvacuateJob {
     /// Tunable options
     pub options: ConfigOptions,
 
+    pub post_client: reqwest::Client,
+
+    pub get_client: reqwest::Client,
+
     /// TESTING ONLY
     pub max_objects: Option<u32>,
 }
@@ -452,6 +456,8 @@ impl EvacuateJob {
             domain_name: domain_name.to_string(),
             options,
             max_objects,
+            post_client: reqwest::Client::new(),
+            get_client: reqwest::Client::new(),
         })
     }
 
@@ -1136,14 +1142,13 @@ impl PostAssignment for EvacuateJob {
             tasks: assignment.tasks.values().map(|t| t.to_owned()).collect(),
         };
 
-        let client = reqwest::Client::new();
         let agent_uri = format!(
             "http://{}:7878/assignments",
             assignment.dest_shark.manta_storage_id
         );
 
         trace!("Sending {:#?} to {}", payload, agent_uri);
-        let res = match client.post(&agent_uri).json(&payload).send() {
+        let res = match self.post_client.post(&agent_uri).json(&payload).send() {
             Ok(r) => r,
             Err(e) => {
                 // TODO: Should we blacklist this destination shark?
