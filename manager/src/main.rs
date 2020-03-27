@@ -20,9 +20,7 @@ extern crate rebalancer;
 use manager::config::Config;
 use manager::jobs::status::StatusError;
 use manager::jobs::{self, JobBuilder, JobDbEntry};
-use manager::metrics::{
-    metrics_error_inc, metrics_init, metrics_request_inc
-};
+use manager::metrics::{metrics_init, metrics_request_inc};
 use rebalancer::util;
 
 use std::collections::HashMap;

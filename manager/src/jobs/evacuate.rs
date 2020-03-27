@@ -8,9 +8,7 @@
  * Copyright 2020 Joyent, Inc.
  */
 
-use crate::metrics::{
-    metrics_error_inc, metrics_object_inc_by, ACTION_EVACUATE
-};
+use crate::metrics::{metrics_object_inc_by, ACTION_EVACUATE};
 use rebalancer::common::{
     self, AssignmentPayload, ObjectId, ObjectSkippedReason, Task, TaskStatus,
 };
@@ -2753,9 +2751,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::metrics::{
-        metrics_error_inc, metrics_init, metrics_object_inc
-    };
+    use crate::metrics::{metrics_error_inc, metrics_init, metrics_object_inc};
     use crate::storinfo::ChooseAlgorithm;
     use lazy_static::lazy_static;
     use quickcheck::{Arbitrary, StdThreadGen};

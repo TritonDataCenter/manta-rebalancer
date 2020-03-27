@@ -10,8 +10,7 @@
 use lazy_static::lazy_static;
 use rebalancer::metrics;
 use rebalancer::metrics::{
-    counter_vec_inc, counter_vec_inc_by, MetricsMap, ERROR_COUNT, OBJECT_COUNT,
-    REQUEST_COUNT,
+    counter_vec_inc_by, MetricsMap, ERROR_COUNT, OBJECT_COUNT, REQUEST_COUNT,
 };
 use std::sync::Mutex;
 use std::thread;
