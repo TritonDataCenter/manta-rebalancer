@@ -108,13 +108,13 @@ pub struct Agent {
     assignments: Arc<Mutex<Assignments>>,
     quiescing: Arc<Mutex<HashSet<String>>>,
     tx: Arc<Mutex<mpsc::Sender<String>>>,
-    metrics: Arc<Mutex<MetricsMap>>,
+    metrics: Arc<Mutex<Option<MetricsMap>>>,
 }
 
 impl Agent {
     pub fn new(
         tx: Arc<Mutex<mpsc::Sender<String>>>,
-        metrics: Arc<Mutex<MetricsMap>>,
+        metrics: Arc<Mutex<Option<MetricsMap>>>,
     ) -> Agent {
         let assignments = Arc::new(Mutex::new(Assignments::new()));
         let quiescing = Arc::new(Mutex::new(HashSet::new()));
@@ -148,7 +148,7 @@ impl Agent {
         };
         let addr = format!("{}:{}", config.server.host, config.server.port);
         info!("Listening for requests at {}", addr);
-        gotham::start(addr, router(process_task, config));
+        gotham::start(addr, router(process_task, Some(config)));
     }
 
     // Given an assignment uuid, check for its presence in both the "scheduled"
@@ -472,12 +472,10 @@ fn post(agent: Agent, mut state: State) -> Box<HandlerFuture> {
                             &state,
                             StatusCode::BAD_REQUEST,
                         );
-                        counter_vec_inc(
-                            &agent.metrics.lock().unwrap(),
-                            ERROR_COUNT,
-                            Some(&e),
-                        );
 
+                        if let Some(m) = agent.metrics.lock().unwrap().clone() {
+                            counter_vec_inc(&m, ERROR_COUNT, Some(&e));
+                        }
                         return future::ok((state, res));
                     }
                 };
@@ -489,11 +487,9 @@ fn post(agent: Agent, mut state: State) -> Box<HandlerFuture> {
                     let res =
                         create_empty_response(&state, StatusCode::CONFLICT);
 
-                    counter_vec_inc(
-                        &agent.metrics.lock().unwrap(),
-                        ERROR_COUNT,
-                        Some("conflict"),
-                    );
+                    if let Some(m) = agent.metrics.lock().unwrap().clone() {
+                        counter_vec_inc(&m, ERROR_COUNT, Some("conflict"));
+                    }
 
                     return future::ok((state, res));
                 }
@@ -533,11 +529,9 @@ fn post(agent: Agent, mut state: State) -> Box<HandlerFuture> {
             }
 
             Err(e) => {
-                counter_vec_inc(
-                    &agent.metrics.lock().unwrap(),
-                    ERROR_COUNT,
-                    Some(&e.to_string()),
-                );
+                if let Some(m) = agent.metrics.lock().unwrap().clone() {
+                    counter_vec_inc(&m, ERROR_COUNT, Some(&e.to_string()));
+                }
 
                 future::err((state, e.into_handler_error()))
             }
@@ -638,11 +632,9 @@ impl Handler for Agent {
     fn handle(self, state: State) -> Box<HandlerFuture> {
         let method = Method::borrow_from(&state);
 
-        counter_vec_inc(
-            &self.metrics.lock().unwrap(),
-            REQUEST_COUNT,
-            Some(method.as_str()),
-        );
+        if let Some(m) = self.metrics.lock().unwrap().clone() {
+            counter_vec_inc(&m, REQUEST_COUNT, Some(method.as_str()));
+        }
 
         // If we are here, then the method must either be
         // POST or GET.  It can not be anything else.
@@ -893,26 +885,35 @@ fn process_assignment(
     assignment_complete(assignments, uuid);
 }
 
+fn agent_start_metrics_server(config: &AgentConfig) -> MetricsMap {
+    let agent_metrics = metrics::register_metrics(&config.metrics);
+    let metrics_host = config.metrics.host.clone();
+    let metrics_port = config.metrics.port;
+
+    let ms = thread::Builder::new()
+        .name(String::from("Rebalancer Metrics"))
+        .spawn(move || {
+            metrics::start_server(
+                &metrics_host,
+                metrics_port,
+                &slog_scope::logger(),
+            )
+        });
+
+    assert!(ms.is_ok());
+    agent_metrics
+}
+
 // Create a `Router`.  This function is public because it will have external
 // consumers, namely the rebalancer zone test framework.
 #[allow(clippy::many_single_char_names)]
-pub fn router(f: fn(&mut Task), config: AgentConfig) -> Router {
+pub fn router(f: fn(&mut Task), config: Option<AgentConfig>) -> Router {
     build_simple_router(|route| {
-        let agent_metrics = metrics::register_metrics(&config.metrics);
-        let metrics_host = config.metrics.host.clone();
-        let metrics_port = config.metrics.port;
+        let mut agent_metrics: Option<MetricsMap> = None;
 
-        let ms = thread::Builder::new()
-            .name(String::from("Rebalancer Metrics"))
-            .spawn(move || {
-                metrics::start_server(
-                    &metrics_host,
-                    metrics_port,
-                    &slog_scope::logger(),
-                )
-            });
-
-        assert!(ms.is_ok());
+        if let Some(c) = config {
+            agent_metrics = Some(agent_start_metrics_server(&c));
+        }
 
         let (w, r): (mpsc::Sender<String>, mpsc::Receiver<String>) =
             mpsc::channel();
@@ -928,7 +929,7 @@ pub fn router(f: fn(&mut Task), config: AgentConfig) -> Router {
         for _ in 0..1 {
             let rx = Arc::clone(&rx);
             let assignments = Arc::clone(&agent.assignments);
-            let m = Some(agent_metrics.clone());
+            let m = agent_metrics.clone();
 
             pool.execute(move || loop {
                 let uuid = match rx.lock().unwrap().recv() {

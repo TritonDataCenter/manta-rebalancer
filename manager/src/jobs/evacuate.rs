@@ -8,6 +8,7 @@
  * Copyright 2020 Joyent, Inc.
  */
 
+use crate::metrics::{metrics_object_inc_by, ACTION_EVACUATE};
 use rebalancer::common::{
     self, AssignmentPayload, ObjectId, ObjectSkippedReason, Task, TaskStatus,
 };
@@ -2622,6 +2623,8 @@ fn metadata_update_worker(
 
             job_action.remove_assignment_from_cache(&ace.id);
 
+            metrics_object_inc_by(Some(ACTION_EVACUATE), updated_objects.len());
+
             // TODO: check for DB insert error
             job_action.mark_many_objects(
                 updated_objects,
@@ -2748,6 +2751,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::metrics::{metrics_error_inc, metrics_init, metrics_object_inc};
     use crate::storinfo::ChooseAlgorithm;
     use lazy_static::lazy_static;
     use quickcheck::{Arbitrary, StdThreadGen};
@@ -2768,10 +2772,11 @@ mod tests {
             return;
         }
 
+        metrics_init(rebalancer::metrics::ConfigMetrics::default());
+
         thread::spawn(move || {
             let _guard = util::init_global_logger();
-            let config = AgentConfig::default();
-            let addr = format!("{}:{}", config.server.host, config.server.port);
+            let addr = format!("{}:{}", "0.0.0.0", 7878);
 
             // The reason that we call gotham::start() to start the agent as
             // opposed to something like TestServer::new() in this case is
@@ -2781,8 +2786,10 @@ mod tests {
             // other than 7878.  Currently, the wiring to pass a port all the
             // way down to the threads that contact the agent does not exist.
             // If or when it does, we can use gotham's TestServer as opposed to
-            // explicitly calling gotham::start().
-            gotham::start(addr, agent_router(process_task_always_pass, config));
+            // explicitly calling gotham::start().  Finally, we pass `None' to
+            // the router function for the agent because it does not run a
+            // metrics server during manager testing.
+            gotham::start(addr, agent_router(process_task_always_pass, None));
         });
 
         *init = true;
