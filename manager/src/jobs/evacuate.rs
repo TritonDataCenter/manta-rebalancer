@@ -41,6 +41,7 @@ use std::time::Duration;
 use crossbeam_channel as crossbeam;
 use crossbeam_channel::TryRecvError;
 use crossbeam_deque::{Injector, Steal};
+use crossbeam_queue::{ArrayQueue, PushError, PopError};
 use libmanta::moray::{MantaObject, MantaObjectShark};
 use moray::client::MorayClient;
 use quickcheck::{Arbitrary, Gen};
@@ -2461,10 +2462,55 @@ fn reconnect_and_reupdate(
     Some((robj, rclient))
 }
 
+enum UpdateWorkerMsg {
+    Data(AssignmentCacheEntry),
+    Stop,
+}
+
+fn metadata_update_worker_static(
+    job_action: Arc<EvacuateJob>,
+    queue_front: Arc<ArrayQueue<UpdateWorkerMsg>>,
+) -> impl Fn() {
+    move || {
+        // For each worker we create a hash of moray clients indexed by shard.
+        // If the worker exits then the clients and the associated
+        // connections are dropped.  This avoids having to place locks around
+        // the shard connections.  It also allows us to manage our max
+        // number of per-shard connections by simply tuning the number of
+        // metadata update worker threads.
+        let mut client_hash: HashMap<u32, MorayClient> = HashMap::new();
+
+        debug!(
+            "Started metadata update worker: {:?}",
+            thread::current().id()
+        );
+
+        loop {
+            let ace = match queue_front.pop() {
+                Ok(msg) => {
+                    match msg {
+                        UpdateWorkerMsg::Data(d) => d,
+                        UpdateWorkerMsg::Stop => {
+                            break;
+                        }
+                    }
+                },
+                Err(PopError) => {
+                    // XXX use mio?
+                    thread::sleep(std::time::Duration::from_millis(100));
+                    continue;
+                },
+            };
+
+            metadata_update_worker_one(&job_action,ace, &mut client_hash);
+        }
+    }
+}
+
 // This worker continues to run as long as the queue has entries for it to
 // work on.  If, when the worker attempts to "steal" from the queue, the
 // queue is empty the worker exits.
-fn metadata_update_worker(
+fn metadata_update_worker_dynamic(
     job_action: Arc<EvacuateJob>,
     queue_front: Arc<Injector<AssignmentCacheEntry>>,
 ) -> impl Fn() {
@@ -2487,156 +2533,164 @@ fn metadata_update_worker(
                 Steal::Retry => continue,
                 Steal::Empty => break,
             };
+            metadata_update_worker_one(&job_action, ace, &mut client_hash);
+        }
+        client_hash.clear();
+    }
+}
 
-            info!("Updating metadata for assignment: {}", ace.id);
+fn metadata_update_worker_one (
+    job_action: &Arc<EvacuateJob>,
+    ace: AssignmentCacheEntry,
+    client_hash: &mut HashMap<u32, MorayClient>,
+) {
+    info!("Updating metadata for assignment: {}", ace.id);
 
-            let mut updated_objects = vec![];
-            let dest_shark = &ace.dest_shark;
-            let objects = job_action.load_assignment_objects(
-                &ace.id,
-                EvacuateObjectStatus::PostProcessing,
+    let mut updated_objects = vec![];
+    let dest_shark = &ace.dest_shark;
+    let objects = job_action.load_assignment_objects(
+        &ace.id,
+        EvacuateObjectStatus::PostProcessing,
+    );
+
+    trace!("Updating metadata for {} objects", objects.len());
+
+    for eobj in objects {
+        let etag = eobj.etag.clone();
+        let mobj = eobj.object.clone();
+
+        // Unfortunately sqlite only accepts signed integers.  So we
+        // have to do the conversion here and cross our fingers that
+        // we don't have more than 2.1 billion shards.
+        // We do check this value coming in from sharkspotter as well.
+        if eobj.shard < 0 {
+            job_action.mark_object_error(
+                &eobj.id,
+                EvacuateObjectError::BadShardNumber,
             );
 
-            trace!("Updating metadata for {} objects", objects.len());
+            // TODO: panic for now, but for release we should
+            // continue to next object.
+            panic!("Cannot have a negative shard {:#?}", eobj);
+        }
 
-            for eobj in objects {
-                let etag = eobj.etag.clone();
-                let mobj = eobj.object.clone();
+        let shard = eobj.shard as u32;
+        trace!("Getting client for shard {}", shard);
 
-                // Unfortunately sqlite only accepts signed integers.  So we
-                // have to do the conversion here and cross our fingers that
-                // we don't have more than 2.1 billion shards.
-                // We do check this value coming in from sharkspotter as well.
-                if eobj.shard < 0 {
-                    job_action.mark_object_error(
-                        &eobj.id,
-                        EvacuateObjectError::BadShardNumber,
-                    );
-
-                    // TODO: panic for now, but for release we should
-                    // continue to next object.
-                    panic!("Cannot have a negative shard {:#?}", eobj);
-                }
-
-                let shard = eobj.shard as u32;
-                trace!("Getting client for shard {}", shard);
-
-                // We can't use or_insert_with() here because in the event
-                // that client creation fails we want to handle that error.
-                let mclient = match client_hash.entry(shard) {
-                    Occupied(entry) => entry.into_mut(),
-                    Vacant(entry) => {
-                        debug!(
-                            "Client for shard {} does not exist, creating.",
-                            shard
+        // We can't use or_insert_with() here because in the event
+        // that client creation fails we want to handle that error.
+        let mclient = match client_hash.entry(shard) {
+            Occupied(entry) => entry.into_mut(),
+            Vacant(entry) => {
+                debug!(
+                    "Client for shard {} does not exist, creating.",
+                    shard
+                );
+                let client = match moray_client::create_client(
+                    shard,
+                    &job_action.domain_name,
+                ) {
+                    Ok(client) => client,
+                    Err(e) => {
+                        job_action.mark_object_error(
+                            &eobj.id,
+                            EvacuateObjectError::BadMorayClient,
                         );
-                        let client = match moray_client::create_client(
-                            shard,
-                            &job_action.domain_name,
-                        ) {
-                            Ok(client) => client,
-                            Err(e) => {
-                                job_action.mark_object_error(
-                                    &eobj.id,
-                                    EvacuateObjectError::BadMorayClient,
-                                );
-                                error!(
-                                    "MD Update Worker: failed to get moray \
+                        error!(
+                            "MD Update Worker: failed to get moray \
                                      client for shard number {}. Cannot update \
                                      metadata for {:#?}\n{}",
-                                    shard, mobj, e
-                                );
-
-                                continue;
-                            }
-                        };
-                        entry.insert(client)
-                    }
-                };
-
-                // This function updates the manta object with the new
-                // sharks in the Manta Metadata tier, and then returns the
-                // updated Manta metadata object.  It only updates the state of
-                // the associated EvacuateObject in the local database if an
-                // error is encountered.  It is done this way in order to
-                // batch database updates in the happy path.
-                match job_action
-                    .update_object_shark(mobj, dest_shark, etag, mclient)
-                {
-                    Ok(o) => o,
-                    Err(e) => {
-                        warn!(
-                            "MD Update worker: Error updating \n\n{:#?}, with \
-                             dest_shark {:?}\n\n({}).  Retrying...",
-                            &eobj.object, dest_shark, e
+                            shard, mobj, e
                         );
 
-                        // In testing we have seen this fail only due to
-                        // connection issues with rust-cueball / rust-fast.
-                        // There also does not seem to be a good way to check
-                        // if the connection is in a good state before trying
-                        // this reconnect and re-update.  So for now we
-                        // blindly try to reconnect and re-update the object.
-                        // MANTA-4630
-
-                        let rmobj = eobj.object.clone();
-                        let retag = eobj.etag.clone();
-                        match reconnect_and_reupdate(
-                            &job_action,
-                            rmobj,
-                            shard,
-                            dest_shark,
-                            retag,
-                        ) {
-                            Some((robj, rclient)) => {
-                                // Implicitly drop the client returned
-                                // from the hash which is probably bad
-                                client_hash.insert(shard, rclient);
-
-                                // Initially the object was marked as error.
-                                // Returning the retried object here will
-                                // allow it to be added to the 'updated_objects'
-                                // Vec and later marked 'Complete' in the
-                                // database.
-                                robj
-                            }
-                            None => {
-                                continue;
-                            }
-                        }
+                        continue;
                     }
                 };
-
-                updated_objects.push(eobj.id.clone());
+                entry.insert(client)
             }
+        };
 
-            debug!("Updated Objects: {:?}", updated_objects);
+        // This function updates the manta object with the new
+        // sharks in the Manta Metadata tier, and then returns the
+        // updated Manta metadata object.  It only updates the state of
+        // the associated EvacuateObject in the local database if an
+        // error is encountered.  It is done this way in order to
+        // batch database updates in the happy path.
+        match job_action
+            .update_object_shark(mobj, dest_shark, etag, mclient)
+        {
+            Ok(o) => o,
+            Err(e) => {
+                warn!(
+                    "MD Update worker: Error updating \n\n{:#?}, with \
+                             dest_shark {:?}\n\n({}).  Retrying...",
+                    &eobj.object, dest_shark, e
+                );
 
-            // TODO: Should the assignment be entered into the DB for a
-            // persistent log?
-            // Mark this assignment in the event that we do dump core on the
-            // next instruction below, or if we do want to save off the
-            // information from the assignment in the DB.
-            match job_action
-                .set_assignment_state(&ace.id, AssignmentState::PostProcessed)
-            {
-                Ok(()) => (),
-                Err(e) => panic!("{}", e),
+                // In testing we have seen this fail only due to
+                // connection issues with rust-cueball / rust-fast.
+                // There also does not seem to be a good way to check
+                // if the connection is in a good state before trying
+                // this reconnect and re-update.  So for now we
+                // blindly try to reconnect and re-update the object.
+                // MANTA-4630
+
+                let rmobj = eobj.object.clone();
+                let retag = eobj.etag.clone();
+                match reconnect_and_reupdate(
+                    &job_action,
+                    rmobj,
+                    shard,
+                    dest_shark,
+                    retag,
+                ) {
+                    Some((robj, rclient)) => {
+                        // Implicitly drop the client returned
+                        // from the hash which is probably bad
+                        client_hash.insert(shard, rclient);
+
+                        // Initially the object was marked as error.
+                        // Returning the retried object here will
+                        // allow it to be added to the 'updated_objects'
+                        // Vec and later marked 'Complete' in the
+                        // database.
+                        robj
+                    }
+                    None => {
+                        continue;
+                    }
+                }
             }
+        };
 
-            info!("Assignment Complete: {}", &ace.id);
-
-            job_action.remove_assignment_from_cache(&ace.id);
-
-            metrics_object_inc_by(Some(ACTION_EVACUATE), updated_objects.len());
-
-            // TODO: check for DB insert error
-            job_action.mark_many_objects(
-                updated_objects,
-                EvacuateObjectStatus::Complete,
-            );
-        }
+        updated_objects.push(eobj.id.clone());
     }
+
+    debug!("Updated Objects: {:?}", updated_objects);
+
+    // TODO: Should the assignment be entered into the DB for a
+    // persistent log?
+    // Mark this assignment in the event that we do dump core on the
+    // next instruction below, or if we do want to save off the
+    // information from the assignment in the DB.
+    match job_action
+        .set_assignment_state(&ace.id, AssignmentState::PostProcessed)
+    {
+        Ok(()) => (),
+        Err(e) => panic!("{}", e),
+    }
+
+    info!("Assignment Complete: {}", &ace.id);
+
+    job_action.remove_assignment_from_cache(&ace.id);
+
+    metrics_object_inc_by(Some(ACTION_EVACUATE), updated_objects.len());
+
+    // TODO: check for DB insert error
+    job_action.mark_many_objects(
+        updated_objects,
+        EvacuateObjectStatus::Complete,
+    );
 }
 
 /// This thread runs until EvacuateJob Completion.
@@ -2674,7 +2728,8 @@ fn metadata_update_worker(
 // of of the current layout as possible, so that if future changes are made they
 // don't interfere too much with the previous (preferred) one when we
 // re-implement it.
-fn start_metadata_update_broker(
+
+fn metadata_update_broker_dynamic(
     job_action: Arc<EvacuateJob>,
     md_update_rx: crossbeam::Receiver<AssignmentCacheEntry>,
 ) -> Result<thread::JoinHandle<Result<(), Error>>, Error> {
@@ -2695,7 +2750,7 @@ fn start_metadata_update_broker(
                             && pool.active_count() == 0
                             && pool.queued_count() == 0
                         {
-                            let worker = metadata_update_worker(
+                            let worker = metadata_update_worker_dynamic(
                                 Arc::clone(&job_action),
                                 Arc::clone(&queue),
                             );
@@ -2725,7 +2780,7 @@ fn start_metadata_update_broker(
                 }
 
                 // XXX: async/await candidate?
-                let worker = metadata_update_worker(
+                let worker = metadata_update_worker_dynamic(
                     Arc::clone(&job_action),
                     Arc::clone(&queue),
                 );
@@ -2736,6 +2791,86 @@ fn start_metadata_update_broker(
             Ok(())
         })
         .map_err(Error::from)
+}
+
+fn metadata_update_broker_static(
+    job_action: Arc<EvacuateJob>,
+    md_update_rx: crossbeam::Receiver<AssignmentCacheEntry>,
+) -> Result<thread::JoinHandle<Result<(), Error>>, Error> {
+    thread::Builder::new()
+        .name(String::from("Metadata Update broker"))
+        .spawn(move || {
+
+            let num_threads = job_action.options.max_metadata_update_threads;
+            let queue = ArrayQueue::new(5);
+            let q_back = Arc::new(queue);
+            let mut thread_handles = vec![];
+
+            // Spin up static threads
+            for i in 0..num_threads {
+                let handle = thread::Builder::new()
+                    .name(format!("MD Update [{}]", i))
+                    .spawn(metadata_update_worker_static(
+                        Arc::clone(&job_action),
+                        Arc::clone(&q_back)
+                    )).expect("create static MD update thread");
+
+                thread_handles.push(handle);
+            }
+
+            loop {
+                let ace = match md_update_rx.recv() {
+                    Ok(ace) => ace,
+                    Err(e) => {
+                        for _ in 0..num_threads {
+                            // XXX use mio?  If not at least factor this out
+                            while let Err(PushError(_)) = q_back.push(
+                                UpdateWorkerMsg::Stop
+                            ) {
+                                debug!(
+                                    "Assignment queue is full, cannot push \
+                                    'STOP', sleeping"
+                                );
+                                thread::sleep(std::time::Duration::from_millis(200));
+                            }
+                        }
+                        warn!(
+                            "MD Update: Error receiving metadata from \
+                             assignment checker thread: {}",
+                            e
+                        );
+                        break;
+                    }
+                };
+
+                // XXX If running threads exit early they should panic the
+                // process, but it would be good to do some health checks here.
+                let mut msg = UpdateWorkerMsg::Data(ace);
+                while let Err(PushError(m)) = q_back.push(msg) {
+                    msg = m;
+                    debug!("Assignment queue is full cannot push DATA, \
+                        sleeping");
+                    thread::sleep(std::time::Duration::from_millis(200));
+                }
+            }
+            for handle in thread_handles.into_iter() {
+                handle.join().expect("join worker handle");
+            }
+            Ok(())
+        })
+        .map_err(Error::from)
+
+}
+
+fn start_metadata_update_broker(
+    job_action: Arc<EvacuateJob>,
+    md_update_rx: crossbeam::Receiver<AssignmentCacheEntry>,
+) -> Result<thread::JoinHandle<Result<(), Error>>, Error> {
+    if job_action.options.use_static_md_update_threads {
+        metadata_update_broker_static(job_action, md_update_rx)
+    } else {
+        metadata_update_broker_dynamic(job_action, md_update_rx)
+    }
 }
 
 // In the future we may want to return a vector of errors.  But since our

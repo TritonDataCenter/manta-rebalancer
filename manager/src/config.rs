@@ -44,6 +44,7 @@ pub struct ConfigOptions {
     pub max_assignment_size: usize,
     pub max_metadata_update_threads: usize,
     pub max_sharks: usize,
+    pub use_static_md_update_threads: bool,
 }
 
 impl Default for ConfigOptions {
@@ -52,6 +53,7 @@ impl Default for ConfigOptions {
             max_assignment_size: DEFAULT_MAX_ASSIGNMENT_SIZE,
             max_metadata_update_threads: DEFAULT_MAX_METADATA_UPDATE_THREADS,
             max_sharks: DEFAULT_MAX_SHARKS,
+            use_static_md_update_threads: false,
         }
     }
 }
