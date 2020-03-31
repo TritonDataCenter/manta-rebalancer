@@ -2673,30 +2673,19 @@ fn start_metadata_update_broker(
     job_action: Arc<EvacuateJob>,
     md_update_rx: crossbeam::Receiver<AssignmentCacheEntry>,
 ) -> Result<thread::JoinHandle<Result<(), Error>>, Error> {
-    let pool = ThreadPool::new(job_action.options.max_metadata_update_threads);
-    let queue = Arc::new(Injector::<AssignmentCacheEntry>::new());
-    let queue_back = Arc::clone(&queue);
-
     thread::Builder::new()
         .name(String::from("Metadata Update broker"))
         .spawn(move || {
             loop {
-                let ace = match md_update_rx.recv() {
-                    Ok(ace) => ace,
+                match md_update_rx.recv() {
+                    Ok(ace) => {
+                        job_action.remove_assignment_from_cache(&ace.id);
+                        job_action.mark_assignment_objects(
+                            &ace.id,
+                            EvacuateObjectStatus::Complete,
+                        );
+                    },
                     Err(e) => {
-                        // If the queue is empty and there are no active or
-                        // queued threads, kick one off to drain the queue.
-                        if !queue_back.is_empty()
-                            && pool.active_count() == 0
-                            && pool.queued_count() == 0
-                        {
-                            let worker = metadata_update_worker(
-                                Arc::clone(&job_action),
-                                Arc::clone(&queue),
-                            );
-
-                            pool.execute(worker);
-                        }
                         error!(
                             "MD Update: Error receiving metadata from \
                              assignment checker thread: {}",
@@ -2704,30 +2693,8 @@ fn start_metadata_update_broker(
                         );
                         break;
                     }
-                };
-
-                queue_back.push(ace);
-
-                // If all the pools threads are devoted to workers there's
-                // really no reason to queue up a new worker.
-                let total_jobs = pool.active_count() + pool.queued_count();
-                if total_jobs >= pool.max_count() {
-                    trace!(
-                        "Reached max thread count for pool not starting \
-                         new thread"
-                    );
-                    continue;
                 }
-
-                // XXX: async/await candidate?
-                let worker = metadata_update_worker(
-                    Arc::clone(&job_action),
-                    Arc::clone(&queue),
-                );
-
-                pool.execute(worker);
             }
-            pool.join();
             Ok(())
         })
         .map_err(Error::from)
