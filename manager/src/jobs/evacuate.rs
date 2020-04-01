@@ -2822,11 +2822,6 @@ mod tests {
         task.set_status(TaskStatus::Complete);
     }
 
-    lazy_static! {
-        static ref INITIALIZED: Mutex<bool> = Mutex::new(false);
-    }
-
-
     fn generate_storage_node(local: bool) -> StorageNode {
         let mut rng = rand::thread_rng();
         let mut g = StdThreadGen::new(100);

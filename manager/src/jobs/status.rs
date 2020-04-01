@@ -139,7 +139,6 @@ use diesel::{sql_query, debug_query};
 use diesel::pg::Pg;
 use crate::pagination::*;
 
-/*
 pub fn list_objects_and_status(
     uuid: Uuid,
     offset: Option<i64>,
@@ -200,7 +199,6 @@ pub fn list_objects_and_status(
 
     Ok(ret)
 }
-*/
 
 
 
@@ -246,8 +244,9 @@ mod tests {
         use diesel::{sql_query, debug_query};
         use diesel::pg::Pg;
         use crate::pagination::*;
-        let mut query = evacuateobjects.select(evacuateobjects::all_columns()
-        ).paginate(2).limit(2);
+        let mut query = evacuateobjects.select(evacuateobjects::all_columns())
+            .paginate(2)
+            .limit(2);
 
         let sql = debug_query::<Pg, _>(&query).to_string();
         dbg!(sql);
