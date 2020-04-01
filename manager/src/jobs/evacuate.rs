@@ -671,6 +671,10 @@ impl EvacuateJob {
             entry.is_some(),
             format!("Remove assignment not in hash: {}", assignment_id)
         );
+
+        drop(entry);
+
+        assignments.shrink_to_fit();
     }
 
     fn skip_object(
