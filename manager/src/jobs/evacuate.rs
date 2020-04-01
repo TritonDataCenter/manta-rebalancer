@@ -2491,6 +2491,11 @@ fn metadata_update_worker_static(
                     match msg {
                         UpdateWorkerMsg::Data(d) => d,
                         UpdateWorkerMsg::Stop => {
+                            debug!(
+                                "metadata update worker {:?} received STOP, \
+                                exiting", thread::current().id()
+                            );
+
                             break;
                         }
                     }
@@ -2554,6 +2559,8 @@ fn metadata_update_worker_one (
     );
 
     trace!("Updating metadata for {} objects", objects.len());
+
+    client_hash.shrink_to_fit();
 
     for eobj in objects {
         let etag = eobj.etag.clone();
@@ -2802,7 +2809,8 @@ fn metadata_update_broker_static(
         .spawn(move || {
 
             let num_threads = job_action.options.max_metadata_update_threads;
-            let queue = ArrayQueue::new(5);
+            let queue_depth = job_action.options.static_queue_depth;
+            let queue = ArrayQueue::new(queue_depth);
             let q_back = Arc::new(queue);
             let mut thread_handles = vec![];
 

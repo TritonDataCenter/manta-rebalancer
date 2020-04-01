@@ -30,6 +30,7 @@ static DEFAULT_CONFIG_PATH: &str = "/opt/smartdc/rebalancer/config.json";
 static DEFAULT_MAX_ASSIGNMENT_SIZE: usize = 50;
 static DEFAULT_MAX_METADATA_UPDATE_THREADS: usize = 2;
 static DEFAULT_MAX_SHARKS: usize = 5;
+static DEFAULT_STATIC_QUEUE_DEPTH: usize = 10;
 
 #[derive(Deserialize, Default, Debug, Clone)]
 pub struct Shard {
@@ -45,6 +46,7 @@ pub struct ConfigOptions {
     pub max_metadata_update_threads: usize,
     pub max_sharks: usize,
     pub use_static_md_update_threads: bool,
+    pub static_queue_depth: usize,
 }
 
 impl Default for ConfigOptions {
@@ -54,6 +56,7 @@ impl Default for ConfigOptions {
             max_metadata_update_threads: DEFAULT_MAX_METADATA_UPDATE_THREADS,
             max_sharks: DEFAULT_MAX_SHARKS,
             use_static_md_update_threads: false,
+            static_queue_depth: DEFAULT_STATIC_QUEUE_DEPTH,
         }
     }
 }
