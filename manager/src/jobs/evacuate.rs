@@ -2490,6 +2490,7 @@ fn metadata_update_worker_static(
         );
 
         loop {
+            trace!("Getting assignment");
             let ace = match queue_front.pop() {
                 Ok(msg) => {
                     match msg {
@@ -2506,12 +2507,18 @@ fn metadata_update_worker_static(
                 },
                 Err(PopError) => {
                     // XXX use mio?
+                    trace!("Empty Queue, sleeping");
                     thread::sleep(std::time::Duration::from_millis(100));
                     continue;
                 },
             };
+            let id = ace.id.clone();
+            trace!("Got assignment {}", id);
 
-            metadata_update_worker_one(&job_action,ace, &mut client_hash);
+            metadata_update_worker_one(&job_action, ace, &mut client_hash);
+
+            trace!("Assignment Metdata Update Complete: {}", id);
+
         }
     }
 }
