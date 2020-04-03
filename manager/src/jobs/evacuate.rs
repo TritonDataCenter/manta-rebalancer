@@ -2277,6 +2277,7 @@ fn start_assignment_checker(
         .spawn(move || {
             let mut run = true;
             loop {
+                let mut found_assignment_count = 0;
                 if run {
                     run = match checker_fini_rx.try_recv() {
                         Ok(_) => {
@@ -2388,6 +2389,8 @@ fn start_assignment_checker(
                         _ => continue,
                     }
 
+                    found_assignment_count += 1;
+
                     // Mark the shark associated with this assignment as Ready
                     job_action.mark_dest_shark(
                         &ace.dest_shark.manta_storage_id,
@@ -2417,7 +2420,9 @@ fn start_assignment_checker(
                 }
 
                 // TODO: MANTA-5106
-                thread::sleep(Duration::from_secs(1));
+                if found_assignment_count == 0 {
+                    thread::sleep(Duration::from_millis(200));
+                }
             }
             Ok(())
         })
