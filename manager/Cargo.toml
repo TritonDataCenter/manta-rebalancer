@@ -27,6 +27,7 @@ strum_macros = "0.16.0"
 uuid = { version = "0.7.4", features = ["v4"] }
 gotham = "0.4.0"
 gotham_derive = "0.4.0"
+prometheus = "0.7.0"
 quickcheck = "0.8.5"
 quickcheck_helpers = { git = "https://github.com/joyent/rust-quickcheck-helpers.git", tag = "v0.1.0" }
 rebalancer = { path = "../rebalancer", features = ["postgres"] }

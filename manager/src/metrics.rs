@@ -8,10 +8,13 @@
  * Copyright 2020 Joyent, Inc.
  */
 use lazy_static::lazy_static;
+use prometheus::{opts, register_counter_vec};
 use rebalancer::metrics;
 use rebalancer::metrics::{
     counter_vec_inc_by, MetricsMap, ERROR_COUNT, OBJECT_COUNT, REQUEST_COUNT,
+    Metrics,
 };
+use std::collections::HashMap;
 use std::sync::Mutex;
 use std::thread;
 
@@ -48,6 +51,10 @@ lazy_static! {
 // rebalancer manager functionality is extended.
 pub static ACTION_EVACUATE: &str = "evacuate";
 
+// This is a metric label that  is specific to the rebalancer manager, hence
+// why it is defined here instead of where the common labels are.
+pub static SKIP_COUNT: &str = "skip_count";
+
 // This method may come in handy if it is necessary to add more metrics to
 // our collector.
 pub fn metrics_get() -> &'static Mutex<Option<MetricsMap>> {
@@ -61,8 +68,32 @@ pub fn metrics_init(cfg: metrics::ConfigMetrics) {
         return;
     }
 
-    let mut metrics = METRICS.lock().unwrap();
-    *metrics = Some(metrics::register_metrics(&cfg));
+    // Create out baseline metrics.
+    let mut metrics = metrics::register_metrics(&cfg);
+
+    let labels: HashMap<String, String> =
+        match metrics::get_const_labels().lock().unwrap().clone() {
+            Some(cl) => cl,
+            None => HashMap::new(),
+        };
+
+    // Now create and register additional metrics exclusively used by the
+    // rebalaner manger.
+    let skip_counter = register_counter_vec!(
+       opts!(SKIP_COUNT, "Objects skipped.")
+           .const_labels(labels.clone()),
+       &["reason"]
+    )
+    .expect("failed to register skip_count counter");
+
+    metrics.insert(
+        SKIP_COUNT,
+        Metrics::MetricsCounterVec(skip_counter.clone()),
+    );
+
+    // Take the fully formed set of metrics and store it globally.
+    let mut global_metrics = METRICS.lock().unwrap();
+    *global_metrics = Some(metrics);
 
     // Spawn a thread which runs our metrics server.
     let ms = thread::Builder::new()
@@ -80,6 +111,11 @@ pub fn metrics_init(cfg: metrics::ConfigMetrics) {
 // inadvertently provide an erroneous key to the MetricsMap when updating
 // counts of some event that has occurred.
 //
+
+// Objects skipped broken down by reason.
+pub fn metrics_skip_inc(reason: Option<&str>) {
+    metrics_vec_inc_by(SKIP_COUNT, reason, 1); 
+}
 
 // Errors broken down by error type.
 pub fn metrics_error_inc(reason: Option<&str>) {

@@ -8,7 +8,10 @@
  * Copyright 2020 Joyent, Inc.
  */
 
-use crate::metrics::{metrics_object_inc_by, ACTION_EVACUATE};
+use crate::metrics::{
+    metrics_error_inc, metrics_object_inc_by, metrics_skip_inc,
+    ACTION_EVACUATE,
+};
 use rebalancer::common::{
     self, AssignmentPayload, ObjectId, ObjectSkippedReason, Task, TaskStatus,
 };
@@ -689,6 +692,7 @@ impl EvacuateJob {
         reason: ObjectSkippedReason,
     ) -> Result<(), Error> {
         info!("Skipping object {}: {}.", &eobj.id, reason);
+        metrics_skip_inc(Some(&reason.to_string()));
 
         eobj.status = EvacuateObjectStatus::Skipped;
         eobj.skipped_reason = Some(reason);
@@ -1002,6 +1006,8 @@ impl EvacuateJob {
         use self::evacuateobjects::dsl::{
             error, evacuateobjects, id, skipped_reason, status,
         };
+
+        metrics_error_inc(Some(&err.to_string()));
 
         let locked_conn = self.conn.lock().expect("db conn lock");
 
