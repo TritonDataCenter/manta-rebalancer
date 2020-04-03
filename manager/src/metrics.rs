@@ -51,7 +51,7 @@ lazy_static! {
 // rebalancer manager functionality is extended.
 pub static ACTION_EVACUATE: &str = "evacuate";
 
-// This is a metric label that  is specific to the rebalancer manager, hence
+// This is a metric label that is specific to the rebalancer manager, hence
 // why it is defined here instead of where the common labels are.
 pub static SKIP_COUNT: &str = "skip_count";
 
@@ -68,7 +68,7 @@ pub fn metrics_init(cfg: metrics::ConfigMetrics) {
         return;
     }
 
-    // Create out baseline metrics.
+    // Create our baseline metrics.
     let mut metrics = metrics::register_metrics(&cfg);
 
     let labels: HashMap<String, String> =
