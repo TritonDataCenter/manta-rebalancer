@@ -11,8 +11,8 @@ use lazy_static::lazy_static;
 use prometheus::{opts, register_counter_vec};
 use rebalancer::metrics;
 use rebalancer::metrics::{
-    counter_vec_inc_by, MetricsMap, ERROR_COUNT, OBJECT_COUNT, REQUEST_COUNT,
-    Metrics,
+    counter_vec_inc_by, Metrics, MetricsMap, ERROR_COUNT, OBJECT_COUNT,
+    REQUEST_COUNT,
 };
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -80,16 +80,13 @@ pub fn metrics_init(cfg: metrics::ConfigMetrics) {
     // Now create and register additional metrics exclusively used by the
     // rebalaner manger.
     let skip_counter = register_counter_vec!(
-       opts!(SKIP_COUNT, "Objects skipped.")
-           .const_labels(labels.clone()),
-       &["reason"]
+        opts!(SKIP_COUNT, "Objects skipped.").const_labels(labels.clone()),
+        &["reason"]
     )
     .expect("failed to register skip_count counter");
 
-    metrics.insert(
-        SKIP_COUNT,
-        Metrics::MetricsCounterVec(skip_counter.clone()),
-    );
+    metrics
+        .insert(SKIP_COUNT, Metrics::MetricsCounterVec(skip_counter.clone()));
 
     // Take the fully formed set of metrics and store it globally.
     let mut global_metrics = METRICS.lock().unwrap();
@@ -114,7 +111,7 @@ pub fn metrics_init(cfg: metrics::ConfigMetrics) {
 
 // Objects skipped broken down by reason.
 pub fn metrics_skip_inc(reason: Option<&str>) {
-    metrics_vec_inc_by(SKIP_COUNT, reason, 1); 
+    metrics_vec_inc_by(SKIP_COUNT, reason, 1);
 }
 
 // Errors broken down by error type.

@@ -9,8 +9,7 @@
  */
 
 use crate::metrics::{
-    metrics_error_inc, metrics_object_inc_by, metrics_skip_inc,
-    ACTION_EVACUATE,
+    metrics_error_inc, metrics_object_inc_by, metrics_skip_inc, ACTION_EVACUATE,
 };
 use rebalancer::common::{
     self, AssignmentPayload, ObjectId, ObjectSkippedReason, Task, TaskStatus,

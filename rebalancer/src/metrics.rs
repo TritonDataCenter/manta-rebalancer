@@ -25,7 +25,6 @@ pub static OBJECT_COUNT: &str = "object_count";
 pub static ERROR_COUNT: &str = "error_count";
 pub static REQUEST_COUNT: &str = "request_count";
 
-
 #[derive(Clone, Deserialize)]
 pub struct ConfigMetrics {
     /// Rebalancer metrics server address
@@ -98,8 +97,10 @@ pub fn counter_vec_inc_by<S: ::std::hash::BuildHasher>(
     }
 }
 
+// It would be nice if this could be a HashMap<&str, &str>, however Prometheus
+// requires the type HashMap<String, String>, for const_labels, so here we are.
 pub fn get_const_labels() -> &'static Mutex<Option<HashMap<String, String>>> {
-	&METRICS_LABELS
+    &METRICS_LABELS
 }
 
 // Given the service configuration information, create (i.e. register) the
