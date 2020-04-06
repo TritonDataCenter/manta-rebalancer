@@ -11,7 +11,7 @@
 use quickcheck::{Arbitrary, Gen};
 use quickcheck_helpers::random::string as random_string;
 use rebalancer::error::Error;
-use reqwest::{self, StatusCode, Client};
+use reqwest::{self, Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use std::sync::{
     atomic::{AtomicBool, Ordering},

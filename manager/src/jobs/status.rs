@@ -30,10 +30,11 @@ pub enum StatusError {
     Unknown,
 }
 
-pub fn get_status(uuid: Uuid) -> Result<HashMap<String, usize>, StatusError> {
+pub fn get_status(uuid: Uuid) -> Result<HashMap<String, i64>, StatusError> {
     use super::evacuate::evacuateobjects::dsl::*;
+    use diesel::dsl::count;
     let db_name = uuid.to_string();
-    let mut total_count = 0;
+    let mut total_count: i64 = 0;
     let mut ret = HashMap::new();
 
     let conn = match pg_db::connect_db(&db_name) {
@@ -51,21 +52,28 @@ pub fn get_status(uuid: Uuid) -> Result<HashMap<String, usize>, StatusError> {
         }
     };
 
-    let status_vec: Vec<EvacuateObjectStatus> =
-        match evacuateobjects.select(status).get_results(&conn) {
-            Ok(res) => res,
+    // Previously we queried the DB once for all of the status entries,
+    // which were put into a Vec.  We then iterated over the variants of
+    // EvacuateObjectStatus, and counted how many of each were in our status
+    // Vec.  This was slightly more efficient on wall time (4:3), but it used
+    // up a significant amount of memory as we scaled up to millions of
+    // objects per job.
+    for status_value in EvacuateObjectStatus::iter() {
+        let entry_count: i64 = match evacuateobjects
+            .filter(status.eq(status_value))
+            .select(count(status))
+            .get_results(&conn)
+        {
+            Ok(res) => res[0],
             Err(e) => {
                 error!("Status DB query: {}", e);
                 return Err(StatusError::LookupError);
             }
         };
-
-    for status_value in EvacuateObjectStatus::iter() {
-        let count = status_vec.iter().filter(|s| *s == &status_value).count();
         let status_str = to_title_case(&status_value.to_string());
 
-        ret.insert(status_str, count);
-        total_count += count;
+        ret.insert(status_str, entry_count);
+        total_count += entry_count;
     }
 
     ret.insert("Total".into(), total_count);
@@ -126,6 +134,7 @@ mod tests {
         let mut g = StdThreadGen::new(10);
         let mut obj_vec = vec![];
 
+        dbg!(&uuid);
         let conn = pg_db::create_and_connect_db(&uuid.to_string()).unwrap();
         evacuate::create_evacuateobjects_table(&conn).unwrap();
 
@@ -138,6 +147,7 @@ mod tests {
             .execute(&conn)
             .unwrap();
 
-        get_status(uuid).unwrap();
+        let count = get_status(uuid.clone()).unwrap();
+        dbg!(count);
     }
 }

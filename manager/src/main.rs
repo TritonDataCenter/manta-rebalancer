@@ -74,7 +74,7 @@ fn invalid_server_error(state: &State, msg: String) -> Response<Body> {
 }
 
 type GetJobFuture =
-    Box<dyn Future<Item = HashMap<String, usize>, Error = StatusError> + Send>;
+    Box<dyn Future<Item = HashMap<String, i64>, Error = StatusError> + Send>;
 
 fn get_status(uuid: Uuid) -> GetJobFuture {
     Box::new(match jobs::status::get_status(uuid) {

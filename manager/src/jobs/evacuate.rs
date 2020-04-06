@@ -41,7 +41,7 @@ use std::time::Duration;
 use crossbeam_channel as crossbeam;
 use crossbeam_channel::TryRecvError;
 use crossbeam_deque::{Injector, Steal};
-use crossbeam_queue::{ArrayQueue, PushError, PopError};
+use crossbeam_queue::{ArrayQueue, PopError, PushError};
 use libmanta::moray::{MantaObject, MantaObjectShark};
 use moray::client::MorayClient;
 use quickcheck::{Arbitrary, Gen};
@@ -1153,7 +1153,8 @@ impl PostAssignment for EvacuateJob {
         );
 
         trace!("Sending {:#?} to {}", payload, agent_uri);
-        let res = match self.post_client.post(&agent_uri).json(&payload).send() {
+        let res = match self.post_client.post(&agent_uri).json(&payload).send()
+        {
             Ok(r) => r,
             Err(e) => {
                 // TODO: Should we blacklist this destination shark?
@@ -2497,17 +2498,16 @@ fn metadata_update_worker_static(
         loop {
             trace!("Getting assignment");
             let ace = match queue_front.pop() {
-                Ok(msg) => {
-                    match msg {
-                        UpdateWorkerMsg::Data(d) => d,
-                        UpdateWorkerMsg::Stop => {
-                            debug!(
-                                "metadata update worker {:?} received STOP, \
-                                exiting", thread::current().id()
-                            );
+                Ok(msg) => match msg {
+                    UpdateWorkerMsg::Data(d) => d,
+                    UpdateWorkerMsg::Stop => {
+                        debug!(
+                            "metadata update worker {:?} received STOP, \
+                             exiting",
+                            thread::current().id()
+                        );
 
-                            break;
-                        }
+                        break;
                     }
                 },
                 Err(PopError) => {
@@ -2515,7 +2515,7 @@ fn metadata_update_worker_static(
                     trace!("Empty Queue, sleeping");
                     thread::sleep(std::time::Duration::from_millis(100));
                     continue;
-                },
+                }
             };
             let id = ace.id.clone();
             trace!("Got assignment {}", id);
@@ -2523,7 +2523,6 @@ fn metadata_update_worker_static(
             metadata_update_worker_one(&job_action, ace, &mut client_hash);
 
             trace!("Assignment Metdata Update Complete: {}", id);
-
         }
     }
 }
@@ -2560,7 +2559,7 @@ fn metadata_update_worker_dynamic(
     }
 }
 
-fn metadata_update_worker_one (
+fn metadata_update_worker_one(
     job_action: &Arc<EvacuateJob>,
     ace: AssignmentCacheEntry,
     client_hash: &mut HashMap<u32, MorayClient>,
@@ -2569,10 +2568,8 @@ fn metadata_update_worker_one (
 
     let mut updated_objects = vec![];
     let dest_shark = &ace.dest_shark;
-    let objects = job_action.load_assignment_objects(
-        &ace.id,
-        EvacuateObjectStatus::PostProcessing,
-    );
+    let objects = job_action
+        .load_assignment_objects(&ace.id, EvacuateObjectStatus::PostProcessing);
 
     trace!("Updating metadata for {} objects", objects.len());
 
@@ -2605,10 +2602,7 @@ fn metadata_update_worker_one (
         let mclient = match client_hash.entry(shard) {
             Occupied(entry) => entry.into_mut(),
             Vacant(entry) => {
-                debug!(
-                    "Client for shard {} does not exist, creating.",
-                    shard
-                );
+                debug!("Client for shard {} does not exist, creating.", shard);
                 let client = match moray_client::create_client(
                     shard,
                     &job_action.domain_name,
@@ -2621,8 +2615,8 @@ fn metadata_update_worker_one (
                         );
                         error!(
                             "MD Update Worker: failed to get moray \
-                                     client for shard number {}. Cannot update \
-                                     metadata for {:#?}\n{}",
+                             client for shard number {}. Cannot update \
+                             metadata for {:#?}\n{}",
                             shard, mobj, e
                         );
 
@@ -2639,14 +2633,12 @@ fn metadata_update_worker_one (
         // the associated EvacuateObject in the local database if an
         // error is encountered.  It is done this way in order to
         // batch database updates in the happy path.
-        match job_action
-            .update_object_shark(mobj, dest_shark, etag, mclient)
-        {
+        match job_action.update_object_shark(mobj, dest_shark, etag, mclient) {
             Ok(o) => o,
             Err(e) => {
                 warn!(
                     "MD Update worker: Error updating \n\n{:#?}, with \
-                             dest_shark {:?}\n\n({}).  Retrying...",
+                     dest_shark {:?}\n\n({}).  Retrying...",
                     &eobj.object, dest_shark, e
                 );
 
@@ -2710,10 +2702,8 @@ fn metadata_update_worker_one (
     metrics_object_inc_by(Some(ACTION_EVACUATE), updated_objects.len());
 
     // TODO: check for DB insert error
-    job_action.mark_many_objects(
-        updated_objects,
-        EvacuateObjectStatus::Complete,
-    );
+    job_action
+        .mark_many_objects(updated_objects, EvacuateObjectStatus::Complete);
 }
 
 /// This thread runs until EvacuateJob Completion.
@@ -2823,7 +2813,6 @@ fn metadata_update_broker_static(
     thread::Builder::new()
         .name(String::from("Metadata Update broker"))
         .spawn(move || {
-
             let num_threads = job_action.options.max_metadata_update_threads;
             let queue_depth = job_action.options.static_queue_depth;
             let queue = ArrayQueue::new(queue_depth);
@@ -2836,8 +2825,9 @@ fn metadata_update_broker_static(
                     .name(format!("MD Update [{}]", i))
                     .spawn(metadata_update_worker_static(
                         Arc::clone(&job_action),
-                        Arc::clone(&q_back)
-                    )).expect("create static MD update thread");
+                        Arc::clone(&q_back),
+                    ))
+                    .expect("create static MD update thread");
 
                 thread_handles.push(handle);
             }
@@ -2848,14 +2838,16 @@ fn metadata_update_broker_static(
                     Err(e) => {
                         for _ in 0..num_threads {
                             // XXX use mio?  If not at least factor this out
-                            while let Err(PushError(_)) = q_back.push(
-                                UpdateWorkerMsg::Stop
-                            ) {
+                            while let Err(PushError(_)) =
+                                q_back.push(UpdateWorkerMsg::Stop)
+                            {
                                 debug!(
                                     "Assignment queue is full, cannot push \
-                                    'STOP', sleeping"
+                                     'STOP', sleeping"
                                 );
-                                thread::sleep(std::time::Duration::from_millis(200));
+                                thread::sleep(
+                                    std::time::Duration::from_millis(200),
+                                );
                             }
                         }
                         warn!(
@@ -2872,8 +2864,10 @@ fn metadata_update_broker_static(
                 let mut msg = UpdateWorkerMsg::Data(ace);
                 while let Err(PushError(m)) = q_back.push(msg) {
                     msg = m;
-                    debug!("Assignment queue is full cannot push DATA, \
-                        sleeping");
+                    debug!(
+                        "Assignment queue is full cannot push DATA, \
+                         sleeping"
+                    );
                     thread::sleep(std::time::Duration::from_millis(200));
                 }
             }
@@ -2883,7 +2877,6 @@ fn metadata_update_broker_static(
             Ok(())
         })
         .map_err(Error::from)
-
 }
 
 fn start_metadata_update_broker(
