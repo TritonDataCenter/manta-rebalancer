@@ -2419,7 +2419,8 @@ fn start_assignment_checker(
 
                 // TODO: MANTA-5106
                 if found_assignment_count == 0 {
-                    thread::sleep(Duration::from_millis(200));
+                    trace!("all assignments are running, sleeping for 100ms");
+                    thread::sleep(Duration::from_millis(100));
                 }
             }
             Ok(())
