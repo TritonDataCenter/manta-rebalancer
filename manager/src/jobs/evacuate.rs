@@ -2513,12 +2513,19 @@ fn metadata_update_worker_static(
                 },
                 Err(PopError) => {
                     // We don't care what the value of the lock is, this is
-                    // only here so that we don't busy wait on an empty array to
-                    // have some elements to process.
-                    let _ = cv.wait_timeout(
-                        lock.lock().expect("cv wait lock"),
-                        std::time::Duration::from_secs(5),
-                    );
+                    // only here so that we don't busy wait on an empty array.
+                    trace!("queue empty, waiting for element to be added");
+
+                    let r = cv
+                        .wait_timeout(
+                            lock.lock().expect("cv wait lock"),
+                            std::time::Duration::from_secs(5),
+                        )
+                        .expect("queue cv wait");
+
+                    if r.1.timed_out() {
+                        trace!("queue wait timed out");
+                    }
                     continue;
                 }
             };
