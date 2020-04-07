@@ -34,7 +34,7 @@ use std::error::Error as _Error;
 use std::io::{ErrorKind, Write};
 use std::str::FromStr;
 use std::string::ToString;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::thread;
 use std::time::Duration;
 
@@ -2255,6 +2255,28 @@ where
     job_action.get(ace)
 }
 
+fn _checker_should_run(checker_fini_rx: &crossbeam::Receiver<FiniMsg>) -> bool {
+    match checker_fini_rx.try_recv() {
+        Ok(_) => {
+            info!("Assignment Checker thread received shutdown message.");
+            false
+        }
+        Err(e) => match e {
+            TryRecvError::Disconnected => {
+                warn!(
+                    "checker fini channel disconnected before sending message. \
+                    Shutting down."
+                );
+                false
+            }
+            TryRecvError::Empty => {
+                trace!("No shutdown message, keep Checker running");
+                true
+            }
+        },
+    }
+}
+
 /// Responsible for:
 /// 1. periodically checking the Evacuate Job's hash of assignments that have
 /// reached the Assigned state and, if so, querying the associated Agent for an
@@ -2280,32 +2302,7 @@ fn start_assignment_checker(
             loop {
                 let mut found_assignment_count = 0;
                 if run {
-                    run = match checker_fini_rx.try_recv() {
-                        Ok(_) => {
-                            info!(
-                                "Assignment Checker thread received \
-                                 shutdown message."
-                            );
-                            false
-                        }
-                        Err(e) => match e {
-                            TryRecvError::Disconnected => {
-                                warn!(
-                                    "checker fini channel disconnected \
-                                     before sending message.  Shutting \
-                                     down."
-                                );
-                                false
-                            }
-                            TryRecvError::Empty => {
-                                trace!(
-                                    "No shutdown message, keep Checker \
-                                     running"
-                                );
-                                true
-                            }
-                        },
-                    };
+                    run = _checker_should_run(&checker_fini_rx);
                 }
 
                 // We'd rather not hold the assignment hash lock here while we
@@ -2480,6 +2477,7 @@ enum UpdateWorkerMsg {
 fn metadata_update_worker_static(
     job_action: Arc<EvacuateJob>,
     queue_front: Arc<ArrayQueue<UpdateWorkerMsg>>,
+    cv_pair: Arc<(Mutex<()>, Condvar)>,
 ) -> impl Fn() {
     move || {
         // For each worker we create a hash of moray clients indexed by shard.
@@ -2494,6 +2492,8 @@ fn metadata_update_worker_static(
             "Started metadata update worker: {:?}",
             thread::current().id()
         );
+
+        let (lock, cv) = &*cv_pair;
 
         loop {
             trace!("Getting assignment");
@@ -2511,18 +2511,21 @@ fn metadata_update_worker_static(
                     }
                 },
                 Err(PopError) => {
-                    // XXX use mio?
-                    trace!("Empty Queue, sleeping");
-                    thread::sleep(std::time::Duration::from_millis(100));
+                    // We don't care what the value of the lock is, this is
+                    // only here so that we don't busy wait on an empty array to
+                    // have some elements to process.
+                    let _ = cv.wait_timeout(
+                        lock.lock().expect("cv wait lock"),
+                        std::time::Duration::from_secs(5),
+                    );
                     continue;
                 }
             };
+
             let id = ace.id.clone();
             trace!("Got assignment {}", id);
-
             metadata_update_worker_one(&job_action, ace, &mut client_hash);
-
-            trace!("Assignment Metdata Update Complete: {}", id);
+            trace!("Assignment Metadata Update Complete: {}", id);
         }
     }
 }
@@ -2818,6 +2821,8 @@ fn metadata_update_broker_static(
             let queue = ArrayQueue::new(queue_depth);
             let q_back = Arc::new(queue);
             let mut thread_handles = vec![];
+            let cv_pair = Arc::new((Mutex::new(()), Condvar::new()));
+            let (_, cv) = &*cv_pair;
 
             // Spin up static threads
             for i in 0..num_threads {
@@ -2826,6 +2831,7 @@ fn metadata_update_broker_static(
                     .spawn(metadata_update_worker_static(
                         Arc::clone(&job_action),
                         Arc::clone(&q_back),
+                        Arc::clone(&cv_pair),
                     ))
                     .expect("create static MD update thread");
 
@@ -2837,7 +2843,6 @@ fn metadata_update_broker_static(
                     Ok(ace) => ace,
                     Err(e) => {
                         for _ in 0..num_threads {
-                            // XXX use mio?  If not at least factor this out
                             while let Err(PushError(_)) =
                                 q_back.push(UpdateWorkerMsg::Stop)
                             {
@@ -2849,6 +2854,7 @@ fn metadata_update_broker_static(
                                     std::time::Duration::from_millis(200),
                                 );
                             }
+                            cv.notify_all();
                         }
                         warn!(
                             "MD Update: Error receiving metadata from \
@@ -2870,6 +2876,7 @@ fn metadata_update_broker_static(
                     );
                     thread::sleep(std::time::Duration::from_millis(200));
                 }
+                cv.notify_all();
             }
             for handle in thread_handles.into_iter() {
                 handle.join().expect("join worker handle");

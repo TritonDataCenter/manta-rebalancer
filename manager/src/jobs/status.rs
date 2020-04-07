@@ -31,12 +31,11 @@ pub enum StatusError {
 }
 
 pub fn get_status(uuid: Uuid) -> Result<HashMap<String, i64>, StatusError> {
-    use super::evacuate::evacuateobjects::dsl::*;
+    use super::evacuate::evacuateobjects::dsl::{evacuateobjects, status};
     use diesel::dsl::count;
-    let db_name = uuid.to_string();
-    let mut total_count: i64 = 0;
-    let mut ret = HashMap::new();
 
+    let db_name = uuid.to_string();
+    let mut ret = HashMap::new();
     let conn = match pg_db::connect_db(&db_name) {
         Ok(c) => c,
         Err(e) => {
@@ -55,10 +54,12 @@ pub fn get_status(uuid: Uuid) -> Result<HashMap<String, i64>, StatusError> {
     // Previously we queried the DB once for all of the status entries,
     // which were put into a Vec.  We then iterated over the variants of
     // EvacuateObjectStatus, and counted how many of each were in our status
-    // Vec.  This was slightly more efficient on wall time (4:3), but it used
-    // up a significant amount of memory as we scaled up to millions of
-    // objects per job.
+    // Vec.  This was more efficient on wall time (4:3), but it used up a
+    // significant amount of memory as we scaled up to millions of
+    // objects per job.  We noticed that this memory was not being given back
+    // to the OS after issuing a GET status request for a given job.
     for status_value in EvacuateObjectStatus::iter() {
+        let status_str = to_title_case(&status_value.to_string());
         let entry_count: i64 = match evacuateobjects
             .filter(status.eq(status_value))
             .select(count(status))
@@ -70,11 +71,19 @@ pub fn get_status(uuid: Uuid) -> Result<HashMap<String, i64>, StatusError> {
                 return Err(StatusError::LookupError);
             }
         };
-        let status_str = to_title_case(&status_value.to_string());
 
         ret.insert(status_str, entry_count);
-        total_count += entry_count;
     }
+
+    // Get the total count of objects for this job.
+    let total_count: i64 =
+        match evacuateobjects.select(count(status)).get_results(&conn) {
+            Ok(res) => res[0],
+            Err(e) => {
+                error!("Status DB query: {}", e);
+                return Err(StatusError::LookupError);
+            }
+        };
 
     ret.insert("Total".into(), total_count);
 
