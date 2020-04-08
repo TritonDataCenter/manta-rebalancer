@@ -2532,7 +2532,7 @@ fn metadata_update_worker_static(
 
             let id = ace.id.clone();
             trace!("Got assignment {}", id);
-            metadata_update_worker_one(&job_action, ace, &mut client_hash);
+            metadata_update_assignment(&job_action, ace, &mut client_hash);
             trace!("Assignment Metadata Update Complete: {}", id);
         }
     }
@@ -2564,13 +2564,13 @@ fn metadata_update_worker_dynamic(
                 Steal::Retry => continue,
                 Steal::Empty => break,
             };
-            metadata_update_worker_one(&job_action, ace, &mut client_hash);
+            metadata_update_assignment(&job_action, ace, &mut client_hash);
         }
         client_hash.clear();
     }
 }
 
-fn metadata_update_worker_one(
+fn metadata_update_assignment(
     job_action: &Arc<EvacuateJob>,
     ace: AssignmentCacheEntry,
     client_hash: &mut HashMap<u32, MorayClient>,
@@ -2659,7 +2659,7 @@ fn metadata_update_worker_one(
                 // if the connection is in a good state before trying
                 // this reconnect and re-update.  So for now we
                 // blindly try to reconnect and re-update the object.
-                // MANTA-4630
+                // MANTA-4630 (MANTA-5158)
 
                 let rmobj = eobj.object.clone();
                 let retag = eobj.etag.clone();
@@ -2817,80 +2817,81 @@ fn metadata_update_broker_dynamic(
         .map_err(Error::from)
 }
 
+fn _update_broker_static(
+    job_action: Arc<EvacuateJob>,
+    md_update_rx: crossbeam::Receiver<AssignmentCacheEntry>,
+) -> Result<(), Error> {
+    let num_threads = job_action.options.max_metadata_update_threads;
+    let queue_depth = job_action.options.static_queue_depth;
+    let queue = ArrayQueue::new(queue_depth);
+    let q_back = Arc::new(queue);
+    let mut thread_handles = vec![];
+    let cv_pair = Arc::new((Mutex::new(()), Condvar::new()));
+    let (_, cv) = &*cv_pair;
+
+    // Spin up static threads
+    for i in 0..num_threads {
+        let handle = thread::Builder::new()
+            .name(format!("MD Update [{}]", i))
+            .spawn(metadata_update_worker_static(
+                Arc::clone(&job_action),
+                Arc::clone(&q_back),
+                Arc::clone(&cv_pair),
+            ))
+            .expect("create static MD update thread");
+
+        thread_handles.push(handle);
+    }
+
+    loop {
+        let ace = match md_update_rx.recv() {
+            Ok(ace) => ace,
+            Err(e) => {
+                for _ in 0..num_threads {
+                    while let Err(PushError(_)) =
+                        q_back.push(UpdateWorkerMsg::Stop)
+                    {
+                        debug!(
+                            "Assignment queue is full, cannot push 'STOP', \
+                             sleeping"
+                        );
+                        thread::sleep(std::time::Duration::from_millis(200));
+                    }
+                    cv.notify_all();
+                }
+                warn!(
+                    "MD Update: Error receiving metadata from assignment \
+                     checker thread: {}",
+                    e
+                );
+                break;
+            }
+        };
+
+        let mut msg = UpdateWorkerMsg::Data(ace);
+        while let Err(PushError(m)) = q_back.push(msg) {
+            msg = m;
+            debug!(
+                "Assignment queue is full cannot push DATA, \
+                 sleeping"
+            );
+            thread::sleep(std::time::Duration::from_millis(200));
+        }
+        cv.notify_all();
+    }
+    for handle in thread_handles.into_iter() {
+        handle.join().expect("join worker handle");
+    }
+    Ok(())
+}
+
 fn metadata_update_broker_static(
     job_action: Arc<EvacuateJob>,
     md_update_rx: crossbeam::Receiver<AssignmentCacheEntry>,
 ) -> Result<thread::JoinHandle<Result<(), Error>>, Error> {
     thread::Builder::new()
         .name(String::from("Metadata Update broker"))
-        .spawn(move || {
-            let num_threads = job_action.options.max_metadata_update_threads;
-            let queue_depth = job_action.options.static_queue_depth;
-            let queue = ArrayQueue::new(queue_depth);
-            let q_back = Arc::new(queue);
-            let mut thread_handles = vec![];
-            let cv_pair = Arc::new((Mutex::new(()), Condvar::new()));
-            let (_, cv) = &*cv_pair;
-
-            // Spin up static threads
-            for i in 0..num_threads {
-                let handle = thread::Builder::new()
-                    .name(format!("MD Update [{}]", i))
-                    .spawn(metadata_update_worker_static(
-                        Arc::clone(&job_action),
-                        Arc::clone(&q_back),
-                        Arc::clone(&cv_pair),
-                    ))
-                    .expect("create static MD update thread");
-
-                thread_handles.push(handle);
-            }
-
-            loop {
-                let ace = match md_update_rx.recv() {
-                    Ok(ace) => ace,
-                    Err(e) => {
-                        for _ in 0..num_threads {
-                            while let Err(PushError(_)) =
-                                q_back.push(UpdateWorkerMsg::Stop)
-                            {
-                                debug!(
-                                    "Assignment queue is full, cannot push \
-                                     'STOP', sleeping"
-                                );
-                                thread::sleep(
-                                    std::time::Duration::from_millis(200),
-                                );
-                            }
-                            cv.notify_all();
-                        }
-                        warn!(
-                            "MD Update: Error receiving metadata from \
-                             assignment checker thread: {}",
-                            e
-                        );
-                        break;
-                    }
-                };
-
-                // XXX If running threads exit early they should panic the
-                // process, but it would be good to do some health checks here.
-                let mut msg = UpdateWorkerMsg::Data(ace);
-                while let Err(PushError(m)) = q_back.push(msg) {
-                    msg = m;
-                    debug!(
-                        "Assignment queue is full cannot push DATA, \
-                         sleeping"
-                    );
-                    thread::sleep(std::time::Duration::from_millis(200));
-                }
-                cv.notify_all();
-            }
-            for handle in thread_handles.into_iter() {
-                handle.join().expect("join worker handle");
-            }
-            Ok(())
-        })
+        .spawn(move || _update_broker_static(job_action, md_update_rx))
         .map_err(Error::from)
 }
 

@@ -33,20 +33,16 @@ use resolve::{record::Srv, DnsConfig, DnsResolver};
 fn get_srv_record(svc: &str, proto: &str, host: &str) -> Result<Srv, Error> {
     let query = format!("{}.{}.{}", svc, proto, host);
     let r = DnsResolver::new(DnsConfig::load_default()?)?;
-    match r
-        .resolve_record::<Srv>(&query)?
+    r.resolve_record::<Srv>(&query)?
         .choose(&mut rand::thread_rng())
-    {
-        Some(rec) => {
-            dbg!(&rec);
-            Ok(rec.clone())
-        }
-        None => Err(InternalError::new(
-            Some(InternalErrorCode::IpLookupError),
-            "SRV Lookup returned success with 0 IPs",
+        .map(|r| r.to_owned())
+        .ok_or(
+            InternalError::new(
+                Some(InternalErrorCode::IpLookupError),
+                "SRV Lookup returned success with 0 IPs",
+            )
+            .into(),
         )
-        .into()),
-    }
 }
 
 fn lookup_ip(host: &str) -> Result<IpAddr, Error> {

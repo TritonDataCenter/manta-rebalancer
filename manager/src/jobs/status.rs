@@ -19,9 +19,15 @@ use std::string::ToString;
 
 use diesel::prelude::*;
 use diesel::result::ConnectionError;
+use diesel::sql_query;
+use diesel::sql_types::{BigInt, Text};
 use inflector::cases::titlecase::to_title_case;
 use strum::IntoEnumIterator;
 use uuid::Uuid;
+
+static STATUS_COUNT_QUERY: &'static str =
+    "SELECT status, count(status) \
+     FROM  evacuateobjects  GROUP BY status";
 
 #[derive(Debug, EnumString)]
 pub enum StatusError {
@@ -30,12 +36,18 @@ pub enum StatusError {
     Unknown,
 }
 
-pub fn get_status(uuid: Uuid) -> Result<HashMap<String, i64>, StatusError> {
-    use super::evacuate::evacuateobjects::dsl::{evacuateobjects, status};
-    use diesel::dsl::count;
+#[derive(QueryableByName, Debug)]
+struct StatusCount {
+    #[sql_type = "Text"]
+    status: String,
+    #[sql_type = "BigInt"]
+    count: i64,
+}
 
+pub fn get_status(uuid: Uuid) -> Result<HashMap<String, i64>, StatusError> {
     let db_name = uuid.to_string();
     let mut ret = HashMap::new();
+    let mut total_count: i64 = 0;
     let conn = match pg_db::connect_db(&db_name) {
         Ok(c) => c,
         Err(e) => {
@@ -51,39 +63,30 @@ pub fn get_status(uuid: Uuid) -> Result<HashMap<String, i64>, StatusError> {
         }
     };
 
-    // Previously we queried the DB once for all of the status entries,
-    // which were put into a Vec.  We then iterated over the variants of
-    // EvacuateObjectStatus, and counted how many of each were in our status
-    // Vec.  This was more efficient on wall time (4:3), but it used up a
-    // significant amount of memory as we scaled up to millions of
-    // objects per job.  We noticed that this memory was not being given back
-    // to the OS after issuing a GET status request for a given job.
-    for status_value in EvacuateObjectStatus::iter() {
-        let status_str = to_title_case(&status_value.to_string());
-        let entry_count: i64 = match evacuateobjects
-            .filter(status.eq(status_value))
-            .select(count(status))
-            .get_results(&conn)
-        {
-            Ok(res) => res[0],
+    // Unfortunately diesel doesn't have GROUP BY support yet, so we do a raw
+    // query here.
+    // See https://github.com/diesel-rs/diesel/issues/210
+    let status_counts: Vec<StatusCount> =
+        match sql_query(STATUS_COUNT_QUERY).load::<StatusCount>(&conn) {
+            Ok(res) => res,
             Err(e) => {
                 error!("Status DB query: {}", e);
                 return Err(StatusError::LookupError);
             }
         };
 
-        ret.insert(status_str, entry_count);
+    for status_count in status_counts.iter() {
+        total_count += status_count.count;
+        ret.insert(to_title_case(&status_count.status), status_count.count);
     }
 
-    // Get the total count of objects for this job.
-    let total_count: i64 =
-        match evacuateobjects.select(count(status)).get_results(&conn) {
-            Ok(res) => res[0],
-            Err(e) => {
-                error!("Status DB query: {}", e);
-                return Err(StatusError::LookupError);
-            }
-        };
+    // The query won't return 0 results, so add them here.
+    for status_value in EvacuateObjectStatus::iter() {
+        let status_str = to_title_case(&status_value.to_string());
+        if !ret.contains_key(&status_str) {
+            ret.insert(status_str, 0);
+        }
+    }
 
     ret.insert("Total".into(), total_count);
 
@@ -120,7 +123,7 @@ mod tests {
     use quickcheck::{Arbitrary, StdThreadGen};
     use rebalancer::util;
 
-    static NUM_OBJS: u32 = 200;
+    static NUM_OBJS: i64 = 200;
 
     #[test]
     fn list_job_test() {
@@ -142,9 +145,8 @@ mod tests {
         let uuid = Uuid::new_v4();
         let mut g = StdThreadGen::new(10);
         let mut obj_vec = vec![];
-
-        dbg!(&uuid);
         let conn = pg_db::create_and_connect_db(&uuid.to_string()).unwrap();
+
         evacuate::create_evacuateobjects_table(&conn).unwrap();
 
         for _ in 0..NUM_OBJS {
@@ -157,6 +159,40 @@ mod tests {
             .unwrap();
 
         let count = get_status(uuid.clone()).unwrap();
-        dbg!(count);
+
+        assert_eq!(*count.get("Total").unwrap(), NUM_OBJS);
+        println!("Get Status Test: {:#?}", count);
+    }
+
+    #[test]
+    fn get_status_zero_value_test() {
+        use crate::jobs::evacuate::evacuateobjects::dsl::*;
+
+        let _guard = util::init_global_logger();
+        let uuid = Uuid::new_v4();
+        let mut g = StdThreadGen::new(10);
+        let mut obj_vec = vec![];
+        let conn = pg_db::create_and_connect_db(&uuid.to_string()).unwrap();
+
+        evacuate::create_evacuateobjects_table(&conn).unwrap();
+
+        for _ in 0..NUM_OBJS {
+            let mut obj = EvacuateObject::arbitrary(&mut g);
+            if obj.status == EvacuateObjectStatus::PostProcessing {
+                obj.status = EvacuateObjectStatus::Assigned;
+            }
+            obj_vec.push(obj);
+        }
+
+        diesel::insert_into(evacuateobjects)
+            .values(obj_vec.clone())
+            .execute(&conn)
+            .unwrap();
+
+        let count = get_status(uuid.clone()).unwrap();
+
+        assert_eq!(*count.get("Total").unwrap(), NUM_OBJS);
+        assert_eq!(*count.get("Post Processing").unwrap(), 0);
+        println!("Zero Value Test: {:#?}", count);
     }
 }
