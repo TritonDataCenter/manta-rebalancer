@@ -646,6 +646,8 @@ impl EvacuateJob {
                 // TODO: should we panic? if so just replace with expect()
                 panic!("{}", e);
             });
+
+        self.remove_assignment_from_cache(assign_id);
     }
 
     // Removes assignment cache entry from cache.  The cache entry is

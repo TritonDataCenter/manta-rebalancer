@@ -135,6 +135,7 @@ impl Config {
                             .expect("Lock snaplink_cleanup_required");
 
                         *slcr = new_config;
+                        debug!("Configuration has been updated: {:#?}", *slcr);
                     }
                     Err(e) => {
                         warn!(
