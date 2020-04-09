@@ -9,7 +9,8 @@
  */
 
 use crate::metrics::{
-    metrics_error_inc, metrics_object_inc_by, metrics_skip_inc, ACTION_EVACUATE,
+    metrics_error_inc, metrics_object_inc_by, metrics_skip_inc,
+    metrics_skip_inc_by, ACTION_EVACUATE,
 };
 use rebalancer::common::{
     self, AssignmentPayload, ObjectId, ObjectSkippedReason, Task, TaskStatus,
@@ -902,7 +903,7 @@ impl EvacuateJob {
             assignment_uuid, reason
         );
         // TODO: consider checking record count to ensure update success
-        diesel::update(evacuateobjects)
+        let skipped_count = diesel::update(evacuateobjects)
             .filter(assignment_id.eq(assignment_uuid))
             .set((
                 status.eq(EvacuateObjectStatus::Skipped),
@@ -917,7 +918,9 @@ impl EvacuateJob {
                 );
                 error!("{}", msg);
                 panic!(msg);
-            })
+            });
+        metrics_skip_inc_by(Some(&reason.to_string()), skipped_count);
+        skipped_count
     }
 
     // TODO: MANTA-4585
@@ -972,6 +975,7 @@ impl EvacuateJob {
             if let TaskStatus::Failed(reason) = t.status {
                 let entry = updates.entry(reason).or_insert_with(|| vec![]);
                 entry.push(t.object_id);
+                metrics_skip_inc(Some(&reason.to_string()));
             } else {
                 warn!("Attempt to skip object with status {:?}", t.status);
                 continue;

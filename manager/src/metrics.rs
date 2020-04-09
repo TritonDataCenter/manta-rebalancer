@@ -9,9 +9,8 @@
  */
 use lazy_static::lazy_static;
 use prometheus::{opts, register_counter_vec};
-use rebalancer::metrics;
 use rebalancer::metrics::{
-    counter_vec_inc_by, Metrics, MetricsMap, ERROR_COUNT, OBJECT_COUNT,
+    self, counter_vec_inc_by, Metrics, MetricsMap, ERROR_COUNT, OBJECT_COUNT,
     REQUEST_COUNT,
 };
 use std::collections::HashMap;
@@ -127,6 +126,12 @@ pub fn metrics_request_inc(request: Option<&str>) {
 // Objects processed, classified by action type.
 pub fn metrics_object_inc(action: Option<&str>) {
     metrics_vec_inc_by(OBJECT_COUNT, action, 1);
+}
+
+// Objects processed, classified by action type.  This is used when we increment
+// the value by more than one at a time.
+pub fn metrics_skip_inc_by(reason: Option<&str>, val: usize) {
+    metrics_vec_inc_by(SKIP_COUNT, reason, val);
 }
 
 // Objects processed, classified by action type.  This is used when we increment
