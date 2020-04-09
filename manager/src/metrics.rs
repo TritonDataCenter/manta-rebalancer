@@ -128,8 +128,8 @@ pub fn metrics_object_inc(action: Option<&str>) {
     metrics_vec_inc_by(OBJECT_COUNT, action, 1);
 }
 
-// Objects processed, classified by action type.  This is used when we increment
-// the value by more than one at a time.
+// Objects skipped, classified by reason.  This is used when we increment the
+// value by more than one at a time.
 pub fn metrics_skip_inc_by(reason: Option<&str>, val: usize) {
     metrics_vec_inc_by(SKIP_COUNT, reason, val);
 }
