@@ -80,12 +80,10 @@ pub fn get_status(uuid: Uuid) -> Result<HashMap<String, i64>, StatusError> {
         ret.insert(to_title_case(&status_count.status), status_count.count);
     }
 
-    // The query won't return 0 results, so add them here.
+    // The query won't return statuses with 0 counts, so add them here.
     for status_value in EvacuateObjectStatus::iter() {
-        let status_str = to_title_case(&status_value.to_string());
-        if !ret.contains_key(&status_str) {
-            ret.insert(status_str, 0);
-        }
+        ret.entry(to_title_case(&status_value.to_string()))
+            .or_insert(0);
     }
 
     ret.insert("Total".into(), total_count);

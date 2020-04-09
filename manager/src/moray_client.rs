@@ -36,13 +36,13 @@ fn get_srv_record(svc: &str, proto: &str, host: &str) -> Result<Srv, Error> {
     r.resolve_record::<Srv>(&query)?
         .choose(&mut rand::thread_rng())
         .map(|r| r.to_owned())
-        .ok_or(
+        .ok_or_else(|| {
             InternalError::new(
                 Some(InternalErrorCode::IpLookupError),
                 "SRV Lookup returned success with 0 IPs",
             )
-            .into(),
-        )
+            .into()
+        })
 }
 
 fn lookup_ip(host: &str) -> Result<IpAddr, Error> {

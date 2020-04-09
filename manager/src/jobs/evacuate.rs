@@ -597,10 +597,6 @@ impl EvacuateJob {
                 set_run_error(&mut ret, e);
             });
 
-        trace!("Evacuate Job Finished.  Assignments: {}",
-            job_action.assignments.read().expect("assignment read").len()
-        );
-
         drop(job_action);
 
         ret
@@ -1161,10 +1157,7 @@ impl PostAssignment for EvacuateJob {
         );
 
         trace!("Sending {:#?} to {}", payload, agent_uri);
-        let res = match self.post_client
-            .post(&agent_uri)
-            .json(&payload)
-            .send()
+        let res = match self.post_client.post(&agent_uri).json(&payload).send()
         {
             Ok(r) => r,
             Err(e) => {
