@@ -597,6 +597,12 @@ impl EvacuateJob {
                 set_run_error(&mut ret, e);
             });
 
+        trace!("Evacuate Job Finished.  Assignments: {}",
+            job_action.assignments.read().expect("assignment read").len()
+        );
+
+        drop(job_action);
+
         ret
     }
 
@@ -1155,7 +1161,10 @@ impl PostAssignment for EvacuateJob {
         );
 
         trace!("Sending {:#?} to {}", payload, agent_uri);
-        let res = match self.post_client.post(&agent_uri).json(&payload).send()
+        let res = match self.post_client
+            .post(&agent_uri)
+            .json(&payload)
+            .send()
         {
             Ok(r) => r,
             Err(e) => {
@@ -1207,7 +1216,7 @@ impl GetAssignment for EvacuateJob {
         );
 
         debug!("Getting Assignment: {:?}", uri);
-        match reqwest::get(&uri) {
+        match self.get_client.get(&uri).send() {
             Ok(mut resp) => {
                 if !resp.status().is_success() {
                     self.skip_assignment(
@@ -2881,6 +2890,7 @@ fn _update_broker_static(
         }
         cv.notify_all();
     }
+
     for handle in thread_handles.into_iter() {
         handle.join().expect("join worker handle");
     }
