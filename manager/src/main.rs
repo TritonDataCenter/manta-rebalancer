@@ -17,7 +17,7 @@ extern crate serde_derive;
 #[macro_use]
 extern crate rebalancer;
 
-// jemallocactor drastically improves our memory footprint
+// JEmallocator drastically improves our memory footprint
 use jemallocator::Jemalloc;
 #[global_allocator]
 static GLOBAL: Jemalloc = Jemalloc;
