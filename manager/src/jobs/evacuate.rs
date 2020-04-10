@@ -975,7 +975,6 @@ impl EvacuateJob {
             if let TaskStatus::Failed(reason) = t.status {
                 let entry = updates.entry(reason).or_insert_with(|| vec![]);
                 entry.push(t.object_id);
-                metrics_skip_inc(Some(&reason.to_string()));
             } else {
                 warn!("Attempt to skip object with status {:?}", t.status);
                 continue;
@@ -985,8 +984,14 @@ impl EvacuateJob {
         let locked_conn = self.conn.lock().expect("db conn lock");
 
         for (reason, vec_obj_ids) in updates {
-            // TODO: consider checking record count to ensure update success
-            diesel::update(evacuateobjects)
+            // Since we are bulk updating objects in the database by the same
+            // reason, we can just as easily do the same thing with our metrics.
+            // This is because all tasks in the vector are being skipped for
+            // the same reason.
+            let vec_len = vec_obj_ids.len();
+            metrics_skip_inc_by(Some(&reason.to_string()), vec_len);
+
+            let rows_updated = diesel::update(evacuateobjects)
                 .filter(id.eq_any(vec_obj_ids))
                 .set((
                     status.eq(EvacuateObjectStatus::Skipped),
@@ -998,6 +1003,14 @@ impl EvacuateJob {
                     error!("{}", msg);
                     panic!(msg);
                 });
+
+            // Ensure that the number of rows affected by the update is in fact
+            // equal to the number of entries in the vector.
+            assert_eq!(
+                rows_updated, vec_len,
+                "Attempted to update {} rows, but only updated {}",
+                vec_len, rows_updated
+            );
         }
     }
 
