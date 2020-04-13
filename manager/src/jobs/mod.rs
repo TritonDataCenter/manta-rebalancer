@@ -316,6 +316,8 @@ impl Assignment {
     }
 }
 
+pub type AssignmentCache = HashMap<AssignmentId, AssignmentCacheEntry>;
+
 #[derive(Clone, Debug)]
 pub struct AssignmentCacheEntry {
     id: AssignmentId,
@@ -331,6 +333,12 @@ impl From<Assignment> for AssignmentCacheEntry {
             state: assignment.state,
         }
     }
+}
+
+pub fn assignment_cache_usage(assignments: &AssignmentCache) -> usize {
+    assignments.capacity()
+        * (std::mem::size_of::<Assignment>()
+            + std::mem::size_of::<AssignmentId>())
 }
 
 impl Job {

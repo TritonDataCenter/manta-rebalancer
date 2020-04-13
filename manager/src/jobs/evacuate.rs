@@ -22,7 +22,8 @@ use rebalancer::util::{MAX_HTTP_STATUS_CODE, MIN_HTTP_STATUS_CODE};
 
 use crate::config::{Config, ConfigOptions};
 use crate::jobs::{
-    Assignment, AssignmentCacheEntry, AssignmentId, AssignmentState, StorageId,
+    assignment_cache_usage, Assignment, AssignmentCacheEntry, AssignmentId,
+    AssignmentState, StorageId,
 };
 use crate::moray_client;
 use crate::pg_db;
@@ -597,8 +598,6 @@ impl EvacuateJob {
                 set_run_error(&mut ret, e);
             });
 
-        drop(job_action);
-
         ret
     }
 
@@ -676,9 +675,12 @@ impl EvacuateJob {
             format!("Remove assignment not in hash: {}", assignment_id)
         );
 
-        drop(entry);
-
+        let initial_size = assignment_cache_usage(&assignments);
         assignments.shrink_to_fit();
+        trace!(
+            "Assignment cache reduced by {}",
+            initial_size - assignment_cache_usage(&assignments)
+        );
     }
 
     fn skip_object(
@@ -2423,9 +2425,15 @@ fn start_assignment_checker(
 
                 // TODO: MANTA-5106
                 if found_assignment_count == 0 {
-                    trace!("all assignments are running, sleeping for 100ms");
+                    trace!("Found 0 completed assignments, sleeping for 100ms");
                     thread::sleep(Duration::from_millis(100));
+                    continue;
                 }
+
+                trace!(
+                    "Found {} completed assignments",
+                    found_assignment_count
+                );
             }
             Ok(())
         })
@@ -2570,7 +2578,6 @@ fn metadata_update_worker_dynamic(
             };
             metadata_update_assignment(&job_action, ace, &mut client_hash);
         }
-        client_hash.clear();
     }
 }
 
