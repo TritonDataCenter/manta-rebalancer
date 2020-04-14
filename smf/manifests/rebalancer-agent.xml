@@ -7,7 +7,7 @@
 -->
 
 <!--
-    Copyright 2019 Joyent, Inc.
+    Copyright 2020 Joyent, Inc.
 -->
 
 <service_bundle type="manifest" name="rebalancer-agent">
@@ -20,7 +20,11 @@
             <service_fmri value="svc:/system/filesystem/local" />
         </dependency>
 
-        <exec_method type="method" name="start" exec="/opt/smartdc/rebalancer-agent/bin/rebalancer-agent &amp;" timeout_seconds="30" />
+	<exec_method type="method" name="start" exec="/opt/smartdc/rebalancer-agent/bin/rebalancer-agent &amp;" timeout_seconds="30" >
+	    <method_context>
+                <method_credential user='nobody' group='nobody' privileges='basic,net_privaddr'/>
+            </method_context>
+        </exec_method>			
         <exec_method type="method" name="stop" exec=":kill" timeout_seconds="30" />
 
         <instance name="default" enabled="true" />
