@@ -65,7 +65,7 @@ pub mod agenttests {
     use joyent_rust_utils::file::calculate_md5;
     use lazy_static::lazy_static;
     use libmanta::moray::MantaObjectShark;
-    use rebalancer::agent_test_util::{get_progress, send_assignment_impl};
+    use rebalancer::agent_test_util::{self, get_progress, send_assignment_impl};
     use rebalancer::common::{ObjectSkippedReason, Task, TaskStatus};
     use rebalancer::libagent::{
         process_task, router, AgentAssignmentState, AgentConfig, Assignment,
@@ -344,5 +344,25 @@ pub mod agenttests {
             &TEST_SERVER.lock().unwrap(),
             StatusCode::CONFLICT,
         );
+    }
+
+    // Test name:   Delete assignment
+    // Description: First generate an assignment and post it to the agent.  Once
+    //              it has been observed that the assignment has been completely
+    //              processed, issue a request to the agent, telling it to
+    //              delete it.
+    // Expected:    After issuing the delete, we should receive a response of
+    //              200 indicating that the agent successfully located the
+    //              assignment and deleted it.
+    #[test]
+    fn delete_assignment() {
+        // Download a file once.
+        unit_test_init();
+        let assignment = create_assignment(MANTA_SRC_DIR);
+        let uuid = send_assignment(&assignment);
+        monitor_assignment(&uuid, TaskStatus::Complete);
+
+        // Delete the assignment
+        agent_test_util::delete_assignment(&uuid, &TEST_SERVER.lock().unwrap());
     }
 }

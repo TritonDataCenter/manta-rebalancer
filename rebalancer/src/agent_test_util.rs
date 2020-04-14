@@ -13,6 +13,15 @@ use crate::libagent::Assignment;
 use gotham::test::TestServer;
 use reqwest::StatusCode;
 
+pub fn delete_assignment(id: &str, test_server: &TestServer) {
+    let uuid = id.to_string();
+    let url = format!("http://localhost/assignments/{}", uuid);
+
+    let response = test_server.client().delete(url).perform().unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
 // Utility that actually forms the request, sends it off to the test
 // server and verifies that it was received as intended.  Upon success,
 // return the uuid of the assignment which we will use to monitor progress.
