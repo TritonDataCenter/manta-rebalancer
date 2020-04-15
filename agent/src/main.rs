@@ -356,13 +356,15 @@ pub mod agenttests {
     //              assignment and deleted it.
     #[test]
     fn delete_assignment() {
-        // Download a file once.
+        // Post an assignment.
         unit_test_init();
         let assignment = create_assignment(MANTA_SRC_DIR);
         let uuid = send_assignment(&assignment);
+
+        // Wait for the agent to finish it.
         monitor_assignment(&uuid, TaskStatus::Complete);
 
-        // Delete the assignment
+        // Issue a request to the agent to delete it.
         agent_test_util::delete_assignment(&uuid, &TEST_SERVER.lock().unwrap());
     }
 }
