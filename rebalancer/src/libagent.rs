@@ -210,9 +210,21 @@ impl Assignment {
 // operations on existing assignments.  This list will likely increase as
 // the needs of the manager evolve to perform other operations on assignments
 // aside from deleting them.
+#[derive(Clone)]
 pub enum AssignmentOpErr {
     DoesNotExist,
     InternalError(String),
+}
+
+impl AssignmentOpErr {
+    pub fn to_http_status_code(self) -> StatusCode {
+        match self {
+            AssignmentOpErr::DoesNotExist => StatusCode::NOT_FOUND,
+            AssignmentOpErr::InternalError(_) => {
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
+        }
+    }
 }
 
 // Inform the work threads that of an assignment that needs to be processed.
@@ -478,6 +490,7 @@ fn assignment_complete(assignments: Arc<Mutex<Assignments>>, uuid: String) {
 // run in to some kind of file system related error when deleting.
 fn delete_assignment_impl(uuid: &str) -> Result<(), AssignmentOpErr> {
     let finished = format!("{}/{}", REBALANCER_FINISHED_DIR, &uuid);
+
     if !Path::new(&finished).exists() {
         info!(
             "Attempted to remove assignment {} which is does not exist.",
@@ -513,6 +526,17 @@ fn delete_assignment(mut state: State) -> Box<HandlerFuture> {
         }
     };
 
+    let scheduled = format!("{}/{}", REBALANCER_SCHEDULED_DIR, &uuid);
+
+    if Path::new(&scheduled).exists() {
+        info!(
+            "Attempted to remove assignment {} which has not completed.",
+            uuid
+        );
+        let res = create_empty_response(&state, StatusCode::FORBIDDEN);
+        return Box::new(future::ok((state, res)));
+    }
+
     match delete_assignment_impl(&uuid) {
         Ok(_) => {
             // Successful delete.
@@ -520,16 +544,18 @@ fn delete_assignment(mut state: State) -> Box<HandlerFuture> {
             (Box::new(future::ok((state, res))))
         }
         Err(e) => {
+            let status = e.clone().to_http_status_code();
             let res = match e {
                 // Assignment does not exist.
                 AssignmentOpErr::DoesNotExist => {
-                    create_empty_response(&state, StatusCode::NOT_FOUND)
+                    create_empty_response(&state, status)
                 }
 
                 // File exists but deletion was unsuccessful.
                 AssignmentOpErr::InternalError(s) => create_response(
                     &state,
-                    StatusCode::INTERNAL_SERVER_ERROR,
+                    status,
+                    //StatusCode::INTERNAL_SERVER_ERROR,
                     mime::APPLICATION_JSON,
                     s,
                 ),
