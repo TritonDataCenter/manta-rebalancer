@@ -544,6 +544,8 @@ fn delete_assignment(mut state: State) -> Box<HandlerFuture> {
             (Box::new(future::ok((state, res))))
         }
         Err(e) => {
+            // Convert the error code returned from `delete_assignment_impl()'
+            // in to its appropriate HTTP status code.
             let status = e.clone().to_http_status_code();
             let res = match e {
                 // Assignment does not exist.
@@ -555,7 +557,6 @@ fn delete_assignment(mut state: State) -> Box<HandlerFuture> {
                 AssignmentOpErr::InternalError(s) => create_response(
                     &state,
                     status,
-                    //StatusCode::INTERNAL_SERVER_ERROR,
                     mime::APPLICATION_JSON,
                     s,
                 ),
