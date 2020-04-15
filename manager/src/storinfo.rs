@@ -11,7 +11,7 @@
 use quickcheck::{Arbitrary, Gen};
 use quickcheck_helpers::random::string as random_string;
 use rebalancer::error::Error;
-use reqwest::{self, StatusCode};
+use reqwest::{self, Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -117,9 +117,10 @@ impl Storinfo {
 
     /// Populate the storinfo's sharks field, and start the storinfo updater thread.
     pub fn start(&mut self) -> Result<(), Error> {
+        let client = Client::new();
         let mut locked_sharks = self.sharks.lock().unwrap();
         // TODO: MANTA-4961, don't start job if picker cannot be reached.
-        *locked_sharks = Some(fetch_sharks(&self.host));
+        *locked_sharks = Some(fetch_sharks(&client, &self.host));
 
         let handle = Self::updater(
             self.host.clone(),
@@ -156,10 +157,11 @@ impl Storinfo {
 
         thread::spawn(move || {
             let sleep_time = time::Duration::from_secs(10);
+            let client = Client::new();
             while keep_running.load(Ordering::Relaxed) {
                 thread::sleep(sleep_time);
 
-                let mut new_sharks = fetch_sharks(&host);
+                let mut new_sharks = fetch_sharks(&client, &host);
                 new_sharks.sort_by(|a, b| a.available_mb.cmp(&b.available_mb));
 
                 let mut old_sharks = updater_sharks.lock().unwrap();
@@ -185,7 +187,7 @@ pub trait SharkSource: Sync + Send {
     fn choose(&self, algo: &ChooseAlgorithm) -> Option<Vec<StorageNode>>;
 }
 
-fn fetch_sharks(host: &str) -> Vec<StorageNode> {
+fn fetch_sharks(client: &Client, host: &str) -> Vec<StorageNode> {
     let mut new_sharks = vec![];
     let mut done = false;
     let mut after_id = String::new();
@@ -194,7 +196,7 @@ fn fetch_sharks(host: &str) -> Vec<StorageNode> {
 
     while !done {
         let url = format!("{}?limit={}&after_id={}", base_url, limit, after_id);
-        let mut response = match reqwest::get(&url) {
+        let mut response = match client.get(&url).send() {
             Ok(r) => r,
             Err(e) => {
                 error!(

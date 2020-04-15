@@ -17,6 +17,11 @@ extern crate serde_derive;
 #[macro_use]
 extern crate rebalancer;
 
+// JEmallocator drastically improves our memory footprint
+use jemallocator::Jemalloc;
+#[global_allocator]
+static GLOBAL: Jemalloc = Jemalloc;
+
 use manager::config::Config;
 use manager::jobs::status::StatusError;
 use manager::jobs::{self, JobBuilder, JobDbEntry};
@@ -74,7 +79,7 @@ fn invalid_server_error(state: &State, msg: String) -> Response<Body> {
 }
 
 type GetJobFuture =
-    Box<dyn Future<Item = HashMap<String, usize>, Error = StatusError> + Send>;
+    Box<dyn Future<Item = HashMap<String, i64>, Error = StatusError> + Send>;
 
 fn get_status(uuid: Uuid) -> GetJobFuture {
     Box::new(match jobs::status::get_status(uuid) {
@@ -401,7 +406,7 @@ fn main() {
     let config_watcher_handle =
         Config::start_config_watcher(Arc::clone(&config), config_file);
 
-    gotham::start(addr, router(Arc::clone(&config)));
+    gotham::start_with_num_threads(addr, router(Arc::clone(&config)), 1);
 
     config_watcher_handle.join().expect("join config watcher");
 }

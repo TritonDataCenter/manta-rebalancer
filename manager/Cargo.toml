@@ -6,7 +6,9 @@ edition = "2018"
 workspace = ".."
 
 [dependencies]
+jemallocator = "0.3.2"
 clap = "2.33.0"
+crossbeam-queue = "0.2.1"
 crossbeam-channel = "0.3.8"
 crossbeam-deque = "0.7.1"
 futures = "0.1.29"
@@ -19,7 +21,7 @@ moray = { git = "https://github.com/joyent/rust-moray", features = ["postgres"],
 sharkspotter = { git = "https://github.com/joyent/rust-sharkspotter", features = ["postgres"], tag = "v0.10.3" }
 diesel = { version = "1.4.2", features = ["postgres"] }
 rand = "0.7.0"
-reqwest = "0.9.18"
+reqwest = "0.9.24"
 strum = "0.16.0"
 strum_macros = "0.16.0"
 uuid = { version = "0.7.4", features = ["v4"] }

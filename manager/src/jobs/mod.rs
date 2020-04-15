@@ -316,6 +316,8 @@ impl Assignment {
     }
 }
 
+pub type AssignmentCache = HashMap<AssignmentId, AssignmentCacheEntry>;
+
 #[derive(Clone, Debug)]
 pub struct AssignmentCacheEntry {
     id: AssignmentId,
@@ -333,6 +335,12 @@ impl From<Assignment> for AssignmentCacheEntry {
     }
 }
 
+pub fn assignment_cache_usage(assignments: &AssignmentCache) -> usize {
+    assignments.capacity()
+        * (std::mem::size_of::<Assignment>()
+            + std::mem::size_of::<AssignmentId>())
+}
+
 impl Job {
     pub fn get_id(&self) -> Uuid {
         self.id
@@ -347,28 +355,50 @@ impl Job {
 
         self.update_state(JobState::Running)?;
         debug!("Starting job {:#?}", &self);
-        println!("Starting Job: {}", &self.id);
+        info!("Starting Job: {}", &job_id);
+        let now = std::time::Instant::now();
 
         let result = match self.action {
             JobAction::Evacuate(job_action) => {
                 match job_action.run(&self.config) {
-                    Ok(()) => Ok(()),
+                    Ok(()) => {
+                        info!(
+                            "Job {} completed in {} seconds",
+                            &job_id,
+                            now.elapsed().as_secs(),
+                        );
+                        Ok(())
+                    }
                     Err(e) => match &e {
                         // This dance is only intended to support the
                         // evacuate object limit which will eventually be
                         // removed.
                         Error::Internal(err) => match err.code {
                             InternalErrorCode::MaxObjectsLimit => {
-                                info!("Job {} complete", self.id);
+                                info!(
+                                    "Job {} completed in {} seconds",
+                                    &job_id,
+                                    now.elapsed().as_secs(),
+                                );
                                 Ok(())
                             }
                             _ => {
-                                error!("Job Failed: {}", err);
+                                error!(
+                                    "Job {} failed in {} seconds: {}",
+                                    &job_id,
+                                    now.elapsed().as_secs(),
+                                    err
+                                );
                                 Err(e)
                             }
                         },
                         _ => {
-                            error!("Job Failed: {}", e);
+                            error!(
+                                "Job {} failed in {} seconds: {}",
+                                &job_id,
+                                now.elapsed().as_secs(),
+                                e
+                            );
                             Err(e)
                         }
                     },

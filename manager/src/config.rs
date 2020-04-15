@@ -27,9 +27,24 @@ use std::thread;
 use std::thread::JoinHandle;
 
 static DEFAULT_CONFIG_PATH: &str = "/opt/smartdc/rebalancer/config.json";
+
+// The maximum number of tasks we will send in a single assignment to the agent.
 static DEFAULT_MAX_ASSIGNMENT_SIZE: usize = 50;
+
+// The maximum number of threads that will be used for metadata updates.
+// Each thread has its own hash of moray clients.
 static DEFAULT_MAX_METADATA_UPDATE_THREADS: usize = 2;
+
+// The maximum number of sharks we will use as destinations for things like
+// evacuate job.  This is the top 5 of an ordered list which could mean a
+// different set of sharks each time we get a snapshot from the storinfo zone.
 static DEFAULT_MAX_SHARKS: usize = 5;
+
+// The number of elements the bounded metadata update queue will be set to.
+// For evacuate jobs this represents the number of assignments that can be in
+// the post processing state waiting for a metadata update thread to become
+// available.
+static DEFAULT_STATIC_QUEUE_DEPTH: usize = 10;
 
 #[derive(Deserialize, Default, Debug, Clone)]
 pub struct Shard {
@@ -44,6 +59,8 @@ pub struct ConfigOptions {
     pub max_assignment_size: usize,
     pub max_metadata_update_threads: usize,
     pub max_sharks: usize,
+    pub use_static_md_update_threads: bool,
+    pub static_queue_depth: usize,
 }
 
 impl Default for ConfigOptions {
@@ -52,6 +69,8 @@ impl Default for ConfigOptions {
             max_assignment_size: DEFAULT_MAX_ASSIGNMENT_SIZE,
             max_metadata_update_threads: DEFAULT_MAX_METADATA_UPDATE_THREADS,
             max_sharks: DEFAULT_MAX_SHARKS,
+            use_static_md_update_threads: false,
+            static_queue_depth: DEFAULT_STATIC_QUEUE_DEPTH,
         }
     }
 }
@@ -130,6 +149,7 @@ impl Config {
                             .expect("Lock snaplink_cleanup_required");
 
                         *slcr = new_config;
+                        debug!("Configuration has been updated: {:#?}", *slcr);
                     }
                     Err(e) => {
                         warn!(
