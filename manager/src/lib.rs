@@ -11,6 +11,9 @@
 /// Manta Object Rebalancer
 
 #[macro_use]
+extern crate prometheus;
+
+#[macro_use]
 extern crate diesel;
 
 #[macro_use]

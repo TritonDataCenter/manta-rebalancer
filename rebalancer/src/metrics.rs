@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::Mutex;
 
 use gethostname::gethostname;
 use hyper::header::{HeaderValue, CONTENT_TYPE};
@@ -11,6 +12,7 @@ use hyper::service::service_fn_ok;
 use hyper::Body;
 use hyper::StatusCode;
 use hyper::{Request, Response};
+use lazy_static::lazy_static;
 use prometheus::{
     opts, register_counter_vec, CounterVec, Encoder, TextEncoder,
 };
@@ -55,6 +57,11 @@ pub enum Metrics {
     MetricsCounterVec(CounterVec),
 }
 
+lazy_static! {
+    static ref METRICS_LABELS: Mutex<Option<HashMap<String, String>>> =
+        Mutex::new(None);
+}
+
 #[allow(irrefutable_let_patterns)]
 pub fn counter_vec_inc<S: ::std::hash::BuildHasher>(
     metrics: &HashMap<&'static str, Metrics, S>,
@@ -90,6 +97,12 @@ pub fn counter_vec_inc_by<S: ::std::hash::BuildHasher>(
     }
 }
 
+// It would be nice if this could be a HashMap<&str, &str>, however Prometheus
+// requires the type HashMap<String, String>, for const_labels, so here we are.
+pub fn get_const_labels() -> &'static Mutex<Option<HashMap<String, String>>> {
+    &METRICS_LABELS
+}
+
 // Given the service configuration information, create (i.e. register) the
 // desired metrics with prometheus.
 pub fn register_metrics(labels: &ConfigMetrics) -> MetricsMap {
@@ -108,6 +121,9 @@ pub fn register_metrics(labels: &ConfigMetrics) -> MetricsMap {
     const_labels.insert("server".to_string(), labels.server.clone());
     const_labels.insert("datacenter".to_string(), labels.datacenter.clone());
     const_labels.insert("zonename".to_string(), hostname.clone());
+
+    let mut labels = METRICS_LABELS.lock().unwrap();
+    *labels = Some(const_labels.clone());
 
     // The request counter maintains a list of requests received, broken down
     // by the type of request (e.g. req=GET, req=POST).
