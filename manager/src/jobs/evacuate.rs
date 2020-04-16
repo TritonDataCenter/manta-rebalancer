@@ -798,6 +798,7 @@ impl EvacuateJob {
             .into())
         } else {
             shark_list.sort_by_key(|s| s.available_mb);
+            shark_list.as_mut_slice().reverse();
             Ok(shark_list)
         }
     }
