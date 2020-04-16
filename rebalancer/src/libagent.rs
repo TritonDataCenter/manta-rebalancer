@@ -489,7 +489,7 @@ fn handle_delete_assignment_error(
     err: AssignmentOpErr,
     uuid: &str,
 ) -> Box<HandlerFuture> {
-    let status = err.clone().to_http_status_code();
+    let status = err.to_http_status_code();
     let res = match err {
         // The file does not exist in the target path specified by the client,
         // but we need to know if it exists at all.  The answer to that question
@@ -565,17 +565,6 @@ fn delete_assignment(mut state: State) -> Box<HandlerFuture> {
             return Box::new(future::ok((state, res)));
         }
     };
-
-    let scheduled = format!("{}/{}", REBALANCER_SCHEDULED_DIR, &uuid);
-
-    if Path::new(&scheduled).exists() {
-        info!(
-            "Attempted to remove assignment {} which has not completed.",
-            uuid
-        );
-        let res = create_empty_response(&state, StatusCode::FORBIDDEN);
-        return Box::new(future::ok((state, res)));
-    }
 
     match delete_assignment_impl(&uuid) {
         Ok(_) => {
