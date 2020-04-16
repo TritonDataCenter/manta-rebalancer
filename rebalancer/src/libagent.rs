@@ -217,7 +217,7 @@ pub enum AssignmentOpErr {
 }
 
 impl AssignmentOpErr {
-    pub fn to_http_status_code(self) -> StatusCode {
+    pub fn to_http_status_code(&self) -> StatusCode {
         match self {
             AssignmentOpErr::DoesNotExist => StatusCode::NOT_FOUND,
             AssignmentOpErr::InternalError(_) => {
@@ -484,6 +484,45 @@ fn assignment_complete(assignments: Arc<Mutex<Assignments>>, uuid: String) {
     hm.remove(&uuid);
 }
 
+fn handle_delete_assignment_error(
+    state: State,
+    err: AssignmentOpErr,
+    uuid: &str,
+) -> Box<HandlerFuture> {
+    let status = err.clone().to_http_status_code();
+    let res = match err {
+        // The file does not exist in the target path specified by the client,
+        // but we need to know if it exists at all.  The answer to that question
+        // determines our response.  Note, in the future, this is probably the
+        // site at whch we should add some logic to check for an assignment that
+        // has completed, but has errors.  We likely will not want to allow
+        // deletion of one of those either.
+        AssignmentOpErr::DoesNotExist => {
+            let scheduled = format!("{}/{}", REBALANCER_SCHEDULED_DIR, &uuid);
+            if Path::new(&scheduled).exists() {
+                let msg = format!(
+                    "Attempt to remove scheduled assignment: {}.",
+                    uuid
+                );
+                info!("{}", &msg);
+                create_response(
+                    &state,
+                    StatusCode::FORBIDDEN,
+                    mime::APPLICATION_JSON,
+                    msg,
+                )
+            } else {
+                create_empty_response(&state, status)
+            }
+        }
+        // File exists but deletion was unsuccessful.
+        AssignmentOpErr::InternalError(s) => {
+            create_response(&state, status, mime::APPLICATION_JSON, s)
+        }
+    };
+    Box::new(future::ok((state, res)))
+}
+
 // Given an assignment uuid, check for its presence in the "completed"
 // directory.  If it doesn't exist, return an error indicating as much.
 // The only other way that this can fail (which isn't likely) is if we
@@ -516,6 +555,7 @@ fn delete_assignment(mut state: State) -> Box<HandlerFuture> {
         Err(e) => {
             // Mal-formed uuid.
             let msg = format!("Mal-formed delete request: {}", e);
+            info!("{}", &msg);
             let res = create_response(
                 &state,
                 StatusCode::BAD_REQUEST,
@@ -541,32 +581,16 @@ fn delete_assignment(mut state: State) -> Box<HandlerFuture> {
         Ok(_) => {
             // Successful delete.
             let res = create_empty_response(&state, StatusCode::OK);
-            (Box::new(future::ok((state, res))))
+            Box::new(future::ok((state, res)))
         }
-        Err(e) => {
-            // Convert the error code returned from `delete_assignment_impl()'
-            // in to its appropriate HTTP status code.
-            let status = e.clone().to_http_status_code();
-            let res = match e {
-                // Assignment does not exist.
-                AssignmentOpErr::DoesNotExist => {
-                    create_empty_response(&state, status)
-                }
-
-                // File exists but deletion was unsuccessful.
-                AssignmentOpErr::InternalError(s) => create_response(
-                    &state,
-                    status,
-                    mime::APPLICATION_JSON,
-                    s,
-                ),
-            };
-            (Box::new(future::ok((state, res))))
-        }
+        Err(e) => handle_delete_assignment_error(state, e, &uuid),
     }
 }
 
-fn post(agent: Agent, mut state: State) -> Box<HandlerFuture> {
+fn post_assignment_handler(
+    agent: Agent,
+    mut state: State,
+) -> Box<HandlerFuture> {
     let f = Body::take_from(&mut state)
         .concat2()
         .then(move |full_body| match full_body {
@@ -682,7 +706,10 @@ fn get_assignment_impl(
     None
 }
 
-fn get_assignment(agent: Agent, mut state: State) -> Box<HandlerFuture> {
+fn get_assignment_handler(
+    agent: Agent,
+    mut state: State,
+) -> Box<HandlerFuture> {
     let assignment_params = GetAssignmentParams::take_from(&mut state);
 
     // If the uuid supplied by the client does not represent a valid UUID,
@@ -750,8 +777,8 @@ impl Handler for Agent {
         // If we are here, then the method must either be
         // POST or GET.  It can not be anything else.
         match method.as_str() {
-            "POST" => post(self, state),
-            "GET" => get_assignment(self, state),
+            "POST" => post_assignment_handler(self, state),
+            "GET" => get_assignment_handler(self, state),
             _ => empty_response(state, StatusCode::METHOD_NOT_ALLOWED),
         }
     }
