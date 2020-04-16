@@ -65,7 +65,9 @@ pub mod agenttests {
     use joyent_rust_utils::file::calculate_md5;
     use lazy_static::lazy_static;
     use libmanta::moray::MantaObjectShark;
-    use rebalancer::agent_test_util::{self, get_progress, send_assignment_impl};
+    use rebalancer::agent_test_util::{
+        self, get_progress, send_assignment_impl,
+    };
     use rebalancer::common::{ObjectSkippedReason, Task, TaskStatus};
     use rebalancer::libagent::{
         process_task, router, AgentAssignmentState, AgentConfig, Assignment,
