@@ -797,6 +797,9 @@ impl EvacuateJob {
             )
             .into())
         } else {
+            // Rust sort methods sort from lowest to highest order.  We want
+            // the sharks with the most available_mb at the beginning of the
+            // list so we reverse the sort.
             shark_list.sort_by_key(|s| s.available_mb);
             shark_list.as_mut_slice().reverse();
             Ok(shark_list)
