@@ -414,9 +414,6 @@ pub struct EvacuateJob {
     /// domain_name of manta deployment
     pub domain_name: String,
 
-    /// Accumulator for total time spent on DB inserts. (test/dev)
-    pub total_db_time: Mutex<u128>,
-
     /// Tunable options
     pub options: ConfigOptions,
 
@@ -457,7 +454,6 @@ impl EvacuateJob {
             assignments: RwLock::new(HashMap::new()),
             from_shark,
             conn: Mutex::new(conn),
-            total_db_time: Mutex::new(0),
             domain_name: domain_name.to_string(),
             options,
             max_objects,
@@ -811,7 +807,6 @@ impl EvacuateJob {
         use self::evacuateobjects::dsl::*;
 
         let locked_conn = self.conn.lock().expect("DB conn lock");
-        let now = std::time::Instant::now();
 
         // TODO: Is panic the right thing to do here?
         // TODO: consider checking record count to ensure insert success
@@ -823,9 +818,6 @@ impl EvacuateJob {
                 error!("{}", msg);
                 panic!(msg);
             });
-
-        let mut total_time = self.total_db_time.lock().expect("DB time lock");
-        *total_time += now.elapsed().as_millis();
 
         Ok(ret)
     }
@@ -3719,9 +3711,5 @@ mod tests {
             .expect("internal assignment post thread");
 
         debug!("TOTAL TIME: {}ms", now.elapsed().as_millis());
-        debug!(
-            "TOTAL INSERT DB TIME: {}ms",
-            job_action.total_db_time.lock().expect("db time lock")
-        );
     }
 }
