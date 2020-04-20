@@ -103,6 +103,11 @@ struct PathExtractor {
     parts: Vec<String>,
 }
 
+#[derive(Deserialize, StateData, StaticResponseExtender)]
+struct GetAssignmentParams {
+    uuid: String,
+}
+
 #[derive(Clone)]
 pub struct Agent {
     assignments: Arc<Mutex<Assignments>>,
@@ -197,6 +202,27 @@ impl Assignment {
             uuid: uuid.to_string(),
             stats: AgentAssignmentStats::new(v.len()),
             tasks: v,
+        }
+    }
+}
+
+// List of ways that things can go wrong when clients attempt to perform
+// operations on existing assignments.  This list will likely increase as
+// the needs of the manager evolve to perform other operations on assignments
+// aside from deleting them.
+#[derive(Clone)]
+pub enum AssignmentOpErr {
+    DoesNotExist,
+    InternalError(String),
+}
+
+impl AssignmentOpErr {
+    pub fn to_http_status_code(&self) -> StatusCode {
+        match self {
+            AssignmentOpErr::DoesNotExist => StatusCode::NOT_FOUND,
+            AssignmentOpErr::InternalError(_) => {
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
         }
     }
 }
@@ -458,7 +484,102 @@ fn assignment_complete(assignments: Arc<Mutex<Assignments>>, uuid: String) {
     hm.remove(&uuid);
 }
 
-fn post(agent: Agent, mut state: State) -> Box<HandlerFuture> {
+fn handle_delete_assignment_error(
+    state: State,
+    err: AssignmentOpErr,
+    uuid: &str,
+) -> Box<HandlerFuture> {
+    let status = err.to_http_status_code();
+    let res = match err {
+        // The file does not exist in the target path specified by the client,
+        // but we need to know if it exists at all.  The answer to that question
+        // determines our response.  Note, in the future, this is probably the
+        // site at whch we should add some logic to check for an assignment that
+        // has completed, but has errors.  We likely will not want to allow
+        // deletion of one of those either.
+        AssignmentOpErr::DoesNotExist => {
+            let scheduled = format!("{}/{}", REBALANCER_SCHEDULED_DIR, &uuid);
+            if Path::new(&scheduled).exists() {
+                let msg = format!(
+                    "Attempt to remove scheduled assignment: {}.",
+                    uuid
+                );
+                info!("{}", &msg);
+                create_response(
+                    &state,
+                    StatusCode::FORBIDDEN,
+                    mime::APPLICATION_JSON,
+                    msg,
+                )
+            } else {
+                create_empty_response(&state, status)
+            }
+        }
+        // File exists but deletion was unsuccessful.
+        AssignmentOpErr::InternalError(s) => {
+            create_response(&state, status, mime::APPLICATION_JSON, s)
+        }
+    };
+    Box::new(future::ok((state, res)))
+}
+
+// Given an assignment uuid, check for its presence in the "completed"
+// directory.  If it doesn't exist, return an error indicating as much.
+// The only other way that this can fail (which isn't likely) is if we
+// run in to some kind of file system related error when deleting.
+fn delete_assignment_impl(uuid: &str) -> Result<(), AssignmentOpErr> {
+    let finished = format!("{}/{}", REBALANCER_FINISHED_DIR, &uuid);
+
+    if !Path::new(&finished).exists() {
+        info!(
+            "Attempted to remove assignment {} which is does not exist.",
+            uuid
+        );
+        return Err(AssignmentOpErr::DoesNotExist);
+    }
+
+    match fs::remove_file(finished) {
+        Err(e) => {
+            let msg = format!("Error deleting assignment: {}", e);
+            Err(AssignmentOpErr::InternalError(msg))
+        }
+        _ => Ok(()),
+    }
+}
+
+// Given a client specified uuid, delete its corresponding assignment on disk.
+fn delete_assignment(mut state: State) -> Box<HandlerFuture> {
+    let assignment_params = GetAssignmentParams::take_from(&mut state);
+    let uuid = match Uuid::parse_str(&assignment_params.uuid) {
+        Ok(id) => id.to_string(),
+        Err(e) => {
+            // Mal-formed uuid.
+            let msg = format!("Mal-formed delete request: {}", e);
+            info!("{}", &msg);
+            let res = create_response(
+                &state,
+                StatusCode::BAD_REQUEST,
+                mime::APPLICATION_JSON,
+                msg,
+            );
+            return Box::new(future::ok((state, res)));
+        }
+    };
+
+    match delete_assignment_impl(&uuid) {
+        Ok(_) => {
+            // Successful delete.
+            let res = create_empty_response(&state, StatusCode::OK);
+            Box::new(future::ok((state, res)))
+        }
+        Err(e) => handle_delete_assignment_error(state, e, &uuid),
+    }
+}
+
+fn post_assignment_handler(
+    agent: Agent,
+    mut state: State,
+) -> Box<HandlerFuture> {
     let f = Body::take_from(&mut state)
         .concat2()
         .then(move |full_body| match full_body {
@@ -574,24 +695,30 @@ fn get_assignment_impl(
     None
 }
 
-fn get_assignment(agent: Agent, state: State, id: &str) -> Box<HandlerFuture> {
+fn get_assignment_handler(
+    agent: Agent,
+    mut state: State,
+) -> Box<HandlerFuture> {
+    let assignment_params = GetAssignmentParams::take_from(&mut state);
+
     // If the uuid supplied by the client does not represent a valid UUID,
     // return a response indicating that they sent a bad request.
-    let uuid = match Uuid::parse_str(id) {
-        Ok(_u) => id,
+    let uuid = match Uuid::parse_str(&assignment_params.uuid) {
+        Ok(id) => id.to_string(),
         Err(e) => {
-            let msg = format!("Invalid uuid: {}", e);
+            // Mal-formed uuid.
+            let msg = format!("Mal-formed get request: {}", e);
             let res = create_response(
                 &state,
                 StatusCode::BAD_REQUEST,
-                mime::TEXT_PLAIN,
-                serde_json::to_vec(&msg).expect("serialized message"),
+                mime::APPLICATION_JSON,
+                msg,
             );
             return Box::new(future::ok((state, res)));
         }
     };
 
-    let res = match get_assignment_impl(&agent, uuid) {
+    let res = match get_assignment_impl(&agent, &uuid) {
         Some(a) => {
             let assignment = a.read().unwrap();
             create_response(
@@ -639,19 +766,8 @@ impl Handler for Agent {
         // If we are here, then the method must either be
         // POST or GET.  It can not be anything else.
         match method.as_str() {
-            "POST" => post(self, state),
-            "GET" => {
-                let path = PathExtractor::borrow_from(&state).clone();
-
-                // If we received a GET request, there must only be one
-                // part of a path specified (i.e. the uuid of the assignment)
-                // otherwise, return a 404 to the client.
-                if path.parts.len() != 1 {
-                    return empty_response(state, StatusCode::NOT_FOUND);
-                }
-
-                get_assignment(self, state, &path.parts[0])
-            }
+            "POST" => post_assignment_handler(self, state),
+            "GET" => get_assignment_handler(self, state),
             _ => empty_response(state, StatusCode::METHOD_NOT_ALLOWED),
         }
     }
@@ -950,12 +1066,23 @@ pub fn router(f: fn(&mut Task), config: Option<AgentConfig>) -> Router {
 
         discover_saved_assignments(&agent);
 
-        route
-            .get("/assignments/*")
-            .with_path_extractor::<PathExtractor>()
-            .to_new_handler(agent.clone());
+        route.scope("/assignments", |route| {
+            // Associations allow a single path to be matched to multiple
+            // HTTP verbs with each delegating to the handler of our choice.
+            route.associate("/:uuid", |assoc| {
+                assoc
+                    .delete()
+                    .with_path_extractor::<GetAssignmentParams>()
+                    .to(delete_assignment);
 
-        route.post("assignments").to_new_handler(agent.clone());
+                assoc
+                    .get()
+                    .with_path_extractor::<GetAssignmentParams>()
+                    .to_new_handler(agent.clone());
+            });
+
+            route.post("").to_new_handler(agent.clone());
+        })
     })
 }
 
