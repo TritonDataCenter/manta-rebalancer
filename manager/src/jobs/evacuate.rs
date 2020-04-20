@@ -414,9 +414,6 @@ pub struct EvacuateJob {
     /// domain_name of manta deployment
     pub domain_name: String,
 
-    /// Accumulator for total time spent on DB inserts. (test/dev)
-    pub total_db_time: Mutex<u128>,
-
     /// Tunable options
     pub options: ConfigOptions,
 
@@ -457,7 +454,6 @@ impl EvacuateJob {
             assignments: RwLock::new(HashMap::new()),
             from_shark,
             conn: Mutex::new(conn),
-            total_db_time: Mutex::new(0),
             domain_name: domain_name.to_string(),
             options,
             max_objects,
@@ -811,7 +807,6 @@ impl EvacuateJob {
         use self::evacuateobjects::dsl::*;
 
         let locked_conn = self.conn.lock().expect("DB conn lock");
-        let now = std::time::Instant::now();
 
         // TODO: Is panic the right thing to do here?
         // TODO: consider checking record count to ensure insert success
@@ -824,22 +819,24 @@ impl EvacuateJob {
                 panic!(msg);
             });
 
-        let mut total_time = self.total_db_time.lock().expect("DB time lock");
-        *total_time += now.elapsed().as_millis();
-
         Ok(ret)
     }
 
-    // Insert multiple EvacuateObjects into the database at once.
-    fn insert_many_into_db(
+    #[allow(clippy::ptr_arg)]
+    fn insert_assignment_into_db(
         &self,
+        assign_id: &AssignmentId,
         vec_objs: &[EvacuateObject],
     ) -> Result<usize, Error> {
         use self::evacuateobjects::dsl::*;
 
+        debug!(
+            "Inserting {} objects for assignment ({}) into db",
+            vec_objs.len(),
+            assign_id
+        );
+
         let locked_conn = self.conn.lock().expect("DB conn lock");
-        let now = std::time::Instant::now();
-        // TODO: consider checking record count to ensure update success
         let ret = diesel::insert_into(evacuateobjects)
             .values(vec_objs)
             .execute(&*locked_conn)
@@ -849,11 +846,12 @@ impl EvacuateJob {
                 panic!(msg);
             });
 
-        // TODO: remove.
-        // Leave this in here for now so that we can use the functionality
-        // quickly if we need to check something during development.
-        let mut total_time = self.total_db_time.lock().expect("DB time lock");
-        *total_time += now.elapsed().as_millis();
+        debug!(
+            "inserted {} objects for assignment {} into db",
+            ret, assign_id
+        );
+
+        assert_eq!(ret, vec_objs.len());
 
         Ok(ret)
     }
@@ -882,6 +880,7 @@ impl EvacuateJob {
                 error!("{}", msg);
                 panic!(msg);
             });
+
         debug!(
             "eq_any update of {} took {}ms",
             len,
@@ -903,7 +902,7 @@ impl EvacuateJob {
         let locked_conn = self.conn.lock().expect("DB conn lock");
 
         debug!(
-            "Marking objects in assignment ({}) as skipped:{:?}",
+            "Marking objects in assignment ({}) as skipped: {:?}",
             assignment_uuid, reason
         );
         // TODO: consider checking record count to ensure update success
@@ -923,6 +922,11 @@ impl EvacuateJob {
                 error!("{}", msg);
                 panic!(msg);
             });
+
+        debug!(
+            "Marked {} objects in assignment ({}) as skipped: {:?}",
+            skipped_count, assignment_uuid, reason
+        );
         metrics_skip_inc_by(Some(&reason.to_string()), skipped_count);
         skipped_count
     }
@@ -936,14 +940,15 @@ impl EvacuateJob {
         use self::evacuateobjects::dsl::{
             assignment_id, error, evacuateobjects, skipped_reason, status,
         };
+
         let locked_conn = self.conn.lock().expect("DB conn lock");
 
         debug!(
             "Marking objects in assignment ({}) as error:{:?}",
             assignment_uuid, err
         );
-        // TODO: consider checking record count to ensure update success
-        diesel::update(evacuateobjects)
+
+        let update_cnt = diesel::update(evacuateobjects)
             .filter(assignment_id.eq(assignment_uuid))
             .set((
                 status.eq(EvacuateObjectStatus::Error),
@@ -958,7 +963,14 @@ impl EvacuateJob {
                 );
                 error!("{}", msg);
                 panic!(msg);
-            })
+            });
+
+        debug!(
+            "Marking {} objects in assignment ({}) as error: {:?}",
+            update_cnt, assignment_uuid, err
+        );
+
+        update_cnt
     }
 
     // Given a vector of Tasks that need to be marked as skipped do the
@@ -1031,11 +1043,9 @@ impl EvacuateJob {
 
         let locked_conn = self.conn.lock().expect("db conn lock");
 
-        // TODO: consider asserting that record count equals 1 here because
-        // callers make the assumption that the update was successful.  If
-        // the object is not updated then there was some error that needs to
-        // be tracked, or possibly panic.
-        diesel::update(evacuateobjects)
+        debug!("Updating object {} as error: {:?}", object_id, err);
+
+        let update_cnt = diesel::update(evacuateobjects)
             .filter(id.eq(object_id))
             .set((
                 status.eq(EvacuateObjectStatus::Error),
@@ -1048,7 +1058,10 @@ impl EvacuateJob {
                     format!("Error updating assignment: {} ({})", object_id, e);
                 error!("{}", msg);
                 panic!(msg);
-            })
+            });
+
+        assert_eq!(update_cnt, 1);
+        update_cnt
     }
 
     /// Mark all objects with a given assignment ID with the specified
@@ -1069,7 +1082,7 @@ impl EvacuateJob {
         let locked_conn = self.conn.lock().expect("DB conn lock");
 
         debug!("Marking objects in assignment ({}) as {:?}", id, to_status);
-        diesel::update(evacuateobjects)
+        let ret = diesel::update(evacuateobjects)
             .filter(assignment_id.eq(id))
             .set((
                 status.eq(to_status),
@@ -1081,7 +1094,14 @@ impl EvacuateJob {
                 let msg = format!("Error updating assignment: {} ({})", id, e);
                 error!("{}", msg);
                 panic!(msg);
-            })
+            });
+
+        debug!(
+            "Marked {} objects for assignment ({}) as {:?}",
+            ret, id, to_status
+        );
+
+        ret
     }
 
     #[allow(clippy::ptr_arg)]
@@ -2012,13 +2032,15 @@ fn shark_assignment_generator(
                         DestSharkStatus::Assigned,
                     );
 
+                    job_action
+                        .insert_assignment_into_db(&assignment.id, &eobj_vec)?;
+
                     _channel_send_assignment(
                         Arc::clone(&job_action),
                         &full_assignment_tx,
                         assignment,
                     )?;
 
-                    job_action.insert_many_into_db(&eobj_vec)?;
                     break;
                 }
             };
@@ -2123,6 +2145,10 @@ fn shark_assignment_generator(
                     &shark.manta_storage_id,
                     DestSharkStatus::Assigned,
                 );
+
+                job_action
+                    .insert_assignment_into_db(&assignment.id, &eobj_vec)?;
+
                 _channel_send_assignment(
                     Arc::clone(&job_action),
                     &full_assignment_tx,
@@ -2136,8 +2162,6 @@ fn shark_assignment_generator(
                 assignment = Assignment::new(shark.clone());
                 assignment.max_size = available_space;
 
-                // Insert objects into DB
-                job_action.insert_many_into_db(&eobj_vec)?;
                 eobj_vec = Vec::new();
             }
         }
@@ -2962,15 +2986,13 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::metrics::{metrics_error_inc, metrics_init, metrics_object_inc};
+    use crate::metrics::metrics_init;
     use crate::storinfo::ChooseAlgorithm;
     use lazy_static::lazy_static;
     use quickcheck::{Arbitrary, StdThreadGen};
     use quickcheck_helpers::random::string as random_string;
     use rand::Rng;
-    use rebalancer::libagent::{
-        router as agent_router, AgentAssignmentStats, AgentConfig,
-    };
+    use rebalancer::libagent::{router as agent_router, AgentAssignmentStats};
     use rebalancer::util;
 
     lazy_static! {
@@ -3344,7 +3366,7 @@ mod tests {
         // Put the EvacuateObject's into the DB so that the process function
         // can look them up later.
         job_action
-            .insert_many_into_db(&eobjs)
+            .insert_assignment_into_db(&uuid, &eobjs)
             .expect("process test: insert many");
 
         let mut tasks = HashMap::new();
@@ -3687,9 +3709,5 @@ mod tests {
             .expect("internal assignment post thread");
 
         debug!("TOTAL TIME: {}ms", now.elapsed().as_millis());
-        debug!(
-            "TOTAL INSERT DB TIME: {}ms",
-            job_action.total_db_time.lock().expect("db time lock")
-        );
     }
 }
