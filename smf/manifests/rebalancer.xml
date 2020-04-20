@@ -19,6 +19,9 @@
         <dependency name="filesystem" grouping="require_all" restart_on="error" type="service">
             <service_fmri value="svc:/system/filesystem/local" />
         </dependency>
+        <dependency name="postgresql" grouping="require_all" restart_on="error" type="service">
+            <service_fmri value="svc:/pkgsrc/postgresql:default" />
+        </dependency>
 
         <exec_method type="method" name="start" exec="/opt/smartdc/rebalancer/bin/rebalancer-manager &amp;" timeout_seconds="30" />
         <exec_method type="method" name="stop" exec=":kill" timeout_seconds="30" />
