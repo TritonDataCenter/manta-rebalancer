@@ -1953,8 +1953,9 @@ where
                             &shark_id,
                             CrossbeamError::from(e)
                         );
-                        // We cant anything to the thread, but we need
-                        // it to join thread.
+
+                        // We can't send anything to the thread, but we need to
+                        // join it.
                         _stop_join_some_assignment_threads(
                             &mut shark_hash,
                             vec![shark_id],
