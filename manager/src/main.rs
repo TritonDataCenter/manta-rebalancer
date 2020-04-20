@@ -371,7 +371,6 @@ fn router(config: Arc<Mutex<Config>>) -> Router {
 
 fn main() {
     let _guard = util::init_global_logger();
-    let addr = "0.0.0.0:8888";
 
     info!("Initializing...");
 
@@ -402,6 +401,11 @@ fn main() {
             })
             .unwrap(),
     ));
+
+    let addr = format!(
+        "0.0.0.0:{}",
+        config.lock().expect("lock config").listen_port
+    );
 
     let config_watcher_handle =
         Config::start_config_watcher(Arc::clone(&config), config_file);

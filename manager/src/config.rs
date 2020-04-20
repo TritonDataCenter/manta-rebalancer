@@ -78,12 +78,20 @@ impl Default for ConfigOptions {
 #[derive(Deserialize, Default, Debug, Clone)]
 pub struct Config {
     pub domain_name: String,
+
     pub shards: Vec<Shard>,
+
     #[serde(default)]
     pub snaplink_cleanup_required: bool,
+
     #[serde(default)]
     pub options: ConfigOptions,
+
+    #[serde(default = "Config::default_port")]
+    pub listen_port: u16,
 }
+
+
 
 impl Config {
     // TODO: there's a bug here that 1 will always be the min shard number
@@ -110,6 +118,8 @@ impl Config {
             shard_num
         })
     }
+
+    fn default_port() -> u16 { 80 }
 
     pub fn parse_config(config_path: &Option<String>) -> Result<Config, Error> {
         let config_path = config_path
@@ -531,7 +541,11 @@ mod tests {
     #[test]
     fn config_basic_test() {
         unit_test_init();
-        config_init();
+        let config = config_init();
+
+        // The template does not have a listen_port entry, so it should
+        // default to 80.
+        assert_eq!(config.listen_port, 80);
 
         File::open(TEST_CONFIG_FILE)
             .and_then(|f| {

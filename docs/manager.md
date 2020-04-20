@@ -167,6 +167,7 @@ The rebalancer manager requires certain  service configuration parameters in
 | -------------------- | ------ | ---------------------------------- |
 | domain_name          | String | The domain name of the manta deployment.  From SAPI application metadata (`DOMAIN_NAME`). |
 | shards               | Array  | The array of directory-api shards.  From SAPI application metadata `INDEX_MORAY_SHARDS`. |
+| listen_port | u16 | Optionally specify a port to listen on.  Default 80.|
  
 ## Development
 Currently the rebalancer manager and rebalancer-adm rely on a postgres database
