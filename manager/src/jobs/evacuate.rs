@@ -892,6 +892,7 @@ impl EvacuateJob {
                 error!("{}", msg);
                 panic!(msg);
             });
+
         debug!(
             "eq_any update of {} took {}ms",
             len,
@@ -913,7 +914,7 @@ impl EvacuateJob {
         let locked_conn = self.conn.lock().expect("DB conn lock");
 
         debug!(
-            "Marking objects in assignment ({}) as skipped:{:?}",
+            "Marking objects in assignment ({}) as skipped: {:?}",
             assignment_uuid, reason
         );
         // TODO: consider checking record count to ensure update success
@@ -933,6 +934,9 @@ impl EvacuateJob {
                 error!("{}", msg);
                 panic!(msg);
             });
+
+        debug!("Marked {} objects in assignment ({}) as skipped: {:?}",
+            skipped_count, assignment_uuid, reason);
         metrics_skip_inc_by(Some(&reason.to_string()), skipped_count);
         skipped_count
     }
@@ -946,14 +950,15 @@ impl EvacuateJob {
         use self::evacuateobjects::dsl::{
             assignment_id, error, evacuateobjects, skipped_reason, status,
         };
+
         let locked_conn = self.conn.lock().expect("DB conn lock");
 
         debug!(
             "Marking objects in assignment ({}) as error:{:?}",
             assignment_uuid, err
         );
-        // TODO: consider checking record count to ensure update success
-        diesel::update(evacuateobjects)
+
+        let update_cnt = diesel::update(evacuateobjects)
             .filter(assignment_id.eq(assignment_uuid))
             .set((
                 status.eq(EvacuateObjectStatus::Error),
@@ -968,7 +973,14 @@ impl EvacuateJob {
                 );
                 error!("{}", msg);
                 panic!(msg);
-            })
+            });
+
+        debug!(
+            "Marking {} objects in assignment ({}) as error: {:?}",
+            update_cnt, assignment_uuid, err
+        );
+
+        update_cnt
     }
 
     // Given a vector of Tasks that need to be marked as skipped do the
@@ -1041,11 +1053,9 @@ impl EvacuateJob {
 
         let locked_conn = self.conn.lock().expect("db conn lock");
 
-        // TODO: consider asserting that record count equals 1 here because
-        // callers make the assumption that the update was successful.  If
-        // the object is not updated then there was some error that needs to
-        // be tracked, or possibly panic.
-        diesel::update(evacuateobjects)
+        debug!("Updating object {} as error: {:?}", object_id, err);
+
+        let update_cnt = diesel::update(evacuateobjects)
             .filter(id.eq(object_id))
             .set((
                 status.eq(EvacuateObjectStatus::Error),
@@ -1058,7 +1068,10 @@ impl EvacuateJob {
                     format!("Error updating assignment: {} ({})", object_id, e);
                 error!("{}", msg);
                 panic!(msg);
-            })
+            });
+
+        assert_eq!(update_cnt, 1);
+        update_cnt
     }
 
     /// Mark all objects with a given assignment ID with the specified
@@ -1094,7 +1107,7 @@ impl EvacuateJob {
             });
 
         debug!(
-            "Updated {} objects for assignment ({}) as {:?}",
+            "Marked {} objects for assignment ({}) as {:?}",
             ret, id, to_status
         );
 
