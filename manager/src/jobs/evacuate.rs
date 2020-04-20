@@ -830,6 +830,21 @@ impl EvacuateJob {
         Ok(ret)
     }
 
+    #[allow(clippy::ptr_arg)]
+    fn insert_assignment_into_db(
+        &self,
+        assignment_id: &AssignmentId,
+        vec_objs: &[EvacuateObject],
+    ) -> Result<usize, Error> {
+        debug!(
+            "Inserting {} objects for assignment ({}) into db",
+            vec_objs.len(),
+            assignment_id
+        );
+
+        self.insert_many_into_db(vec_objs)
+    }
+
     // Insert multiple EvacuateObjects into the database at once.
     fn insert_many_into_db(
         &self,
@@ -838,8 +853,6 @@ impl EvacuateJob {
         use self::evacuateobjects::dsl::*;
 
         let locked_conn = self.conn.lock().expect("DB conn lock");
-        let now = std::time::Instant::now();
-        // TODO: consider checking record count to ensure update success
         let ret = diesel::insert_into(evacuateobjects)
             .values(vec_objs)
             .execute(&*locked_conn)
@@ -849,11 +862,8 @@ impl EvacuateJob {
                 panic!(msg);
             });
 
-        // TODO: remove.
-        // Leave this in here for now so that we can use the functionality
-        // quickly if we need to check something during development.
-        let mut total_time = self.total_db_time.lock().expect("DB time lock");
-        *total_time += now.elapsed().as_millis();
+        debug!("inserted {} objects into db", ret);
+        assert_eq!(ret, vec_objs.len());
 
         Ok(ret)
     }
@@ -1069,7 +1079,7 @@ impl EvacuateJob {
         let locked_conn = self.conn.lock().expect("DB conn lock");
 
         debug!("Marking objects in assignment ({}) as {:?}", id, to_status);
-        diesel::update(evacuateobjects)
+        let ret = diesel::update(evacuateobjects)
             .filter(assignment_id.eq(id))
             .set((
                 status.eq(to_status),
@@ -1081,7 +1091,14 @@ impl EvacuateJob {
                 let msg = format!("Error updating assignment: {} ({})", id, e);
                 error!("{}", msg);
                 panic!(msg);
-            })
+            });
+
+        debug!(
+            "Updated {} objects for assignment ({}) as {:?}",
+            ret, id, to_status
+        );
+
+        ret
     }
 
     #[allow(clippy::ptr_arg)]
@@ -2012,13 +2029,15 @@ fn shark_assignment_generator(
                         DestSharkStatus::Assigned,
                     );
 
+                    job_action
+                        .insert_assignment_into_db(&assignment.id, &eobj_vec)?;
+
                     _channel_send_assignment(
                         Arc::clone(&job_action),
                         &full_assignment_tx,
                         assignment,
                     )?;
 
-                    job_action.insert_many_into_db(&eobj_vec)?;
                     break;
                 }
             };
@@ -2123,6 +2142,10 @@ fn shark_assignment_generator(
                     &shark.manta_storage_id,
                     DestSharkStatus::Assigned,
                 );
+
+                job_action
+                    .insert_assignment_into_db(&assignment.id, &eobj_vec)?;
+
                 _channel_send_assignment(
                     Arc::clone(&job_action),
                     &full_assignment_tx,
@@ -2136,8 +2159,6 @@ fn shark_assignment_generator(
                 assignment = Assignment::new(shark.clone());
                 assignment.max_size = available_space;
 
-                // Insert objects into DB
-                job_action.insert_many_into_db(&eobj_vec)?;
                 eobj_vec = Vec::new();
             }
         }
@@ -2962,15 +2983,13 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::metrics::{metrics_error_inc, metrics_init, metrics_object_inc};
+    use crate::metrics::metrics_init;
     use crate::storinfo::ChooseAlgorithm;
     use lazy_static::lazy_static;
     use quickcheck::{Arbitrary, StdThreadGen};
     use quickcheck_helpers::random::string as random_string;
     use rand::Rng;
-    use rebalancer::libagent::{
-        router as agent_router, AgentAssignmentStats, AgentConfig,
-    };
+    use rebalancer::libagent::{router as agent_router, AgentAssignmentStats};
     use rebalancer::util;
 
     lazy_static! {
