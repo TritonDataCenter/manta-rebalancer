@@ -752,11 +752,11 @@ impl EvacuateJob {
         storinfo: Arc<S>,
         algo: &mod_storinfo::DefaultChooseAlgorithm,
         retries: u16,
-    ) -> Result<Vec<EvacuateDestShark>, Error>
+    ) -> Result<Vec<StorageNode>, Error>
     where
         S: SharkSource + 'static,
     {
-        let mut shark_list: Vec<EvacuateDestShark> = vec![];
+        let mut shark_list: Vec<StorageNode> = vec![];
         let mut tries = 0;
         let shark_list_retry_delay = std::time::Duration::from_millis(500);
 
@@ -773,7 +773,7 @@ impl EvacuateJob {
                 .read()
                 .expect("dest_shark_list read lock")
                 .values()
-                .map(|v| v.to_owned())
+                .map(|v| v.shark.to_owned())
                 .collect();
 
             if shark_list.is_empty() {
@@ -798,7 +798,7 @@ impl EvacuateJob {
             // Rust sort methods sort from lowest to highest order.  We want
             // the sharks with the most available_mb at the beginning of the
             // list so we reverse the sort.
-            shark_list.sort_by_key(|s| s.shark.available_mb);
+            shark_list.sort_by_key(|s| s.available_mb);
             shark_list.as_mut_slice().reverse();
             Ok(shark_list)
         }
@@ -1107,11 +1107,7 @@ impl EvacuateJob {
     }
 
     #[allow(clippy::ptr_arg)]
-    fn mark_dest_shark(
-        &self,
-        dest_shark: &StorageId,
-        status: DestSharkStatus,
-    ) {
+    fn mark_dest_shark(&self, dest_shark: &StorageId, status: DestSharkStatus) {
         if let Some(shark) = self
             .dest_shark_list
             .write()
@@ -1127,18 +1123,12 @@ impl EvacuateJob {
 
     #[allow(clippy::ptr_arg)]
     fn mark_dest_shark_assigned(&self, dest_shark: &StorageId) {
-        self.mark_dest_shark(
-            dest_shark,
-            DestSharkStatus::Assigned,
-        )
+        self.mark_dest_shark(dest_shark, DestSharkStatus::Assigned)
     }
 
     #[allow(clippy::ptr_arg)]
     fn mark_dest_shark_ready(&self, dest_shark: &StorageId) {
-        self.mark_dest_shark(
-            dest_shark,
-            DestSharkStatus::Ready,
-        )
+        self.mark_dest_shark(dest_shark, DestSharkStatus::Ready)
     }
 
     fn load_assignment_objects(
@@ -1856,10 +1846,7 @@ where
                 // threads.
                 let mut remove_keys = vec![];
                 for (key, _) in shark_hash.iter() {
-                    if shark_list
-                        .iter()
-                        .any(|s| &s.shark.manta_storage_id == key)
-                    {
+                    if shark_list.iter().any(|s| &s.manta_storage_id == key) {
                         continue;
                     }
                     remove_keys.push(key.clone());
@@ -1872,8 +1859,8 @@ where
 
                 // Create and add any shark threads that are in the list but
                 // not in the hash.
-                for es in shark_list.iter() {
-                    if shark_hash.contains_key(&es.shark.manta_storage_id) {
+                for shark in shark_list.iter() {
+                    if shark_hash.contains_key(&shark.manta_storage_id) {
                         continue;
                     }
 
@@ -1882,21 +1869,21 @@ where
                     let handle = builder
                         .name(format!(
                             "shark_assignment_generator({})",
-                            es.shark.manta_storage_id
+                            shark.manta_storage_id
                         ))
                         .spawn(shark_assignment_generator(
                             Arc::clone(&job_action),
-                            es.shark.clone(),
+                            shark.clone(),
                             rx,
                             full_assignment_tx.clone(),
                         ))?;
 
                     shark_hash.insert(
-                        es.shark.manta_storage_id.clone(),
+                        shark.manta_storage_id.clone(),
                         SharkHashEntry {
                             handle,
                             tx,
-                            shark: es.shark.clone(),
+                            shark: shark.clone(),
                         },
                     );
                 }
@@ -1925,12 +1912,12 @@ where
                     // Iterate over the list of sharks and get the first
                     // valid one.
                     let mut last_reason = ObjectSkippedReason::AgentBusy;
-                    let shark_list_entry: Option<&EvacuateDestShark> =
-                        shark_list.iter().find(|sle| {
+                    let shark_list_entry: Option<&StorageNode> =
+                        shark_list.iter().find(|shark| {
                             if let Some(reason) = validate_destination(
                                 &eobj.object,
                                 &job_action.from_shark,
-                                &sle.shark,
+                                &shark,
                             ) {
                                 last_reason = reason;
                                 return false;
@@ -1939,11 +1926,10 @@ where
                         });
 
                     // Get the associated shark_hash_entry which holds the
-                    // send side of the associated shark_assignment_generator
-                    // channel.
+                    // send side of the shark_assignment_generator channel.
                     let shark_hash_entry = match shark_list_entry {
-                        Some(sle) => shark_hash
-                            .get(&sle.shark.manta_storage_id)
+                        Some(shark) => shark_hash
+                            .get(&shark.manta_storage_id)
                             .expect("shark not found in hash"),
                         None => {
                             warn!("No sharks available");
