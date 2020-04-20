@@ -1975,40 +1975,6 @@ where
                         );
                         break;
                     }
-                    /*
-
-                    let mut remove_sharks: Vec<StorageId> = vec![];
-                    // Send the object to the associated shark thread.
-                    match shark_hash_ent {
-                        Some((shark_id, she)) => {
-                            if let Err(e) =
-                                she.tx.send(AssignmentMsg::Data(Box::new(eobj)))
-                            {
-                                error!(
-                                    "Error sending object to shark ({}) \
-                                     generator thread: {}",
-                                    shark_id,
-                                    CrossbeamError::from(e)
-                                );
-                                // We cant anything to the thread, but we need
-                                // it to join thread.
-                                remove_sharks.push(shark_id.clone());
-                                break;
-                            }
-                        }
-                        None => {
-                            // TODO: Possibly make this more generic?
-                            warn!("No sharks available");
-                            job_action.skip_object(&mut eobj, last_reason)?;
-                        }
-                    }
-
-
-                    _stop_join_some_assignment_threads(
-                        &mut shark_hash,
-                        remove_sharks,
-                    );
-                    */
                 }
 
                 // We have hit our maximum number of objects we want to
