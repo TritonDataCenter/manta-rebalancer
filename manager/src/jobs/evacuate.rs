@@ -2172,10 +2172,10 @@ fn shark_assignment_generator(
 
                 flush = false;
 
+                job_action.mark_dest_shark_assigned(&shark.manta_storage_id);
+
                 job_action
                     .insert_assignment_into_db(&assignment.id, &eobj_vec)?;
-
-                job_action.mark_dest_shark_assigned(&shark.manta_storage_id);
 
                 _channel_send_assignment(
                     Arc::clone(&job_action),
