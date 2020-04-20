@@ -50,6 +50,7 @@ use libmanta::moray::{MantaObject, MantaObjectShark};
 use moray::client::MorayClient;
 use quickcheck::{Arbitrary, Gen};
 use quickcheck_helpers::random::string as random_string;
+use rand::seq::SliceRandom;
 use reqwest;
 use serde::{self, Deserialize};
 use serde_json::Value;
@@ -387,7 +388,6 @@ pub enum DestSharkStatus {
 pub struct EvacuateDestShark {
     pub shark: StorageNode,
     pub status: DestSharkStatus,
-    pub assignment_count: u32,
 }
 
 /// Evacuate a given shark
@@ -718,7 +718,6 @@ impl EvacuateJob {
                 let new_shark = EvacuateDestShark {
                     shark: sn.to_owned(),
                     status: DestSharkStatus::Init,
-                    assignment_count: 0,
                 };
                 debug!("Adding new destination shark {:?} ", new_shark);
                 dest_shark_list.insert(sn.manta_storage_id.clone(), new_shark);
@@ -1108,14 +1107,11 @@ impl EvacuateJob {
     }
 
     #[allow(clippy::ptr_arg)]
-    fn mark_dest_shark<F>(
+    fn mark_dest_shark(
         &self,
         dest_shark: &StorageId,
         status: DestSharkStatus,
-        post_fn: Option<F>,
-    ) where
-        F: Fn(&mut EvacuateDestShark) -> (),
-    {
+    ) {
         if let Some(shark) = self
             .dest_shark_list
             .write()
@@ -1124,9 +1120,6 @@ impl EvacuateJob {
         {
             debug!("Updating shark '{}' to {:?} state", dest_shark, status,);
             shark.status = status;
-            if let Some(func) = post_fn {
-                func(shark)
-            }
         } else {
             warn!("Could not find shark: '{}'", dest_shark);
         }
@@ -1137,9 +1130,6 @@ impl EvacuateJob {
         self.mark_dest_shark(
             dest_shark,
             DestSharkStatus::Assigned,
-            Some(|shark: &mut EvacuateDestShark| {
-                shark.assignment_count += 1;
-            }),
         )
     }
 
@@ -1147,10 +1137,7 @@ impl EvacuateJob {
     fn mark_dest_shark_ready(&self, dest_shark: &StorageId) {
         self.mark_dest_shark(
             dest_shark,
-            DestSharkStatus::Assigned,
-            Some(|shark: &mut EvacuateDestShark| {
-                shark.assignment_count -= 1;
-            }),
+            DestSharkStatus::Ready,
         )
     }
 
@@ -1853,14 +1840,16 @@ where
                 // number of threads.
                 shark_list.truncate(max_sharks);
 
-                // The list is already sorted by available space, sort it
-                // again by number of assignments.  We've already truncated
-                // the list to only include the sharks with the most
-                // available_mb.  Sorting again here ensures that of those
-                // sharks out assignments are more evenly spread out among
-                // them instead of posting all assignments to the same one or
-                // two sharks that happen to have the most available space.
-                shark_list.sort_by_key(|es| es.assignment_count);
+                // We've already truncated the list to only include the sharks
+                // with the most available_mb.  Shuffling here ensures
+                // that of those sharks our assignments are more evenly spread
+                // out among them.  It is possible that a single shark could
+                // have significantly more space available than every other
+                // shark.  In such a case, if we dont shuffle, the evacuate
+                // job could take much longer as every object would go to a
+                // single shark.
+                let mut rng = rand::thread_rng();
+                shark_list.as_mut_slice().shuffle(&mut rng);
 
                 // For any active sharks that are not in the list remove them
                 // from the hash, send the stop command, join the associated
