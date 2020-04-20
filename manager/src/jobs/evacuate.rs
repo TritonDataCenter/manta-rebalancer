@@ -50,6 +50,7 @@ use libmanta::moray::{MantaObject, MantaObjectShark};
 use moray::client::MorayClient;
 use quickcheck::{Arbitrary, Gen};
 use quickcheck_helpers::random::string as random_string;
+use rand::seq::SliceRandom;
 use reqwest;
 use serde::{self, Deserialize};
 use serde_json::Value;
@@ -704,6 +705,7 @@ impl EvacuateJob {
             .dest_shark_list
             .write()
             .expect("update dest_shark_list write lock");
+
         for sn in new_sharks.iter() {
             if let Some(dest_shark) =
                 dest_shark_list.get_mut(sn.manta_storage_id.as_str())
@@ -1117,6 +1119,16 @@ impl EvacuateJob {
         } else {
             warn!("Could not find shark: '{}'", dest_shark);
         }
+    }
+
+    #[allow(clippy::ptr_arg)]
+    fn mark_dest_shark_assigned(&self, dest_shark: &StorageId) {
+        self.mark_dest_shark(dest_shark, DestSharkStatus::Assigned)
+    }
+
+    #[allow(clippy::ptr_arg)]
+    fn mark_dest_shark_ready(&self, dest_shark: &StorageId) {
+        self.mark_dest_shark(dest_shark, DestSharkStatus::Ready)
     }
 
     fn load_assignment_objects(
@@ -1818,6 +1830,17 @@ where
                 // number of threads.
                 shark_list.truncate(max_sharks);
 
+                // We've already truncated the list to only include the sharks
+                // with the most available_mb.  Shuffling here ensures
+                // that of those sharks our assignments are more evenly spread
+                // out among them.  It is possible that a single shark could
+                // have significantly more space available than every other
+                // shark.  In such a case, if we dont shuffle, the evacuate
+                // job could take much longer as every object would go to a
+                // single shark.
+                let mut rng = rand::thread_rng();
+                shark_list.as_mut_slice().shuffle(&mut rng);
+
                 // For any active sharks that are not in the list remove them
                 // from the hash, send the stop command, join the associated
                 // threads.
@@ -1828,6 +1851,7 @@ where
                     }
                     remove_keys.push(key.clone());
                 }
+
                 _stop_join_some_assignment_threads(
                     &mut shark_hash,
                     remove_keys,
@@ -1867,8 +1891,7 @@ where
                 // for some max number of iterations get an object from shark
                 // spotter, then:
                 // - iteration over the hash:
-                //      * Skip busy sharks
-                //      * find first entry that is not either shark in object
+                //      * find first shark that is a vaild destination
                 //      * send object to that shark's thread
                 // end loop
                 for _ in 0..max_assignment_size {
@@ -1886,14 +1909,15 @@ where
                         }
                     };
 
-                    // Iterate over the hash of shark_assignment threads
+                    // Iterate over the list of sharks and get the first
+                    // valid one.
                     let mut last_reason = ObjectSkippedReason::AgentBusy;
-                    let shark_hash_ent =
-                        shark_hash.iter().find(|(_, shark_hash_ent)| {
+                    let shark_list_entry: Option<&StorageNode> =
+                        shark_list.iter().find(|shark| {
                             if let Some(reason) = validate_destination(
                                 &eobj.object,
                                 &job_action.from_shark,
-                                &shark_hash_ent.shark,
+                                &shark,
                             ) {
                                 last_reason = reason;
                                 return false;
@@ -1901,35 +1925,43 @@ where
                             true
                         });
 
-                    let mut remove_sharks: Vec<StorageId> = vec![];
-                    // Send the object to the associated shark thread.
-                    match shark_hash_ent {
-                        Some((shark_id, she)) => {
-                            if let Err(e) =
-                                she.tx.send(AssignmentMsg::Data(Box::new(eobj)))
-                            {
-                                error!(
-                                    "Error sending object to shark ({}) \
-                                     generator thread: {}",
-                                    shark_id,
-                                    CrossbeamError::from(e)
-                                );
-                                // We cant anything to the thread, but we need
-                                // it to join thread.
-                                remove_sharks.push(shark_id.clone());
-                                break;
-                            }
-                        }
+                    // Get the associated shark_hash_entry which holds the
+                    // send side of the shark_assignment_generator channel.
+                    let shark_hash_entry = match shark_list_entry {
+                        Some(shark) => shark_hash
+                            .get(&shark.manta_storage_id)
+                            .expect("shark not found in hash"),
                         None => {
-                            // TODO: Possibly make this more generic?
                             warn!("No sharks available");
                             job_action.skip_object(&mut eobj, last_reason)?;
+                            continue;
                         }
+                    };
+
+                    let shark_id =
+                        shark_hash_entry.shark.manta_storage_id.clone();
+
+                    // Send the evacuate object to the
+                    // shark_assignment_generator.
+                    if let Err(e) = shark_hash_entry
+                        .tx
+                        .send(AssignmentMsg::Data(Box::new(eobj)))
+                    {
+                        error!(
+                            "Error sending object to shark ({}) \
+                             generator thread: {}",
+                            &shark_id,
+                            CrossbeamError::from(e)
+                        );
+
+                        // We can't send anything to the thread, but we need to
+                        // join it.
+                        _stop_join_some_assignment_threads(
+                            &mut shark_hash,
+                            vec![shark_id],
+                        );
+                        break;
                     }
-                    _stop_join_some_assignment_threads(
-                        &mut shark_hash,
-                        remove_sharks,
-                    );
                 }
 
                 // We have hit our maximum number of objects we want to
@@ -2027,10 +2059,8 @@ fn shark_assignment_generator(
                     // Stop message.  But in the event that it does exit
                     // without doing this and we have an active assignment,
                     // this will clean that up before exiting.
-                    job_action.mark_dest_shark(
-                        &shark.manta_storage_id,
-                        DestSharkStatus::Assigned,
-                    );
+                    job_action
+                        .mark_dest_shark_assigned(&shark.manta_storage_id);
 
                     job_action
                         .insert_assignment_into_db(&assignment.id, &eobj_vec)?;
@@ -2141,10 +2171,8 @@ fn shark_assignment_generator(
                 let assignment_size = assignment.total_size;
 
                 flush = false;
-                job_action.mark_dest_shark(
-                    &shark.manta_storage_id,
-                    DestSharkStatus::Assigned,
-                );
+
+                job_action.mark_dest_shark_assigned(&shark.manta_storage_id);
 
                 job_action
                     .insert_assignment_into_db(&assignment.id, &eobj_vec)?;
@@ -2446,9 +2474,8 @@ fn start_assignment_checker(
                     found_assignment_count += 1;
 
                     // Mark the shark associated with this assignment as Ready
-                    job_action.mark_dest_shark(
+                    job_action.mark_dest_shark_ready(
                         &ace.dest_shark.manta_storage_id,
-                        DestSharkStatus::Ready,
                     );
 
                     match md_update_tx.send(ace.to_owned()) {
@@ -3266,10 +3293,7 @@ mod tests {
                                     }
                                 }
                             }
-                            verif_job_action.mark_dest_shark(
-                                &dest_shark,
-                                DestSharkStatus::Ready,
-                            );
+                            verif_job_action.mark_dest_shark_ready(&dest_shark);
                             println!("Task COUNT {}", task_count);
                         }
                         Err(_) => {
