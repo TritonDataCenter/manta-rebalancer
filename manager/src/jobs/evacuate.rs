@@ -825,24 +825,16 @@ impl EvacuateJob {
     #[allow(clippy::ptr_arg)]
     fn insert_assignment_into_db(
         &self,
-        assignment_id: &AssignmentId,
-        vec_objs: &[EvacuateObject],
-    ) -> Result<usize, Error> {
-        debug!(
-            "Inserting {} objects for assignment ({}) into db",
-            vec_objs.len(),
-            assignment_id
-        );
-
-        self.insert_many_into_db(vec_objs)
-    }
-
-    // Insert multiple EvacuateObjects into the database at once.
-    fn insert_many_into_db(
-        &self,
+        assign_id: &AssignmentId,
         vec_objs: &[EvacuateObject],
     ) -> Result<usize, Error> {
         use self::evacuateobjects::dsl::*;
+
+        debug!(
+            "Inserting {} objects for assignment ({}) into db",
+            vec_objs.len(),
+            assign_id
+        );
 
         let locked_conn = self.conn.lock().expect("DB conn lock");
         let ret = diesel::insert_into(evacuateobjects)
@@ -854,7 +846,11 @@ impl EvacuateJob {
                 panic!(msg);
             });
 
-        debug!("inserted {} objects into db", ret);
+        debug!(
+            "inserted {} objects for assignment {} into db",
+            ret, assign_id
+        );
+
         assert_eq!(ret, vec_objs.len());
 
         Ok(ret)
@@ -927,8 +923,10 @@ impl EvacuateJob {
                 panic!(msg);
             });
 
-        debug!("Marked {} objects in assignment ({}) as skipped: {:?}",
-            skipped_count, assignment_uuid, reason);
+        debug!(
+            "Marked {} objects in assignment ({}) as skipped: {:?}",
+            skipped_count, assignment_uuid, reason
+        );
         metrics_skip_inc_by(Some(&reason.to_string()), skipped_count);
         skipped_count
     }
@@ -3368,7 +3366,7 @@ mod tests {
         // Put the EvacuateObject's into the DB so that the process function
         // can look them up later.
         job_action
-            .insert_many_into_db(&eobjs)
+            .insert_assignment_into_db(&uuid, &eobjs)
             .expect("process test: insert many");
 
         let mut tasks = HashMap::new();
