@@ -1069,7 +1069,7 @@ dependencies = [
  "libc 0.2.67 (registry+https://github.com/rust-lang/crates.io-index)",
  "libmanta 0.7.0 (git+https://github.com/joyent/rust-libmanta?tag=v0.7.0)",
  "mime 0.3.16 (registry+https://github.com/rust-lang/crates.io-index)",
- "moray 0.9.3 (git+https://github.com/joyent/rust-moray?tag=v0.9.3)",
+ "moray 0.9.3 (git+https://github.com/joyent/rust-moray?branch=batch_method)",
  "mustache 0.9.0 (git+https://github.com/rjloura/rust-mustache?branch=issue-60)",
  "prometheus 0.7.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "quickcheck 0.8.5 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -1213,6 +1213,25 @@ dependencies = [
 name = "moray"
 version = "0.9.3"
 source = "git+https://github.com/joyent/rust-moray?tag=v0.9.3#2503b0232c0f3f484222fa15dba9028fe6a6e604"
+dependencies = [
+ "cueball 0.3.2 (registry+https://github.com/rust-lang/crates.io-index)",
+ "cueball-static-resolver 0.3.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "cueball-tcp-stream-connection 0.3.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "libmanta 0.7.0 (git+https://github.com/joyent/rust-libmanta?tag=v0.7.0)",
+ "rust_fast 0.2.0 (git+https://github.com/joyent/rust-fast?tag=v0.2.0)",
+ "serde 1.0.104 (registry+https://github.com/rust-lang/crates.io-index)",
+ "serde_json 1.0.46 (registry+https://github.com/rust-lang/crates.io-index)",
+ "slog 2.5.2 (registry+https://github.com/rust-lang/crates.io-index)",
+ "slog-bunyan 2.1.1-pre (git+https://github.com/kellymclaughlin/bunyan?branch=build-on-smartos)",
+ "trust-dns-resolver 0.11.1 (registry+https://github.com/rust-lang/crates.io-index)",
+ "unicode-normalization 0.1.5 (registry+https://github.com/rust-lang/crates.io-index)",
+ "uuid 0.7.4 (registry+https://github.com/rust-lang/crates.io-index)",
+]
+
+[[package]]
+name = "moray"
+version = "0.9.3"
+source = "git+https://github.com/joyent/rust-moray?branch=batch_method#edcc65b3bbb810b15a5ba4e3966b0cde4d43782c"
 dependencies = [
  "cueball 0.3.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "cueball-static-resolver 0.3.0 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -3027,6 +3046,7 @@ dependencies = [
 "checksum mio-uds 0.6.7 (registry+https://github.com/rust-lang/crates.io-index)" = "966257a94e196b11bb43aca423754d87429960a768de9414f3691d6957abf125"
 "checksum miow 0.2.1 (registry+https://github.com/rust-lang/crates.io-index)" = "8c1f2f3b1cf331de6896aabf6e9d55dca90356cc9960cca7eaaf408a355ae919"
 "checksum moray 0.9.2 (git+https://github.com/joyent/rust-moray?tag=v0.9.2)" = "<none>"
+"checksum moray 0.9.3 (git+https://github.com/joyent/rust-moray?branch=batch_method)" = "<none>"
 "checksum moray 0.9.3 (git+https://github.com/joyent/rust-moray?tag=v0.9.3)" = "<none>"
 "checksum mustache 0.9.0 (git+https://github.com/rjloura/rust-mustache?branch=issue-60)" = "<none>"
 "checksum native-tls 0.2.3 (registry+https://github.com/rust-lang/crates.io-index)" = "4b2df1a4c22fd44a62147fd8f13dd0f95c9d8ca7b2610299b2a2f9cf8964274e"

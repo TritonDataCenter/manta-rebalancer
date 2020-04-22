@@ -65,6 +65,7 @@ pub struct ConfigOptions {
     pub use_static_md_update_threads: bool,
     pub static_queue_depth: usize,
     pub max_assignment_age: u64,
+    pub use_batched_updates: bool,
 }
 
 impl Default for ConfigOptions {
@@ -76,6 +77,7 @@ impl Default for ConfigOptions {
             use_static_md_update_threads: true,
             static_queue_depth: DEFAULT_STATIC_QUEUE_DEPTH,
             max_assignment_age: DEFAULT_MAX_ASSIGNMENT_AGE,
+            use_batched_updates: true,
         }
     }
 }
