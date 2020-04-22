@@ -61,6 +61,7 @@ pub struct ConfigOptions {
     pub max_sharks: usize,
     pub use_static_md_update_threads: bool,
     pub static_queue_depth: usize,
+    pub use_batched_updates: bool,
 }
 
 impl Default for ConfigOptions {
@@ -71,6 +72,7 @@ impl Default for ConfigOptions {
             max_sharks: DEFAULT_MAX_SHARKS,
             use_static_md_update_threads: true,
             static_queue_depth: DEFAULT_STATIC_QUEUE_DEPTH,
+            use_batched_updates: true,
         }
     }
 }
