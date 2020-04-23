@@ -91,8 +91,6 @@ pub struct Config {
     pub listen_port: u16,
 }
 
-
-
 impl Config {
     // TODO: there's a bug here that 1 will always be the min shard number
     pub fn min_shard_num(&self) -> u32 {
@@ -119,7 +117,9 @@ impl Config {
         })
     }
 
-    fn default_port() -> u16 { 80 }
+    fn default_port() -> u16 {
+        80
+    }
 
     pub fn parse_config(config_path: &Option<String>) -> Result<Config, Error> {
         let config_path = config_path
