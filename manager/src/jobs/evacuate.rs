@@ -268,7 +268,12 @@ pub fn create_evacuateobjects_table(
             );",
         status_check, skipped_check, error_check
     );
-    conn.execute(&create_query).map_err(Error::from)
+    conn.execute(&create_query).map_err(Error::from)?;
+
+    conn.execute(
+        "CREATE INDEX assignment_id on evacuateobjects (assignment_id);",
+    )
+    .map_err(Error::from)
 }
 // --- END Diesel Stuff --- //
 
