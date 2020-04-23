@@ -23,15 +23,15 @@ AGENT_TARBALL       := $(NAME)-agent-$(STAMP).tar.gz
 RELEASE_TARBALL     := $(NAME)-pkg-$(STAMP).tar.gz
 RELSTAGEDIR         := /tmp/$(NAME)-$(STAMP)
 
-# This image is triton-origin-x86_64-19.2.0
-BASE_IMAGE_UUID = a0d5f456-ba0f-4b13-bfdc-5e9323837ca7
+# This image is triton-origin-x86_64-19.4.0
+BASE_IMAGE_UUID = 5417ab20-3156-11ea-8b19-2b66f5e7a439
 BUILDIMAGE_NAME = mantav2-rebalancer
 BUILDIMAGE_DESC = Manta Rebalancer
 AGENTS          = amon config registrar
 # Biasing to postgresql v11 over v10 to match the postgresql11-client that
-# is installed in the jenkins-agent build zones for 19.2.0 (per buckets-mdapi's
+# is installed in the jenkins-agent build zones for 19.4.0 (per buckets-mdapi's
 # requirements).
-BUILDIMAGE_PKGSRC = postgresql11-server-11.4 postgresql11-client-11.4
+BUILDIMAGE_PKGSRC = postgresql11-server-11.6 postgresql11-client-11.6
 
 ENGBLD_USE_BUILDIMAGE   = true
 
