@@ -79,13 +79,13 @@ pub fn metrics_init(cfg: metrics::ConfigMetrics) {
     // Now create and register additional metrics exclusively used by the
     // rebalaner manger.
     let skip_counter = register_counter_vec!(
-        opts!(SKIP_COUNT, "Objects skipped.").const_labels(labels.clone()),
+        opts!(SKIP_COUNT, "Objects skipped.").const_labels(labels),
         &["reason"]
     )
     .expect("failed to register skip_count counter");
 
     metrics
-        .insert(SKIP_COUNT, Metrics::MetricsCounterVec(skip_counter.clone()));
+        .insert(SKIP_COUNT, Metrics::MetricsCounterVec(skip_counter));
 
     // Take the fully formed set of metrics and store it globally.
     let mut global_metrics = METRICS.lock().unwrap();

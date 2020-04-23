@@ -348,9 +348,9 @@ impl Arbitrary for EvacuateObject {
         EvacuateObject {
             id: Uuid::new_v4().to_string(),
             assignment_id: Uuid::new_v4().to_string(),
-            object: manta_value.clone(),
+            object: manta_value,
             shard,
-            etag: manta_object.etag.clone(), // This is a different etag
+            etag: manta_object.etag, // This is a different etag
             dest_shark,
             status,
             skipped_reason,
@@ -1613,7 +1613,7 @@ fn start_sharkspotter(
 
                     let eobj = EvacuateObject {
                         id,
-                        object: manta_object.clone(),
+                        object: manta_object,
                         status: EvacuateObjectStatus::Error,
                         error: Some(EvacuateObjectError::BadShardNumber),
                         etag,

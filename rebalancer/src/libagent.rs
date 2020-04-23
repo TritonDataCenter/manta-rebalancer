@@ -626,7 +626,7 @@ fn post_assignment_handler(
                 assignment_save(
                     &uuid,
                     REBALANCER_SCHEDULED_DIR,
-                    assignment.clone(),
+                    assignment,
                 );
 
                 // Assignment has been saved.  Remove its id from the the table.
@@ -785,7 +785,7 @@ impl NewHandler for Agent {
 // node given the owner id and object id.
 fn manta_file_path(owner: &str, object: &str) -> String {
     let path = format!("/manta/{}/{}", owner, object);
-    path.to_string()
+    path
 }
 
 fn file_create(owner: &str, object: &str) -> File {
@@ -1036,7 +1036,7 @@ pub fn router(f: fn(&mut Task), config: Option<AgentConfig>) -> Router {
         let tx = Arc::new(Mutex::new(w));
         let rx = Arc::new(Mutex::new(r));
         let agent =
-            Agent::new(tx.clone(), Arc::new(Mutex::new(agent_metrics.clone())));
+            Agent::new(tx, Arc::new(Mutex::new(agent_metrics.clone())));
         let pool = ThreadPool::new(1);
 
         create_dir(REBALANCER_SCHEDULED_DIR);

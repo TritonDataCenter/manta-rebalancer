@@ -35,7 +35,7 @@ BUILDIMAGE_PKGSRC = postgresql11-server-11.6 postgresql11-client-11.6
 
 ENGBLD_USE_BUILDIMAGE   = true
 
-RUST_CLIPPY_ARGS ?= --features "postgres"
+#RUST_CLIPPY_ARGS ?= --features "postgres"
 
 CLEAN_FILES += rebalancer-agent-*.tar.gz
 
