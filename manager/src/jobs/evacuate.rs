@@ -1315,23 +1315,42 @@ impl GetAssignment for EvacuateJob {
 }
 
 impl UpdateMetadata for EvacuateJob {
-    /// This function only updates the local database in the event that an
-    /// error is encountered.  This allows the caller to easily batch database
-    /// updates for successful objects.
     fn update_object_shark(
         &self,
         mut object: Value,
         new_shark: &StorageNode,
-        etag: String,
-        mclient: &mut MorayClient,
     ) -> Result<Value, Error> {
         let old_shark = &self.from_shark;
         let mut shark_found = false;
 
         // Get the sharks in the form of Vec<MantaObjectShark> to make it
         // easy to manipulate.
-        let mut sharks = common::get_sharks_from_value(&object)?;
-        let id = common::get_objectId_from_value(&object)?;
+        let mut sharks = match common::get_sharks_from_value(&object) {
+            Ok(s) => s,
+            Err(e) => {
+                let msg =
+                    format!("Could not get sharks from Manta Object {:#?}",
+                            object);
+                error!("{}", &msg);
+                self.mark_object_error(
+                    &id,
+                    EvacuateObjectError::DuplicateShark,
+                );
+                return Err(InternalError::new(
+                    Some(InternalErrorCode::DuplicateShark),
+                    msg,
+                )
+
+            }
+        };
+        // Just pass in the ID
+        let id = match common::get_objectId_from_value(&object) {
+            Ok(i) => i,
+            Err(e) => {
+
+            }
+        };
+
 
         // replace shark value
         for shark in sharks.iter_mut() {
@@ -1384,16 +1403,6 @@ impl UpdateMetadata for EvacuateJob {
                 .into());
             }
         }
-
-        /*
-        if let Err(e) = moray_client::put_object(mclient, &object, &etag) {
-            self.mark_object_error(
-                &id,
-                EvacuateObjectError::MetadataUpdateFailed,
-            );
-            return Err(e);
-        }
-        */
 
         Ok(object)
     }
@@ -2345,8 +2354,6 @@ trait UpdateMetadata: Sync + Send {
         &self,
         object: Value,
         new_shark: &StorageNode,
-        etag: String,
-        mclient: &mut MorayClient,
     ) -> Result<Value, Error>;
 }
 
@@ -2546,48 +2553,6 @@ fn start_assignment_checker(
         .map_err(Error::from)
 }
 
-fn reconnect_and_reupdate(
-    job_action: &EvacuateJob,
-    mobj: Value,
-    shard: u32,
-    dest_shark: &StorageNode,
-    etag: String,
-) -> Option<(Value, MorayClient)> {
-    let mobj_clone = mobj.clone();
-    let mut rclient =
-        match moray_client::create_client(shard, &job_action.domain_name) {
-            Ok(client) => client,
-            Err(e) => {
-                error!(
-                "(on retry) MD Update Worker: failed to get moray client for \
-                 shard number {}. Cannot update metadata for {:#?}\n{}",
-                shard, mobj, e
-            );
-                return None;
-            }
-        };
-
-    let robj = match job_action.update_object_shark(
-        mobj,
-        dest_shark,
-        etag,
-        &mut rclient,
-    ) {
-        Ok(robj) => robj,
-        Err(e) => {
-            error!(
-                "(on retry) MD Update worker: Error \
-                 updating \n\n{:#?}, with dest_shark \
-                 {:?}\n\n{}",
-                &mobj_clone, dest_shark, e
-            );
-            return None;
-        }
-    };
-
-    Some((robj, rclient))
-}
-
 enum UpdateWorkerMsg {
     Data(AssignmentCacheEntry),
     Stop,
@@ -2676,30 +2641,6 @@ fn metadata_update_worker_dynamic(
     }
 }
 
-// XXX refactor this better
-fn put_object(
-    job_action: &Arc<EvacuateJob>,
-    mclient: &mut MorayClient,
-    object: &Value,
-    etag:  &str,
-) -> Result<(), Error>{
-    if let Err(e) = moray_client::put_object(mclient, object, etag) {
-        let id = common::get_objectId_from_value(object)?;
-        job_action.mark_object_error(
-            &id,
-            EvacuateObjectError::MetadataUpdateFailed,
-        );
-
-        // XXX
-        error!(
-            "MD Update worker: Error updating \n\n{:#?}, with \
-                     dest_shark {:?}\n\n({}).  Retrying...",
-            &object, "foo", e
-        );
-    }
-    Ok(())
-}
-
 fn get_client_from_hash<'a>(
     job_action: &Arc<EvacuateJob>,
     client_hash: &'a mut HashMap<u32, MorayClient>,
@@ -2781,38 +2722,13 @@ fn metadata_update_assignment(
         trace!("Getting client for shard {}", shard);
 
         // here rui
-        let mclient = match get_client_from_hash(
-            job_action,
-            client_hash,
-            shard
-        ) {
-            Ok(c) => c,
-            Err(e) => {
-                job_action.mark_object_error(
-                    &eobj.id,
-                    EvacuateObjectError::BadMorayClient,
-                );
-                error!(
-                    "MD Update Worker: failed to get moray \
-                             client for shard number {}. Cannot update \
-                             metadata for {:#?}\n{}",
-                    shard, mobj, e
-                );
-                continue;
-            }
-        };
 
         // This function updates the manta object with the new
         // sharks in the Manta Metadata tier, and then returns the
-        // updated Manta metadata object.  It only updates the state of
-        // the associated EvacuateObject in the local database if an
-        // error is encountered.  It is done this way in order to
-        // batch database updates in the happy path.
+        // updated Manta metadata object.
         match job_action.update_object_shark(
             mobj,
             dest_shark,
-            etag.clone(), // TODO: avoid this clone?
-            mclient
         ) {
             Ok(o) => {
                 if job_action.options.use_batched_updates {
@@ -2826,15 +2742,60 @@ fn metadata_update_assignment(
                         value: o.clone(), // clone necessary?
                     };
 
+                    // The and_modify().or_insert() semantic is great, the
+                    // only problem is it doesn't play well with the compiler.
+                    // While we should only ever have to enter one of these
+                    // the compiler thinks that the ownership of 'put_req' is
+                    // passed to each one.  So unfortunately we have to clone().
+                    // We choose to clone on the or_insert() because that
+                    // will only happen once per shard, and it is likely that
+                    // we will have multiple objects per shard in the objects
+                    // Vec.
                     batched_requests.entry(shard)
                         .and_modify(|ent| {
-                            ent.push(BatchRequest::Put(put_req.clone()))
+                            ent.push(BatchRequest::Put(put_req))
                         })
                         .or_insert(vec![
-                            BatchRequest::Put(put_req)
+                            BatchRequest::Put(put_req.clone())
                         ]);
                 } else {
-                    put_object(job_action, mclient, &o, &etag); // TODO result
+                    let mclient = match get_client_from_hash(
+                        job_action,
+                        client_hash,
+                        shard
+                    ) {
+                        Ok(c) => c,
+                        Err(e) => {
+                            error!(
+                                "MD Update Worker: failed to get moray \
+                             client for shard number {}. Cannot update \
+                             metadata for {:#?}\n{}",
+                                shard, mobj, e
+                            );
+
+                            job_action.mark_object_error(
+                                &eobj.id,
+                                EvacuateObjectError::BadMorayClient,
+                            );
+                            continue;
+                        }
+                    };
+
+                    if let Err(e) = moray_client::put_object(
+                        mclient, &o, &etag)
+                    {
+                        job_action.mark_object_error(
+                            &eobj.id,
+                            EvacuateObjectError::MetadataUpdateFailed,
+                        );
+
+                        error!(
+                            "MD Update worker: Error updating \n\n{:#?}, with \
+                             dest_shark {:?}\n\n({}).",
+                            &o, dest_shark, e);
+
+                        continue;
+                    }
                 }
             }
             Err(e) => {
@@ -2888,7 +2849,10 @@ fn metadata_update_assignment(
             mclient.batch(
                 requests,
                 &ObjectMethodOptions::default(),
-                |_| {Ok(())}
+                |o| {
+
+                    Ok(())
+                }
             ).expect("mclient.batch call failed");
         }
     }
