@@ -120,6 +120,8 @@ pub enum InternalErrorCode {
     SharkNotFound,
     DuplicateShark,
     BadMantaObject,
+    BadMorayClient,
+    MetadataUpdateFailure,
     JobBuilderError,
     MaxObjectsLimit,
 }

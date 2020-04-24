@@ -1231,7 +1231,7 @@ dependencies = [
 [[package]]
 name = "moray"
 version = "0.9.3"
-source = "git+https://github.com/joyent/rust-moray?branch=batch_method#edcc65b3bbb810b15a5ba4e3966b0cde4d43782c"
+source = "git+https://github.com/joyent/rust-moray?branch=batch_method#13bd2a8bb4046423ac7811d31c5a7321a203a1a0"
 dependencies = [
  "cueball 0.3.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "cueball-static-resolver 0.3.0 (registry+https://github.com/rust-lang/crates.io-index)",
