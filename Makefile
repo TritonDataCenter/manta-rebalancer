@@ -35,8 +35,6 @@ BUILDIMAGE_PKGSRC = postgresql11-server-11.6 postgresql11-client-11.6
 
 ENGBLD_USE_BUILDIMAGE   = true
 
-#RUST_CLIPPY_ARGS ?= --features "postgres"
-
 CLEAN_FILES += rebalancer-agent-*.tar.gz
 
 ifeq ($(shell uname -s),SunOS)
@@ -89,7 +87,7 @@ publish: release
 	cp $(TOP)/$(RELEASE_TARBALL) $(ENGBLD_BITS_DIR)/$(NAME)/$(RELEASE_TARBALL)
 
 doc:
-	$(CARGO) doc --features "postgres"
+	$(CARGO) doc
 
 clean::
 	$(CARGO) clean
