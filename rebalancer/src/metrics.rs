@@ -120,7 +120,7 @@ pub fn register_metrics(labels: &ConfigMetrics) -> MetricsMap {
     const_labels.insert("service".to_string(), labels.service.clone());
     const_labels.insert("server".to_string(), labels.server.clone());
     const_labels.insert("datacenter".to_string(), labels.datacenter.clone());
-    const_labels.insert("zonename".to_string(), hostname.clone());
+    const_labels.insert("zonename".to_string(), hostname);
 
     let mut labels = METRICS_LABELS.lock().unwrap();
     *labels = Some(const_labels.clone());
@@ -136,7 +136,7 @@ pub fn register_metrics(labels: &ConfigMetrics) -> MetricsMap {
 
     metrics.insert(
         REQUEST_COUNT,
-        Metrics::MetricsCounterVec(request_counter.clone()),
+        Metrics::MetricsCounterVec(request_counter),
     );
 
     // The object counter maintains a count of the total number of objects that
@@ -150,7 +150,7 @@ pub fn register_metrics(labels: &ConfigMetrics) -> MetricsMap {
 
     metrics.insert(
         OBJECT_COUNT,
-        Metrics::MetricsCounterVec(object_counter.clone()),
+        Metrics::MetricsCounterVec(object_counter),
     );
 
     // The error counter maintains a list of errors encountered, broken down by
@@ -161,14 +161,14 @@ pub fn register_metrics(labels: &ConfigMetrics) -> MetricsMap {
     // track certain error types and maintain the rest in a generic bucket.
     let error_counter = register_counter_vec!(
         opts!(ERROR_COUNT, "Errors encountered.")
-            .const_labels(const_labels.clone()),
+            .const_labels(const_labels),
         &["error"]
     )
     .expect("failed to register error_count counter");
 
     metrics.insert(
         ERROR_COUNT,
-        Metrics::MetricsCounterVec(error_counter.clone()),
+        Metrics::MetricsCounterVec(error_counter),
     );
 
     metrics
