@@ -8,70 +8,169 @@
  * Copyright 2020 Joyent, Inc.
  */
 
-use manager::config::{Command, SubCommand};
-use manager::jobs::status::{self, StatusError};
-use rebalancer::error::Error;
-use rebalancer::util;
+//use manager::config::{Command, SubCommand};
+//use manager::jobs::status::{self, StatusError};
+use serde_json::Value::{self, Object};
+//use serde_json::Value::Object;
+use tabular::{Row, Table};
+//use rebalancer::util;
+#[macro_use]
+extern crate rebalancer;
 
-fn main() -> Result<(), Error> {
-    let _guard = util::init_global_logger();
-    let command = Command::new().unwrap_or_else(|e| {
-        eprintln!("Error parsing args: {}", e);
-        std::process::exit(1);
-    });
+use clap::{App, Arg, ArgMatches};
+use reqwest::{self, StatusCode};
 
-    match command.subcommand {
-        SubCommand::Server => Ok(()),
-        SubCommand::DoJob(_job) => {
-            println!("This function is currently not allowed from the CLI. \
-                Please contact the rebalancer-manager via its REST API on port \
-                8888 to create a job.");
-            std::process::exit(1);
+pub static JOBS_URL: &str = "http://localhost/jobs";
+
+fn display_result(values: Vec<Value>, matches: &ArgMatches) {
+    if matches.is_present("json") {
+        match serde_json::to_string_pretty(&values) {
+            Ok(v) => println!("{}", v),
+            Err(e) => println!("Failed to serialize value: {}", &e),
+        };
+        return;
+    }
+
+    let entry = &values[0];
+    let mut header = Row::new();
+    let mut fmtstr = "".to_owned();
+
+    if let Object(map) = entry {
+        for (key, _val) in map {
+            header.add_cell(key);
+            fmtstr.push_str("{:<}   ");
         }
-        SubCommand::Status(uuid) => match status::get_status(uuid) {
-            Ok(status_report) => {
-                for (status, count) in status_report.iter() {
-                    println!("{}: {}", status, count);
-                }
-                Ok(())
+    }
+
+    let mut table = Table::new(&fmtstr);
+    table.add_row(header);
+
+    for v in values.iter() {
+        if let Object(map) = v {
+            let mut row = Row::new();
+            for (_key, val) in map {
+                let mut element = format!("{}", val);
+                element.retain(|x| !['"'].contains(&x));
+                row.add_cell(&element);
             }
-            Err(e) => {
-                match e {
-                    StatusError::DBExists => {
-                        println!("Could not find Job UUID {}", uuid);
-                    }
-                    StatusError::LookupError | StatusError::Unknown => {
-                        println!("Internal Lookup Error");
-                    }
-                }
-                std::process::exit(1);
-            }
-        },
-        SubCommand::JobList => match status::list_jobs() {
-            Ok(list) => {
-                let width = 20;
-                println!(
-                    "{:<width$}{:<width$}{:<width$}",
-                    "JOB",
-                    "ACTION",
-                    "STATE",
-                    width = width
-                );
-                for job in list {
-                    println!(
-                        "{:<width$}{:<width$}{:<width$}",
-                        job.id,
-                        job.action,
-                        job.state,
-                        width = width,
-                    );
-                }
-                Ok(())
-            }
-            Err(_) => {
-                println!("Internal Job List Error");
-                std::process::exit(1);
-            }
-        },
+            table.add_row(row);
+        }
+    }
+    print!("{}", table);
+}
+
+fn manager_get_common(url: &str) -> std::result::Result<String, String> {
+    let mut response = match reqwest::get(url) {
+        Ok(resp) => resp,
+        Err(e) => {
+            let msg = format!("Request failed: {}", &e);
+            error!("{}", &msg);
+            return Err(msg);
+        }
+    };
+
+    match response.text() {
+        Ok(p) => Ok(p),
+        Err(e) => {
+            let msg = format!("Failed to parse response body: {}", &e);
+            error!("{}", &msg);
+            return Err(msg);
+        }
+    }
+}
+
+fn job_list(matches: &ArgMatches) {
+    let payload = match manager_get_common(JOBS_URL) {
+        Ok(p) => p,
+        Err(e) => return,
+    };
+
+    let result = match serde_json::from_str(&payload) {
+        Ok(v) => v,
+        Err(e) => {
+            let msg = format!("Failed to deserialize response: {}", &e);
+            error!("{}", &msg);
+            return;
+        }
+    };
+
+    display_result(result, matches);
+}
+
+fn job_get(matches: &ArgMatches) {
+    let uuid = match matches.value_of("uuid") {
+        Some(u) => u,
+        None => return,
+    };
+
+    let url = format!("{}/{}", JOBS_URL, uuid);
+
+    let payload = match manager_get_common(&url) {
+        Ok(p) => p,
+        Err(e) => return, // Err(e);
+    };
+
+    let result = match serde_json::from_str(&payload) {
+        Ok(v) => {
+            let mut vec = Vec::new();
+            vec.push(v);
+            vec
+        }
+        Err(e) => {
+            let msg = format!("Failed to deserialize response: {}", &e);
+            error!("{}", &msg);
+            return; // Err(msg)
+        }
+    };
+
+    display_result(result, matches);
+}
+
+fn process_subcmd_job(matches: &ArgMatches) {
+    if matches.is_present("list") {
+        job_list(matches);
+    } else if matches.is_present("get") {
+        job_get(matches);
+    }
+}
+
+fn main() {
+    let matches = App::new("rebalancer-adm")
+        .version("0.1.0")
+        .about("Rebalancer client utility")
+        .subcommand(
+            App::new("job")
+                .about("Job operations")
+                .arg(
+                    Arg::with_name("list")
+                        .short("l")
+                        .long("list")
+                        .help("List uuids and status of all known jobs"),
+                )
+                .arg(
+                    Arg::with_name("uuid")
+                        .short("u")
+                        .long("uuid")
+                        .takes_value(true)
+                        .help("List details of a specific job"),
+                )
+                .arg(
+                    Arg::with_name("get")
+                        .short("g")
+                        .long("get")
+                        .help("List details of a specific job")
+                        .requires("uuid")
+                        .conflicts_with("list"),
+                )
+                .arg(
+                    Arg::with_name("json")
+                        .short("j")
+                        .help("Prints information in json format"),
+                ),
+        )
+        .get_matches();
+
+    if let Some(ref matches) = matches.subcommand_matches("job") {
+        process_subcmd_job(matches);
     }
 }
