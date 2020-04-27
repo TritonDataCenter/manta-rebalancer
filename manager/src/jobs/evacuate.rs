@@ -433,6 +433,7 @@ pub enum DestSharkStatus {
 pub struct EvacuateDestShark {
     pub shark: StorageNode,
     pub status: DestSharkStatus,
+    pub assignment_count: u32,
 }
 
 /// Evacuate a given shark
@@ -795,6 +796,7 @@ impl EvacuateJob {
                 let new_shark = EvacuateDestShark {
                     shark: sn.to_owned(),
                     status: DestSharkStatus::Init,
+                    assignment_count: 0,
                 };
                 debug!("Adding new destination shark {:?} ", new_shark);
                 dest_shark_list.insert(sn.manta_storage_id.clone(), new_shark);
@@ -829,11 +831,11 @@ impl EvacuateJob {
         storinfo: Arc<S>,
         algo: &mod_storinfo::DefaultChooseAlgorithm,
         retries: u16,
-    ) -> Result<Vec<StorageNode>, Error>
+    ) -> Result<Vec<EvacuateDestShark>, Error>
     where
         S: SharkSource + 'static,
     {
-        let mut shark_list: Vec<StorageNode> = vec![];
+        let mut shark_list: Vec<EvacuateDestShark> = vec![];
         let mut tries = 0;
         let shark_list_retry_delay = std::time::Duration::from_millis(500);
 
@@ -850,7 +852,7 @@ impl EvacuateJob {
                 .read()
                 .expect("dest_shark_list read lock")
                 .values()
-                .map(|v| v.shark.to_owned())
+                .map(|v| v.to_owned())
                 .collect();
 
             if shark_list.is_empty() {
@@ -875,7 +877,7 @@ impl EvacuateJob {
             // Rust sort methods sort from lowest to highest order.  We want
             // the sharks with the most available_mb at the beginning of the
             // list so we reverse the sort.
-            shark_list.sort_by_key(|s| s.available_mb);
+            shark_list.sort_by_key(|s| s.shark.available_mb);
             shark_list.as_mut_slice().reverse();
             Ok(shark_list)
         }
@@ -1184,7 +1186,14 @@ impl EvacuateJob {
     }
 
     #[allow(clippy::ptr_arg)]
-    fn mark_dest_shark(&self, dest_shark: &StorageId, status: DestSharkStatus) {
+    fn mark_dest_shark<F>(
+        &self,
+        dest_shark: &StorageId,
+        status: DestSharkStatus,
+        post_fn: Option<F>,
+    ) where
+        F: Fn(&mut EvacuateDestShark) -> ()
+    {
         if let Some(shark) = self
             .dest_shark_list
             .write()
@@ -1193,6 +1202,9 @@ impl EvacuateJob {
         {
             debug!("Updating shark '{}' to {:?} state", dest_shark, status,);
             shark.status = status;
+            if let Some(func) = post_fn {
+                func(shark)
+            }
         } else {
             warn!("Could not find shark: '{}'", dest_shark);
         }
@@ -1200,12 +1212,25 @@ impl EvacuateJob {
 
     #[allow(clippy::ptr_arg)]
     fn mark_dest_shark_assigned(&self, dest_shark: &StorageId) {
-        self.mark_dest_shark(dest_shark, DestSharkStatus::Assigned)
+        self.mark_dest_shark(
+            dest_shark,
+            DestSharkStatus::Assigned,
+            Some(|shark: &mut EvacuateDestShark| {
+                shark.assignment_count += 1;
+            }),
+        )
     }
 
     #[allow(clippy::ptr_arg)]
     fn mark_dest_shark_ready(&self, dest_shark: &StorageId) {
-        self.mark_dest_shark(dest_shark, DestSharkStatus::Ready)
+        self.mark_dest_shark(
+            dest_shark,
+            DestSharkStatus::Ready,
+            Some(|shark: &mut EvacuateDestShark| {
+                shark.assignment_count -= 1;
+
+            }),
+        )
     }
 
     fn load_assignment_objects(
@@ -1906,15 +1931,28 @@ where
                 // shark.  In such a case, if we dont shuffle, the evacuate
                 // job could take much longer as every object would go to a
                 // single shark.
+
+                /* Old and busted
                 let mut rng = rand::thread_rng();
                 shark_list.as_mut_slice().shuffle(&mut rng);
+                */
+
+                // New hotness
+                shark_list.sort_by_key(|es| es.assignment_count);
+
+                let shark_list:Vec<StorageNode> = shark_list
+                    .into_iter()
+                    .map(|s| s.shark)
+                    .collect();
 
                 // For any active sharks that are not in the list remove them
                 // from the hash, send the stop command, join the associated
                 // threads.
                 let mut remove_keys = vec![];
                 for (key, _) in shark_hash.iter() {
-                    if shark_list.iter().any(|s| &s.manta_storage_id == key) {
+                    if shark_list
+                        .iter()
+                        .any(|s| &s.manta_storage_id == key) {
                         continue;
                     }
                     remove_keys.push(key.clone());
