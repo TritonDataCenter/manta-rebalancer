@@ -2875,7 +2875,6 @@ fn metadata_update_assignment(
                         _ => panic!("Unexpected Batch Request"),
                     };
 
-                    // TODO: Want Etag::specified_value()
                     let etag = br.options.etag
                         .specified_value()
                         .expect("etag should be specified");
