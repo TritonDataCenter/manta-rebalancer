@@ -14,6 +14,7 @@ use std::fs::File;
 use std::path::Path;
 use std::sync::{mpsc, Arc, Mutex, RwLock};
 use std::thread;
+use thread_id;
 
 use futures::future;
 use futures::future::*;
@@ -785,9 +786,9 @@ impl NewHandler for Agent {
 // Generates path and file name to store the object temporarily while
 // downloading.
 fn manta_tmp_path(owner: &str, object: &str) -> String {
-    let tid = thread::current().id();
+    let tid = thread_id::get();
     let path =
-        format!("{}/{}.{}.{:?}", REBALANCER_TEMP_DIR, owner, object, tid);
+        format!("{}/{}.{}.{}", REBALANCER_TEMP_DIR, owner, object, tid);
     path
 }
 
@@ -796,6 +797,23 @@ fn manta_tmp_path(owner: &str, object: &str) -> String {
 fn manta_file_path(owner: &str, object: &str) -> String {
     let path = format!("/manta/{}/{}", owner, object);
     path
+}
+
+fn file_move(src: &str, dst: &str) {
+    let parent = match Path::new(dst).parent() {
+        Some(p) => p,
+        None => panic!("Invalid destination path supplied."),
+    };
+
+    // Check to see if the destination directory exists.  If it does not, then
+    // create it now.
+    if !parent.exists() {
+        create_dir(parent.to_str().unwrap());
+    }
+
+    if let Err(e) = fs::rename(src, dst) {
+        panic!("Error renaming file {}: {}", src, e);
+    }
 }
 
 fn file_remove(file_path: &str) {
@@ -892,9 +910,7 @@ pub fn process_task(task: &mut Task) {
                 // Upon successful download, move the temprorary object to its
                 // rightful location (i.e. /manta/account/object).
                 let manta_path = manta_file_path(&task.owner, &task.object_id);
-                if let Err(e) = fs::rename(&tmp_path, &manta_path) {
-                    panic!("Error renaming file {}: {}", &tmp_path, e);
-                }
+                file_move(&tmp_path, &manta_path);
                 TaskStatus::Complete
             }
             Err(e) => {
