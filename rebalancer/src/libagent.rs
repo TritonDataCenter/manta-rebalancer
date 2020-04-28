@@ -889,6 +889,8 @@ pub fn process_task(task: &mut Task) {
     let status =
         match download(&url, &task.owner, &task.object_id, &task.md5sum) {
             Ok(_) => {
+                // Upon successful download, move the temprorary object to its
+                // rightful location (i.e. /manta/account/object).
                 let manta_path = manta_file_path(&task.owner, &task.object_id);
                 if let Err(e) = fs::rename(&tmp_path, &manta_path) {
                     panic!("Error renaming file {}: {}", &tmp_path, e);
@@ -896,6 +898,10 @@ pub fn process_task(task: &mut Task) {
                 TaskStatus::Complete
             }
             Err(e) => {
+                // If we failed to complete the download, remove the temporary
+                // file so that these kinds of things do not pile up.  It is
+                // worth mentioning that in all failure cases except one there
+                // will a partially downloaded object that requires clean-up.
                 file_remove(&tmp_path);
                 TaskStatus::Failed(e)
             }
@@ -1090,6 +1096,8 @@ pub fn router(f: fn(&mut Task), config: Option<AgentConfig>) -> Router {
         create_dir(REBALANCER_SCHEDULED_DIR);
         create_dir(REBALANCER_FINISHED_DIR);
 
+        // If there are any remnants of partially downloaded objects in the
+        // temp directory, rm -rf the whole thing.
         if Path::new(REBALANCER_TEMP_DIR).exists() {
             let result = fs::remove_dir_all(REBALANCER_TEMP_DIR);
             assert!(result.is_ok());
