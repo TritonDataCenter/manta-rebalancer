@@ -14,6 +14,7 @@ use std::fs::File;
 use std::path::Path;
 use std::sync::{mpsc, Arc, Mutex, RwLock};
 use std::thread;
+use thread_id;
 
 use futures::future;
 use futures::future::*;
@@ -47,6 +48,7 @@ type Assignments = HashMap<String, Arc<RwLock<Assignment>>>;
 
 static REBALANCER_SCHEDULED_DIR: &str = "/var/tmp/rebalancer/scheduled";
 static REBALANCER_FINISHED_DIR: &str = "/var/tmp/rebalancer/completed";
+static REBALANCER_TEMP_DIR: &str = "/manta/rebalancer";
 
 #[derive(Clone, Default, Deserialize)]
 pub struct AgentConfig {
@@ -781,6 +783,15 @@ impl NewHandler for Agent {
     }
 }
 
+// Generates path and file name to store the object temporarily while
+// downloading.
+fn manta_tmp_path(owner: &str, object: &str) -> String {
+    let tid = thread_id::get();
+    let path =
+        format!("{}/{}.{}.{}", REBALANCER_TEMP_DIR, owner, object, tid);
+    path
+}
+
 // Used to construct the full path of an object on a storage
 // node given the owner id and object id.
 fn manta_file_path(owner: &str, object: &str) -> String {
@@ -788,16 +799,35 @@ fn manta_file_path(owner: &str, object: &str) -> String {
     path
 }
 
-fn file_create(owner: &str, object: &str) -> File {
-    let parent_dir = format!("/manta/{}", owner);
-    let object_path = manta_file_path(owner, object);
-
-    match fs::create_dir_all(parent_dir) {
-        Err(e) => panic!("Error creating directory {}", e),
-        Ok(_) => true,
+fn file_move(src: &str, dst: &str) {
+    let parent = match Path::new(dst).parent() {
+        Some(p) => p,
+        None => panic!("Invalid destination path supplied."),
     };
 
-    match File::create(&object_path) {
+    // Check to see if the destination directory exists.  If it does not, then
+    // create it now.
+    if !parent.exists() {
+        create_dir(parent.to_str().unwrap());
+    }
+
+    if let Err(e) = fs::rename(src, dst) {
+        panic!("Error renaming file {}: {}", src, e);
+    }
+}
+
+fn file_remove(file_path: &str) {
+    if !std::path::Path::new(file_path).exists() {
+        return;
+    }
+
+    if let Err(e) = fs::remove_file(&file_path) {
+        panic!("Error removing file {}: {}", &file_path, e);
+    }
+}
+
+fn file_create(file_path: &str) -> File {
+    match File::create(&file_path) {
         Err(e) => panic!("Error creating file {}", e),
         Ok(file) => file,
     }
@@ -810,8 +840,6 @@ fn download(
     object: &str,
     csum: &str,
 ) -> Result<(), ObjectSkippedReason> {
-    let file_path = manta_file_path(owner, object);
-
     let mut response = match reqwest::get(uri) {
         Ok(resp) => resp,
         Err(e) => {
@@ -829,7 +857,8 @@ fn download(
 
     trace!("{}", msg);
 
-    let mut file = file_create(owner, object);
+    let tmp_path = manta_tmp_path(owner, object);
+    let mut file = file_create(&tmp_path);
 
     match std::io::copy(&mut response, &mut file) {
         Ok(_) => (),
@@ -839,7 +868,7 @@ fn download(
         }
     };
 
-    if calculate_md5(&file_path) == csum {
+    if calculate_md5(&tmp_path) == csum {
         Ok(())
     } else {
         error!("Checksum failed for {}/{}.", owner, object);
@@ -871,12 +900,27 @@ pub fn process_task(task: &mut Task) {
         &task.source.manta_storage_id, &task.owner, &task.object_id
     );
 
+    let tmp_path = manta_tmp_path(&task.owner, &task.object_id);
+
     // Reach out to the storage node to download
     // the object.
     let status =
         match download(&url, &task.owner, &task.object_id, &task.md5sum) {
-            Ok(_) => TaskStatus::Complete,
-            Err(e) => TaskStatus::Failed(e),
+            Ok(_) => {
+                // Upon successful download, move the temprorary object to its
+                // rightful location (i.e. /manta/account/object).
+                let manta_path = manta_file_path(&task.owner, &task.object_id);
+                file_move(&tmp_path, &manta_path);
+                TaskStatus::Complete
+            }
+            Err(e) => {
+                // If we failed to complete the download, remove the temporary
+                // file so that these kinds of things do not pile up.  It is
+                // worth mentioning that in all failure cases except one there
+                // will a partially downloaded object that requires clean-up.
+                file_remove(&tmp_path);
+                TaskStatus::Failed(e)
+            }
         };
 
     task.set_status(status);
@@ -895,6 +939,29 @@ fn assignment_get(
         Some(assignment) => Some(Arc::clone(&assignment)),
         None => None,
     }
+}
+
+fn log_file_stats(task: &Task, uuid: &str) {
+    let path = manta_file_path(&task.owner, &task.object_id);
+
+    // If this does not work for some unknown reason, it's not important
+    // enough to stop everything.  Log the failure and move on.
+    let metadata = match fs::metadata(&path) {
+        Ok(md) => md,
+        Err(e) => {
+            error!("Failed to get object metadata for {}/{}: {}",
+                task.owner, task.object_id, e);
+            return;
+        },
+    };
+
+    info!(
+        "assignment: {}, owner: {}, object: {}, bytes: {}",
+        uuid,
+        task.owner,
+        task.object_id,
+        metadata.len()
+    );
 }
 
 // Invoked by the worker thread, this function receives a caller-supplied
@@ -973,7 +1040,10 @@ fn process_assignment(
         match t.status {
             TaskStatus::Pending => (),
             TaskStatus::Running => (),
-            TaskStatus::Complete => tmp.stats.complete += 1,
+            TaskStatus::Complete => {
+                log_file_stats(&t, &uuid);
+                tmp.stats.complete += 1;
+            },
             TaskStatus::Failed(e) => {
                 if let Some(m) = metrics.clone() {
                     counter_vec_inc(&m, ERROR_COUNT, Some(&e.to_string()));
@@ -1041,6 +1111,15 @@ pub fn router(f: fn(&mut Task), config: Option<AgentConfig>) -> Router {
 
         create_dir(REBALANCER_SCHEDULED_DIR);
         create_dir(REBALANCER_FINISHED_DIR);
+
+        // If there are any remnants of partially downloaded objects in the
+        // temp directory, rm -rf the whole thing.
+        if Path::new(REBALANCER_TEMP_DIR).exists() {
+            let result = fs::remove_dir_all(REBALANCER_TEMP_DIR);
+            assert!(result.is_ok());
+        }
+
+        create_dir(REBALANCER_TEMP_DIR);
 
         for _ in 0..1 {
             let rx = Arc::clone(&rx);
