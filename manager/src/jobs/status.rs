@@ -25,9 +25,8 @@ use inflector::cases::titlecase::to_title_case;
 use strum::IntoEnumIterator;
 use uuid::Uuid;
 
-static STATUS_COUNT_QUERY: & str =
-    "SELECT status, count(status) \
-     FROM  evacuateobjects  GROUP BY status";
+static STATUS_COUNT_QUERY: &str = "SELECT status, count(status) \
+                                   FROM  evacuateobjects  GROUP BY status";
 
 #[derive(Debug, EnumString)]
 pub enum StatusError {

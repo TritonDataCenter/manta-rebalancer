@@ -625,11 +625,7 @@ fn post_assignment_handler(
 
                 // Before we even process the assignment, save it to persistent
                 // storage.
-                assignment_save(
-                    &uuid,
-                    REBALANCER_SCHEDULED_DIR,
-                    assignment,
-                );
+                assignment_save(&uuid, REBALANCER_SCHEDULED_DIR, assignment);
 
                 // Assignment has been saved.  Remove its id from the the table.
                 agent.quiescing.lock().unwrap().remove(&uuid);
@@ -787,8 +783,7 @@ impl NewHandler for Agent {
 // downloading.
 fn manta_tmp_path(owner: &str, object: &str) -> String {
     let tid = thread_id::get();
-    let path =
-        format!("{}/{}.{}.{}", REBALANCER_TEMP_DIR, owner, object, tid);
+    let path = format!("{}/{}.{}.{}", REBALANCER_TEMP_DIR, owner, object, tid);
     path
 }
 
@@ -949,10 +944,12 @@ fn log_file_stats(task: &Task, uuid: &str) {
     let metadata = match fs::metadata(&path) {
         Ok(md) => md,
         Err(e) => {
-            error!("Failed to get object metadata for {}/{}: {}",
-                task.owner, task.object_id, e);
+            error!(
+                "Failed to get object metadata for {}/{}: {}",
+                task.owner, task.object_id, e
+            );
             return;
-        },
+        }
     };
 
     info!(
@@ -1043,7 +1040,7 @@ fn process_assignment(
             TaskStatus::Complete => {
                 log_file_stats(&t, &uuid);
                 tmp.stats.complete += 1;
-            },
+            }
             TaskStatus::Failed(e) => {
                 if let Some(m) = metrics.clone() {
                     counter_vec_inc(&m, ERROR_COUNT, Some(&e.to_string()));
@@ -1105,8 +1102,7 @@ pub fn router(f: fn(&mut Task), config: Option<AgentConfig>) -> Router {
             mpsc::channel();
         let tx = Arc::new(Mutex::new(w));
         let rx = Arc::new(Mutex::new(r));
-        let agent =
-            Agent::new(tx, Arc::new(Mutex::new(agent_metrics.clone())));
+        let agent = Agent::new(tx, Arc::new(Mutex::new(agent_metrics.clone())));
         let pool = ThreadPool::new(1);
 
         create_dir(REBALANCER_SCHEDULED_DIR);
