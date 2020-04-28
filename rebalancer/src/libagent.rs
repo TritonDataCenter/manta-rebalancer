@@ -918,6 +918,29 @@ fn assignment_get(
     }
 }
 
+fn log_file_stats(task: &Task, uuid: &str) {
+    let path = manta_file_path(&task.owner, &task.object_id);
+
+    // If this does not work for some unknown reason, it's not important
+    // enough to stop everything.  Log the failure and move on.
+    let metadata = match fs::metadata(&path) {
+        Ok(md) => md,
+        Err(e) => {
+            error!("Failed to get object metadata for {}/{}: {}",
+                task.owner, task.object_id, e);
+            return;
+        },
+    };
+
+    info!(
+        "assignment: {}, owner: {}, object: {}, bytes: {}",
+        uuid,
+        task.owner,
+        task.object_id,
+        metadata.len()
+    );
+}
+
 // Invoked by the worker thread, this function receives a caller-supplied
 // HashMap and a uuid that it uses as a key to find the assignment within
 // it.  Once it has obtained it, it processes each task in the assignment
@@ -994,7 +1017,10 @@ fn process_assignment(
         match t.status {
             TaskStatus::Pending => (),
             TaskStatus::Running => (),
-            TaskStatus::Complete => tmp.stats.complete += 1,
+            TaskStatus::Complete => {
+                log_file_stats(&t, &uuid);
+                tmp.stats.complete += 1;
+            },
             TaskStatus::Failed(e) => {
                 if let Some(m) = metrics.clone() {
                     counter_vec_inc(&m, ERROR_COUNT, Some(&e.to_string()));
