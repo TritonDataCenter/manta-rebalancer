@@ -782,7 +782,8 @@ impl NewHandler for Agent {
     }
 }
 
-// Generates path and file name to store object temporarily while downloading.
+// Generates path and file name to store the object temporarily while
+// downloading.
 fn manta_tmp_path(owner: &str, object: &str) -> String {
     let tid = thread::current().id();
     let path =
