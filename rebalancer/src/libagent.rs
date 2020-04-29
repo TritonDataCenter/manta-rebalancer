@@ -646,9 +646,7 @@ fn post_assignment_handler(
 
                 // Signal the workers that there is a new assignent ready for
                 // processing.
-println!("AAAAAAAAAAAAAAAAAAAAAAA");
                 assignment_signal(&agent, &uuid);
-println!("BBBBBBBBBBBBBBBBBBBBBBB");
                 future::ok((state, res))
             }
 
@@ -841,7 +839,6 @@ fn download(
     csum: &str,
     client: &Client,
 ) -> Result<(), ObjectSkippedReason> {
-println!("XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX");
     let mut response = match client.get(uri).send() {
         Ok(resp) => resp,
         Err(e) => {
@@ -1137,7 +1134,7 @@ pub fn router(
 
         create_dir(REBALANCER_TEMP_DIR);
 
-        for _ in 1..workers {
+        for _ in 0..workers {//workers {
             let rx = Arc::clone(&rx);
             let assignments = Arc::clone(&agent.assignments);
             let m = agent_metrics.clone();
@@ -1151,7 +1148,6 @@ pub fn router(
                         return;
                     }
                 };
-println!("CCCCCCCCCCCCCCCCCCCCCCCCCC");
                 process_assignment(
                     Arc::clone(&assignments),
                     uuid,
