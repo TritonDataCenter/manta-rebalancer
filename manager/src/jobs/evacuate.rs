@@ -467,8 +467,8 @@ impl EvacuateJob {
             options,
             max_objects,
             post_client: reqwest::Client::new(),
-            bytes_transferred: AtomicU64::new(0),
             get_client: reqwest::Client::new(),
+            bytes_transferred: AtomicU64::new(0),
         })
     }
 
