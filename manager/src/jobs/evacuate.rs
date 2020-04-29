@@ -38,8 +38,8 @@ use std::error::Error as _Error;
 use std::io::{ErrorKind, Write};
 use std::str::FromStr;
 use std::string::ToString;
-use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::thread;
 use std::time::Duration;
 
@@ -607,8 +607,10 @@ impl EvacuateJob {
                 set_run_error(&mut ret, e);
             });
 
-        debug!("Evacuate Job transferred {} bytes",
-               job_action.bytes_transferred.load(Ordering::SeqCst));
+        debug!(
+            "Evacuate Job transferred {} bytes",
+            job_action.bytes_transferred.load(Ordering::SeqCst)
+        );
         ret
     }
 
@@ -2788,11 +2790,13 @@ fn metadata_update_assignment(
             }
         };
 
-        eobj.object.get("contentLength")
+        eobj.object
+            .get("contentLength")
             .and_then(|cl| {
                 if let Some(bytes) = cl.as_u64() {
                     // TODO: metrics
-                    job_action.bytes_transferred
+                    job_action
+                        .bytes_transferred
                         .fetch_add(bytes, Ordering::SeqCst);
                 } else {
                     warn!("Could not get bytes as number from {}", cl);
