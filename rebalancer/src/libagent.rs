@@ -1134,7 +1134,7 @@ pub fn router(
 
         create_dir(REBALANCER_TEMP_DIR);
 
-        for _ in 0..workers {//workers {
+        for _ in 0..workers {
             let rx = Arc::clone(&rx);
             let assignments = Arc::clone(&agent.assignments);
             let m = agent_metrics.clone();
