@@ -84,8 +84,7 @@ pub fn metrics_init(cfg: metrics::ConfigMetrics) {
     )
     .expect("failed to register skip_count counter");
 
-    metrics
-        .insert(SKIP_COUNT, Metrics::MetricsCounterVec(skip_counter));
+    metrics.insert(SKIP_COUNT, Metrics::MetricsCounterVec(skip_counter));
 
     // Take the fully formed set of metrics and store it globally.
     let mut global_metrics = METRICS.lock().unwrap();

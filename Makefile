@@ -24,7 +24,7 @@ RELEASE_TARBALL     := $(NAME)-pkg-$(STAMP).tar.gz
 RELSTAGEDIR         := /tmp/$(NAME)-$(STAMP)
 
 # This image is triton-origin-x86_64-19.4.0
-BASE_IMAGE_UUID = 5417ab20-3156-11ea-8b19-2b66f5e7a439
+BASE_IMAGE_UUID = 59ba2e5e-976f-4e09-8aac-a4a7ef0395f5
 BUILDIMAGE_NAME = mantav2-rebalancer
 BUILDIMAGE_DESC = Manta Rebalancer
 AGENTS          = amon config registrar

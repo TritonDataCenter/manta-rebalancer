@@ -134,10 +134,7 @@ pub fn register_metrics(labels: &ConfigMetrics) -> MetricsMap {
     )
     .expect("failed to register incoming_request_count counter");
 
-    metrics.insert(
-        REQUEST_COUNT,
-        Metrics::MetricsCounterVec(request_counter),
-    );
+    metrics.insert(REQUEST_COUNT, Metrics::MetricsCounterVec(request_counter));
 
     // The object counter maintains a count of the total number of objects that
     // have been processed (whether successfully or not).
@@ -148,10 +145,7 @@ pub fn register_metrics(labels: &ConfigMetrics) -> MetricsMap {
     )
     .expect("failed to register object_count counter");
 
-    metrics.insert(
-        OBJECT_COUNT,
-        Metrics::MetricsCounterVec(object_counter),
-    );
+    metrics.insert(OBJECT_COUNT, Metrics::MetricsCounterVec(object_counter));
 
     // The error counter maintains a list of errors encountered, broken down by
     // the type of error observed.  Note that in order to avoid a polynomial
@@ -160,16 +154,12 @@ pub fn register_metrics(labels: &ConfigMetrics) -> MetricsMap {
     // encounter and in the event that there are too many possibilities, only
     // track certain error types and maintain the rest in a generic bucket.
     let error_counter = register_counter_vec!(
-        opts!(ERROR_COUNT, "Errors encountered.")
-            .const_labels(const_labels),
+        opts!(ERROR_COUNT, "Errors encountered.").const_labels(const_labels),
         &["error"]
     )
     .expect("failed to register error_count counter");
 
-    metrics.insert(
-        ERROR_COUNT,
-        Metrics::MetricsCounterVec(error_counter),
-    );
+    metrics.insert(ERROR_COUNT, Metrics::MetricsCounterVec(error_counter));
 
     metrics
 }

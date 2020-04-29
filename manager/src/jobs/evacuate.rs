@@ -3048,6 +3048,7 @@ mod tests {
     use rand::Rng;
     use rebalancer::libagent::{router as agent_router, AgentAssignmentStats};
     use rebalancer::util;
+    use reqwest::Client;
 
     lazy_static! {
         static ref INITIALIZED: Mutex<bool> = Mutex::new(false);
@@ -3088,7 +3089,7 @@ mod tests {
     // declares the task as having been _successfully_ processed.  This will
     // generally be used when testing the "happy path" of most evacuation job
     // functionality.
-    fn process_task_always_pass(task: &mut Task) {
+    fn process_task_always_pass(task: &mut Task, _client: &Client) {
         task.set_status(TaskStatus::Complete);
     }
 
