@@ -3067,7 +3067,7 @@ mod tests {
     // declares the task as having been _successfully_ processed.  This will
     // generally be used when testing the "happy path" of most evacuation job
     // functionality.
-    fn process_task_always_pass(task: &mut Task, client: &Client) {
+    fn process_task_always_pass(task: &mut Task, _client: &Client) {
         task.set_status(TaskStatus::Complete);
     }
 
