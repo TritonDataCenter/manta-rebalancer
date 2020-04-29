@@ -37,7 +37,7 @@ use crate::metrics::{
     REQUEST_COUNT,
 };
 
-use reqwest::StatusCode;
+use reqwest::{Client, StatusCode};
 use rusqlite;
 use serde_derive::{Deserialize, Serialize};
 use threadpool::ThreadPool;
@@ -60,8 +60,10 @@ pub struct AgentConfig {
 pub struct ConfigServer {
     // The IP address on which the agent should listen for incoming connections.
     pub host: String,
-    // The port that the agent  should listen on for incoming connections.
+    // The port that the agent should listen on for incoming connections.
     pub port: u16,
+    // The number of worker threads used to process assignments.
+    pub workers: usize,
 }
 
 impl Default for ConfigServer {
@@ -69,6 +71,7 @@ impl Default for ConfigServer {
         Self {
             host: "0.0.0.0".into(),
             port: 7878,
+            workers: 1,
         }
     }
 }
@@ -643,7 +646,9 @@ fn post_assignment_handler(
 
                 // Signal the workers that there is a new assignent ready for
                 // processing.
+println!("AAAAAAAAAAAAAAAAAAAAAAA");
                 assignment_signal(&agent, &uuid);
+println!("BBBBBBBBBBBBBBBBBBBBBBB");
                 future::ok((state, res))
             }
 
@@ -834,8 +839,10 @@ fn download(
     owner: &str,
     object: &str,
     csum: &str,
+    client: &Client,
 ) -> Result<(), ObjectSkippedReason> {
-    let mut response = match reqwest::get(uri) {
+println!("XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX");
+    let mut response = match client.get(uri).send() {
         Ok(resp) => resp,
         Err(e) => {
             error!("Request failed: {}", &e);
@@ -871,7 +878,7 @@ fn download(
     }
 }
 
-pub fn process_task(task: &mut Task) {
+pub fn process_task(task: &mut Task, client: &Client) {
     let file_path = manta_file_path(&task.owner, &task.object_id);
     let path = Path::new(&file_path);
 
@@ -899,24 +906,29 @@ pub fn process_task(task: &mut Task) {
 
     // Reach out to the storage node to download
     // the object.
-    let status =
-        match download(&url, &task.owner, &task.object_id, &task.md5sum) {
-            Ok(_) => {
-                // Upon successful download, move the temprorary object to its
-                // rightful location (i.e. /manta/account/object).
-                let manta_path = manta_file_path(&task.owner, &task.object_id);
-                file_move(&tmp_path, &manta_path);
-                TaskStatus::Complete
-            }
-            Err(e) => {
-                // If we failed to complete the download, remove the temporary
-                // file so that these kinds of things do not pile up.  It is
-                // worth mentioning that in all failure cases except one there
-                // will a partially downloaded object that requires clean-up.
-                file_remove(&tmp_path);
-                TaskStatus::Failed(e)
-            }
-        };
+    let status = match download(
+        &url,
+        &task.owner,
+        &task.object_id,
+        &task.md5sum,
+        client,
+    ) {
+        Ok(_) => {
+            // Upon successful download, move the temprorary object to its
+            // rightful location (i.e. /manta/account/object).
+            let manta_path = manta_file_path(&task.owner, &task.object_id);
+            file_move(&tmp_path, &manta_path);
+            TaskStatus::Complete
+        }
+        Err(e) => {
+            // If we failed to complete the download, remove the temporary
+            // file so that these kinds of things do not pile up.  It is
+            // worth mentioning that in all failure cases except one there
+            // will a partially downloaded object that requires clean-up.
+            file_remove(&tmp_path);
+            TaskStatus::Failed(e)
+        }
+    };
 
     task.set_status(status);
 }
@@ -981,8 +993,9 @@ fn log_file_stats(task: &Task, uuid: &str) {
 fn process_assignment(
     assignments: Arc<Mutex<Assignments>>,
     uuid: String,
-    f: fn(&mut Task),
+    f: fn(&mut Task, &Client),
     metrics: Option<MetricsMap>,
+    client: &Client,
 ) {
     // If we are unsuccessful in loading the assignment from disk, there is
     // nothing left to do here, other than return.
@@ -1017,7 +1030,7 @@ fn process_assignment(
         };
 
         // Process it.
-        f(&mut t);
+        f(&mut t, client);
 
         // Grab the write lock on the assignment.  It will only be held until
         // the end of the loop (which is not for very long).
@@ -1090,20 +1103,27 @@ fn agent_start_metrics_server(config: &AgentConfig) -> MetricsMap {
 // Create a `Router`.  This function is public because it will have external
 // consumers, namely the rebalancer zone test framework.
 #[allow(clippy::many_single_char_names)]
-pub fn router(f: fn(&mut Task), config: Option<AgentConfig>) -> Router {
+pub fn router(
+    f: fn(&mut Task, &Client),
+    config: Option<AgentConfig>,
+) -> Router {
     build_simple_router(|route| {
         let mut agent_metrics: Option<MetricsMap> = None;
+        let mut workers = 1;
 
         if let Some(c) = config {
             agent_metrics = Some(agent_start_metrics_server(&c));
+            workers = c.server.workers;
         }
+
+        assert!(workers > 0);
 
         let (w, r): (mpsc::Sender<String>, mpsc::Receiver<String>) =
             mpsc::channel();
         let tx = Arc::new(Mutex::new(w));
         let rx = Arc::new(Mutex::new(r));
         let agent = Agent::new(tx, Arc::new(Mutex::new(agent_metrics.clone())));
-        let pool = ThreadPool::new(1);
+        let pool = ThreadPool::new(workers);
 
         create_dir(REBALANCER_SCHEDULED_DIR);
         create_dir(REBALANCER_FINISHED_DIR);
@@ -1117,10 +1137,11 @@ pub fn router(f: fn(&mut Task), config: Option<AgentConfig>) -> Router {
 
         create_dir(REBALANCER_TEMP_DIR);
 
-        for _ in 0..1 {
+        for _ in 1..workers {
             let rx = Arc::clone(&rx);
             let assignments = Arc::clone(&agent.assignments);
             let m = agent_metrics.clone();
+            let client = reqwest::Client::new();
 
             pool.execute(move || loop {
                 let uuid = match rx.lock().unwrap().recv() {
@@ -1130,11 +1151,13 @@ pub fn router(f: fn(&mut Task), config: Option<AgentConfig>) -> Router {
                         return;
                     }
                 };
+println!("CCCCCCCCCCCCCCCCCCCCCCCCCC");
                 process_assignment(
                     Arc::clone(&assignments),
                     uuid,
                     f,
                     m.clone(),
+                    &client,
                 );
             });
         }
