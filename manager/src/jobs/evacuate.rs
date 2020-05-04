@@ -48,7 +48,7 @@ use crossbeam_channel::TryRecvError;
 use crossbeam_deque::{Injector, Steal};
 use libmanta::moray::{MantaObject, MantaObjectShark};
 use moray::client::MorayClient;
-use moray::objects::{BatchRequest, BatchPutRequest, Etag, MethodOptions as
+use moray::objects::{BatchRequest, BatchPutOp, Etag, MethodOptions as
 ObjectMethodOptions};
 use quickcheck::{Arbitrary, Gen};
 use quickcheck_helpers::random::string as random_string;
@@ -2765,7 +2765,7 @@ fn metadata_update_assignment(
                     let mut options = ObjectMethodOptions::default();
                     options.etag = Etag::Specified(etag.to_string());
 
-                    let put_req = BatchPutRequest {
+                    let put_req = BatchPutOp {
                         bucket: "manta".to_string(),
                         options,
                         key,
@@ -2870,7 +2870,7 @@ fn metadata_update_assignment(
                 error!("Batch update failed, retrying: {}", e);
 
                 for r in requests.into_iter() {
-                    let br: BatchPutRequest = match r {
+                    let br: BatchPutOp = match r {
                         BatchRequest::Put(br) => br,
                         _ => panic!("Unexpected Batch Request"),
                     };
