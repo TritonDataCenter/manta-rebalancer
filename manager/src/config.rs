@@ -69,7 +69,7 @@ impl Default for ConfigOptions {
             max_assignment_size: DEFAULT_MAX_ASSIGNMENT_SIZE,
             max_metadata_update_threads: DEFAULT_MAX_METADATA_UPDATE_THREADS,
             max_sharks: DEFAULT_MAX_SHARKS,
-            use_static_md_update_threads: false,
+            use_static_md_update_threads: true,
             static_queue_depth: DEFAULT_STATIC_QUEUE_DEPTH,
         }
     }
