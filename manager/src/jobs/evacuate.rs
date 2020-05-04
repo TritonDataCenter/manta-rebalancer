@@ -2595,7 +2595,7 @@ fn metadata_update_worker_static(
         );
 
         loop {
-            trace!("Getting assignment");
+            let now = std::time::Instant::now();
             let ace = match static_update_rx.recv() {
                 Ok(msg) => match msg {
                     UpdateWorkerMsg::Data(d) => d,
@@ -2613,6 +2613,12 @@ fn metadata_update_worker_static(
                     break;
                 }
             };
+
+            // Make it easier to track how busy our metadata update threads are.
+            trace!(
+                "Waited {}ms to get an assignment",
+                now.elapsed().as_millis()
+            );
 
             let id = ace.id.clone();
             trace!("Assignment Metadata Update Start: {}", id);
