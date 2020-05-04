@@ -39,14 +39,13 @@ use std::io::{ErrorKind, Write};
 use std::str::FromStr;
 use std::string::ToString;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use std::time::Duration;
 
 use crossbeam_channel as crossbeam;
 use crossbeam_channel::TryRecvError;
 use crossbeam_deque::{Injector, Steal};
-use crossbeam_queue::{ArrayQueue, PopError, PushError};
 use libmanta::moray::{MantaObject, MantaObjectShark};
 use moray::client::MorayClient;
 use quickcheck::{Arbitrary, Gen};
@@ -2579,8 +2578,7 @@ enum UpdateWorkerMsg {
 
 fn metadata_update_worker_static(
     job_action: Arc<EvacuateJob>,
-    queue_front: Arc<ArrayQueue<UpdateWorkerMsg>>,
-    cv_pair: Arc<(Mutex<()>, Condvar)>,
+    static_update_rx: crossbeam::Receiver<UpdateWorkerMsg>,
 ) -> impl Fn() {
     move || {
         // For each worker we create a hash of moray clients indexed by shard.
@@ -2596,11 +2594,9 @@ fn metadata_update_worker_static(
             thread::current().id()
         );
 
-        let (lock, cv) = &*cv_pair;
-
         loop {
             trace!("Getting assignment");
-            let ace = match queue_front.pop() {
+            let ace = match static_update_rx.recv() {
                 Ok(msg) => match msg {
                     UpdateWorkerMsg::Data(d) => d,
                     UpdateWorkerMsg::Stop => {
@@ -2609,31 +2605,17 @@ fn metadata_update_worker_static(
                              exiting",
                             thread::current().id()
                         );
-
                         break;
                     }
                 },
-                Err(PopError) => {
-                    // We don't care what the value of the lock is, this is
-                    // only here so that we don't busy wait on an empty array.
-                    trace!("queue empty, waiting for element to be added");
-
-                    let r = cv
-                        .wait_timeout(
-                            lock.lock().expect("cv wait lock"),
-                            std::time::Duration::from_secs(5),
-                        )
-                        .expect("queue cv wait");
-
-                    if r.1.timed_out() {
-                        trace!("queue wait timed out");
-                    }
-                    continue;
+                Err(e) => {
+                    error!("Error receiving UpdateWorkerMessage: {}", e);
+                    break;
                 }
             };
 
             let id = ace.id.clone();
-            trace!("Got assignment {}", id);
+            trace!("Assignment Metadata Update Start: {}", id);
             metadata_update_assignment(&job_action, ace, &mut client_hash);
             trace!("Assignment Metadata Update Complete: {}", id);
         }
@@ -2936,26 +2918,31 @@ fn metadata_update_broker_dynamic(
         .map_err(Error::from)
 }
 
+// Note how we create a separate channel here.  We could simply increase
+// the capacity of the "static_tx/rx" channel in the EvacuateJob::run()
+// method but it is cleaner to keep that function generic and put the
+// logic for between static and dynamic metadata update threads in the
+// start_metadata_update_broker.
+// Instead of using a bounded queue with condvars here we instead use the
+// crossbeam bounded channel as our queue for a much cleaner implementation.
+// The bounded channel will block on both send(if full) and receive(if empty).
 fn _update_broker_static(
     job_action: Arc<EvacuateJob>,
     md_update_rx: crossbeam::Receiver<AssignmentCacheEntry>,
 ) -> Result<(), Error> {
     let num_threads = job_action.options.max_metadata_update_threads;
     let queue_depth = job_action.options.static_queue_depth;
-    let queue = ArrayQueue::new(queue_depth);
-    let q_back = Arc::new(queue);
+    let (static_tx, static_rx) = crossbeam_channel::bounded(queue_depth);
     let mut thread_handles = vec![];
-    let cv_pair = Arc::new((Mutex::new(()), Condvar::new()));
-    let (_, cv) = &*cv_pair;
 
     // Spin up static threads
     for i in 0..num_threads {
+        let th_rx = static_rx.clone();
         let handle = thread::Builder::new()
             .name(format!("MD Update [{}]", i))
             .spawn(metadata_update_worker_static(
                 Arc::clone(&job_action),
-                Arc::clone(&q_back),
-                Arc::clone(&cv_pair),
+                th_rx,
             ))
             .expect("create static MD update thread");
 
@@ -2967,19 +2954,16 @@ fn _update_broker_static(
             Ok(ace) => ace,
             Err(e) => {
                 for _ in 0..num_threads {
-                    while let Err(PushError(_)) =
-                        q_back.push(UpdateWorkerMsg::Stop)
-                    {
-                        debug!(
-                            "Assignment queue is full, cannot push 'STOP', \
-                             sleeping"
+                    if let Err(e) = static_tx.send(UpdateWorkerMsg::Stop) {
+                        error!(
+                            "Error sending stop to static metadata update \
+                             worker thread: {}",
+                            e
                         );
-                        thread::sleep(std::time::Duration::from_millis(200));
                     }
-                    cv.notify_all();
                 }
                 warn!(
-                    "MD Update: Error receiving metadata from assignment \
+                    "MD Update: cannot receive metadata from assignment \
                      checker thread: {}",
                     e
                 );
@@ -2987,16 +2971,14 @@ fn _update_broker_static(
             }
         };
 
-        let mut msg = UpdateWorkerMsg::Data(ace);
-        while let Err(PushError(m)) = q_back.push(msg) {
-            msg = m;
-            debug!(
-                "Assignment queue is full cannot push DATA, \
-                 sleeping"
+        let msg = UpdateWorkerMsg::Data(ace);
+        if let Err(e) = static_tx.send(msg) {
+            error!(
+                "Error sending assignment cache entry to static metadata \
+                 update worker thread: {}",
+                e
             );
-            thread::sleep(std::time::Duration::from_millis(200));
         }
-        cv.notify_all();
     }
 
     for handle in thread_handles.into_iter() {
