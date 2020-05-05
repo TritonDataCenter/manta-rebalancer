@@ -2752,7 +2752,6 @@ fn metadata_update_assignment(
         }
 
         let shard = eobj.shard as u32;
-        trace!("Getting client for shard {}", shard);
 
         // This function updates the manta object with the new
         // sharks, and then returns the updated Manta metadata object.
