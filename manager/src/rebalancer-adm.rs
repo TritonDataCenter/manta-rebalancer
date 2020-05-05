@@ -11,7 +11,7 @@
 use std::result::Result;
 //use manager::config::{Command, SubCommand};
 //use manager::jobs::status::{self, StatusError};
-use manager::jobs::{JobPayload, EvacuateJobPayload};
+use manager::jobs::{EvacuateJobPayload, JobPayload};
 use serde_json::Value::{self, Object};
 //use serde_json::Value::Object;
 use tabular::{Row, Table};
@@ -81,7 +81,9 @@ fn job_list(matches: &ArgMatches) -> Result<(), String> {
 
     let result = match serde_json::from_str(&payload) {
         Ok(v) => v,
-        Err(e) => return Err(format!("Failed to deserialize response: {}", &e)),
+        Err(e) => {
+            return Err(format!("Failed to deserialize response: {}", &e))
+        }
     };
 
     display_result(result, matches);
@@ -94,7 +96,7 @@ fn job_get(matches: &ArgMatches) -> Result<(), String> {
 
     let payload = match manager_get_common(&url) {
         Ok(p) => p,
-        Err(e) => return Err(e)
+        Err(e) => return Err(e),
     };
 
     let result = match serde_json::from_str(&payload) {
@@ -102,8 +104,10 @@ fn job_get(matches: &ArgMatches) -> Result<(), String> {
             let mut vec = Vec::new();
             vec.push(v);
             vec
-        },
-        Err(e) => return Err(format!("Failed to deserialize response: {}", &e))
+        }
+        Err(e) => {
+            return Err(format!("Failed to deserialize response: {}", &e))
+        }
     };
 
     display_result(result, matches);
@@ -117,8 +121,11 @@ fn job_post(matches: &ArgMatches) -> Result<(), String> {
         Some(m) => match m.parse::<u32>() {
             Ok(n) => Some(n),
             Err(e) => {
-                return Err(format!("Numeric value required for max_objects: {}", e));
-            },
+                return Err(format!(
+                    "Numeric value required for max_objects: {}",
+                    e
+                ));
+            }
         },
     };
 
@@ -127,13 +134,13 @@ fn job_post(matches: &ArgMatches) -> Result<(), String> {
         max_objects: max_objects,
     });
 
-    let payload: String = serde_json::to_string(&job_payload)
-        .expect("Serialize job payload");
+    let payload: String =
+        serde_json::to_string(&job_payload).expect("Serialize job payload");
 
     let client = reqwest::Client::new();
     let mut response = match client.post(JOBS_URL).body(payload).send() {
         Ok(resp) => resp,
-        Err(e) => return Err(format!("Job post failed: {}", &e))
+        Err(e) => return Err(format!("Job post failed: {}", &e)),
     };
 
     if !response.status().is_success() {
@@ -142,20 +149,22 @@ fn job_post(matches: &ArgMatches) -> Result<(), String> {
 
     let job_uuid = match response.text() {
         Ok(j) => j,
-        Err(e) => return Err(format!("Error: {}", e))
+        Err(e) => return Err(format!("Error: {}", e)),
     };
 
     println!("{}", job_uuid);
     Ok(())
 }
 
-fn process_subcmd_job(matches: &ArgMatches) {
+fn process_subcmd_job(matches: &ArgMatches) -> Result<(), String> {
     if matches.is_present("list") {
-        job_list(matches);
+        return job_list(matches);
     } else if matches.is_present("get") {
-        job_get(matches);
+        return job_get(matches);
     } else if matches.is_present("evacuate") {
-        job_post(matches);
+        return job_post(matches);
+    } else {
+        return Err("Invalid sub-command".to_string());
     }
 }
 
@@ -192,13 +201,13 @@ fn main() {
                         .short("s")
                         .long("shark")
                         .takes_value(true)
-                        .help("Specifies a shark on which to run a job")
+                        .help("Specifies a shark on which to run a job"),
                 )
                 .arg(
                     Arg::with_name("max_objects")
                         .short("m")
                         .long("max_objects")
-                        .help("Maximum number of objects allowed in the job")
+                        .help("Maximum number of objects allowed in the job"),
                 )
                 .arg(
                     Arg::with_name("evacuate")
@@ -213,12 +222,23 @@ fn main() {
                 .arg(
                     Arg::with_name("json")
                         .short("j")
+                        .long("json")
                         .help("Prints information in json format"),
                 ),
         )
         .get_matches();
 
+    let mut result = Ok(());
+
     if let Some(ref matches) = matches.subcommand_matches("job") {
-        process_subcmd_job(matches);
+        result = process_subcmd_job(matches);
     }
+
+    std::process::exit(match result {
+        Ok(_) => 0,
+        Err(e) => {
+            error!("{}", e);
+            1
+        }
+    });
 }

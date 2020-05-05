@@ -24,7 +24,7 @@ static GLOBAL: Jemalloc = Jemalloc;
 
 use manager::config::Config;
 use manager::jobs::status::StatusError;
-use manager::jobs::{self, JobBuilder, JobDbEntry, JobPayload, EvacuateJobPayload};
+use manager::jobs::{self, JobBuilder, JobDbEntry, JobPayload};
 use manager::metrics::{metrics_init, metrics_request_inc};
 use rebalancer::util;
 
