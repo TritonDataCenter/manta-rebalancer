@@ -8,8 +8,10 @@
  * Copyright 2020 Joyent, Inc.
  */
 
+use std::result::Result;
 //use manager::config::{Command, SubCommand};
 //use manager::jobs::status::{self, StatusError};
+use manager::jobs::{JobPayload, EvacuateJobPayload};
 use serde_json::Value::{self, Object};
 //use serde_json::Value::Object;
 use tabular::{Row, Table};
@@ -59,13 +61,14 @@ fn display_result(values: Vec<Value>, matches: &ArgMatches) {
     print!("{}", table);
 }
 
-fn manager_get_common(url: &str) -> std::result::Result<String, String> {
+fn manager_get_common(url: &str) -> Result<String, String> {
     let mut response = match reqwest::get(url) {
         Ok(resp) => resp,
         Err(e) => {
-            let msg = format!("Request failed: {}", &e);
+            return Err(format!("Request failed: {}", &e));
+            /*let msg = format!("Request failed: {}", &e);
             error!("{}", &msg);
-            return Err(msg);
+            return Err(msg);*/
         }
     };
 
@@ -126,11 +129,61 @@ fn job_get(matches: &ArgMatches) {
     display_result(result, matches);
 }
 
+fn job_post(matches: &ArgMatches) {
+    let shark = matches.value_of("shark").unwrap();
+    let max_objects = match matches.value_of("max_objects") {
+        None => None,
+        Some(m) => match m.parse::<u32>() {
+            Ok(n) => Some(n),
+            Err(e) => {
+                let msg = format!("Numeric value required for max_objects");
+                error!("{}", &msg);
+                return;
+            },
+        },
+    };
+
+    let job_payload = JobPayload::Evacuate(EvacuateJobPayload {
+        from_shark: shark.to_owned(),
+        max_objects: max_objects,
+    });
+
+    let payload: String = serde_json::to_string(&job_payload)
+        .expect("Serialize job payload");
+
+    let client = reqwest::Client::new();
+    let mut response = match client.post(JOBS_URL).body(payload).send() {
+        Ok(resp) => resp,
+        Err(e) => {
+            let msg = format!("Job post failed: {}", &e);
+            error!("{}", &msg);
+            return; // Err(msg);
+        }
+    };
+
+    if !response.status().is_success() {
+        let msg = format!("Error creating job: {}", response.status());
+        error!("{}", msg);
+        return; //Err(msg);
+    }
+
+    let job_uuid = match response.text() {
+        Ok(j) => j,
+        Err(e) => {
+            let msg = format!("Error: {}", e);
+            return;
+        },
+    };
+    println!("{}", job_uuid);
+}
+
 fn process_subcmd_job(matches: &ArgMatches) {
     if matches.is_present("list") {
         job_list(matches);
     } else if matches.is_present("get") {
         job_get(matches);
+    } else if matches.is_present("evacuate") {
+        job_post(matches);
     }
 }
 
@@ -160,6 +213,29 @@ fn main() {
                         .long("get")
                         .help("List details of a specific job")
                         .requires("uuid")
+                        .conflicts_with("list"),
+                )
+                .arg(
+                    Arg::with_name("shark")
+                        .short("s")
+                        .long("shark")
+                        .takes_value(true)
+                        .help("Specifies a shark on which to run a job")
+                )
+                .arg(
+                    Arg::with_name("max_objects")
+                        .short("m")
+                        .long("max_objects")
+                        .help("Maximum number of objects allowed in the job")
+                )
+                .arg(
+                    Arg::with_name("evacuate")
+                        .short("e")
+                        .long("evacuate")
+                        .help("Create an evacuate job")
+                        .requires("shark")
+                        .conflicts_with("uuid")
+                        .conflicts_with("get")
                         .conflicts_with("list"),
                 )
                 .arg(

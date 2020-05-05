@@ -24,7 +24,7 @@ static GLOBAL: Jemalloc = Jemalloc;
 
 use manager::config::Config;
 use manager::jobs::status::StatusError;
-use manager::jobs::{self, JobBuilder, JobDbEntry};
+use manager::jobs::{self, JobBuilder, JobDbEntry, JobPayload, EvacuateJobPayload};
 use manager::metrics::{metrics_init, metrics_request_inc};
 use rebalancer::util;
 
@@ -190,28 +190,6 @@ fn list_jobs(state: State) -> Box<HandlerFuture> {
     }))
 }
 
-/// The JobPayload is an enum with variants of JobActions.  A properly
-/// formatted JobPayload submitted from the client in JSON form looks like:
-///
-/// ```json
-/// {
-///     "action": <job action (String)>,
-///     "params": { <job action specific params > }
-/// }
-/// ```
-#[derive(Serialize, Deserialize)]
-#[serde(tag = "action", content = "params")]
-#[serde(rename_all = "lowercase")]
-enum JobPayload {
-    Evacuate(EvacuateJobPayload),
-}
-
-#[derive(Serialize, Deserialize, Default)]
-struct EvacuateJobPayload {
-    from_shark: String,
-    max_objects: Option<u32>,
-}
-
 #[derive(Clone)]
 struct JobCreateHandler {
     tx: crossbeam_channel::Sender<jobs::Job>,
@@ -308,9 +286,9 @@ impl Handler for JobCreateHandler {
                 };
 
                 let job_uuid = job.get_id();
-                if let Err(e) = self.tx.send(job) {
-                    panic!("Tx error: {}", e);
-                }
+           //     if let Err(e) = self.tx.send(job) {
+           //         panic!("Tx error: {}", e);
+           //     }
 
                 let uuid_response = format!("{}\n", job_uuid);
                 create_response(
