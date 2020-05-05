@@ -20,7 +20,7 @@ use tabular::{Row, Table};
 extern crate rebalancer;
 
 use clap::{App, Arg, ArgMatches};
-use reqwest::{self, StatusCode};
+use reqwest;
 
 pub static JOBS_URL: &str = "http://localhost/jobs";
 
@@ -64,53 +64,37 @@ fn display_result(values: Vec<Value>, matches: &ArgMatches) {
 fn manager_get_common(url: &str) -> Result<String, String> {
     let mut response = match reqwest::get(url) {
         Ok(resp) => resp,
-        Err(e) => {
-            return Err(format!("Request failed: {}", &e));
-            /*let msg = format!("Request failed: {}", &e);
-            error!("{}", &msg);
-            return Err(msg);*/
-        }
+        Err(e) => return Err(format!("Request failed: {}", &e)),
     };
 
     match response.text() {
         Ok(p) => Ok(p),
-        Err(e) => {
-            let msg = format!("Failed to parse response body: {}", &e);
-            error!("{}", &msg);
-            return Err(msg);
-        }
+        Err(e) => return Err(format!("Failed to parse response body: {}", &e)),
     }
 }
 
-fn job_list(matches: &ArgMatches) {
+fn job_list(matches: &ArgMatches) -> Result<(), String> {
     let payload = match manager_get_common(JOBS_URL) {
         Ok(p) => p,
-        Err(e) => return,
+        Err(e) => return Err(e),
     };
 
     let result = match serde_json::from_str(&payload) {
         Ok(v) => v,
-        Err(e) => {
-            let msg = format!("Failed to deserialize response: {}", &e);
-            error!("{}", &msg);
-            return;
-        }
+        Err(e) => return Err(format!("Failed to deserialize response: {}", &e)),
     };
 
     display_result(result, matches);
+    Ok(())
 }
 
-fn job_get(matches: &ArgMatches) {
-    let uuid = match matches.value_of("uuid") {
-        Some(u) => u,
-        None => return,
-    };
-
+fn job_get(matches: &ArgMatches) -> Result<(), String> {
+    let uuid = matches.value_of("uuid").unwrap();
     let url = format!("{}/{}", JOBS_URL, uuid);
 
     let payload = match manager_get_common(&url) {
         Ok(p) => p,
-        Err(e) => return, // Err(e);
+        Err(e) => return Err(e)
     };
 
     let result = match serde_json::from_str(&payload) {
@@ -118,27 +102,22 @@ fn job_get(matches: &ArgMatches) {
             let mut vec = Vec::new();
             vec.push(v);
             vec
-        }
-        Err(e) => {
-            let msg = format!("Failed to deserialize response: {}", &e);
-            error!("{}", &msg);
-            return; // Err(msg)
-        }
+        },
+        Err(e) => return Err(format!("Failed to deserialize response: {}", &e))
     };
 
     display_result(result, matches);
+    Ok(())
 }
 
-fn job_post(matches: &ArgMatches) {
+fn job_post(matches: &ArgMatches) -> Result<(), String> {
     let shark = matches.value_of("shark").unwrap();
     let max_objects = match matches.value_of("max_objects") {
         None => None,
         Some(m) => match m.parse::<u32>() {
             Ok(n) => Some(n),
             Err(e) => {
-                let msg = format!("Numeric value required for max_objects");
-                error!("{}", &msg);
-                return;
+                return Err(format!("Numeric value required for max_objects: {}", e));
             },
         },
     };
@@ -154,27 +133,20 @@ fn job_post(matches: &ArgMatches) {
     let client = reqwest::Client::new();
     let mut response = match client.post(JOBS_URL).body(payload).send() {
         Ok(resp) => resp,
-        Err(e) => {
-            let msg = format!("Job post failed: {}", &e);
-            error!("{}", &msg);
-            return; // Err(msg);
-        }
+        Err(e) => return Err(format!("Job post failed: {}", &e))
     };
 
     if !response.status().is_success() {
-        let msg = format!("Error creating job: {}", response.status());
-        error!("{}", msg);
-        return; //Err(msg);
+        return Err(format!("Error creating job: {}", response.status()));
     }
 
     let job_uuid = match response.text() {
         Ok(j) => j,
-        Err(e) => {
-            let msg = format!("Error: {}", e);
-            return;
-        },
+        Err(e) => return Err(format!("Error: {}", e))
     };
+
     println!("{}", job_uuid);
+    Ok(())
 }
 
 fn process_subcmd_job(matches: &ArgMatches) {
