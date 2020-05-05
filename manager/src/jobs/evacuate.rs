@@ -36,6 +36,7 @@ use std::collections::hash_map::Entry::{Occupied, Vacant};
 use std::collections::HashMap;
 use std::error::Error as _Error;
 use std::io::{ErrorKind, Write};
+use std::path::Path;
 use std::str::FromStr;
 use std::string::ToString;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -279,6 +280,172 @@ pub fn create_evacuateobjects_table(
 
 struct FiniMsg;
 
+trait ObjectGenerator {
+    fn generate(
+        self,
+        obj_tx: crossbeam_channel::Sender<EvacuateObject>,
+    ) -> Result<thread::JoinHandle<Result<(), Error>>, Error>;
+}
+
+struct SharkSpotterGenerator {
+    job_action: Arc<EvacuateJob>,
+}
+
+struct FileGenerator<P> {
+    filename: P,
+}
+impl<P> FileGenerator<P> {
+    fn new(path: P) -> Self
+    where P: Into<Path>
+    {
+        let filename: Path = path.into();
+
+    }
+}
+
+impl ObjectGenerator for SharkSpotterGenerator {
+    fn generate(
+        self,
+        obj_tx: crossbeam_channel::Sender<EvacuateObject>
+    ) -> Result<thread::JoinHandle<Result<(), Error>>, Error> {
+        let job_action = self.job_action;
+        let max_objects = job_action.max_objects;
+        let shark = &job_action.from_shark.manta_storage_id;
+        let config = sharkspotter::config::Config {
+            domain: String::from(domain),
+            min_shard,
+            max_shard,
+            shark: String::from(shark.as_str()),
+            ..Default::default()
+        };
+
+        debug!("Starting sharkspotter thread: {:?}", &config);
+
+        let log = slog_scope::logger();
+
+        thread::Builder::new()
+            .name(String::from("sharkspotter"))
+            .spawn(move || {
+                let mut count = 0;
+                sharkspotter::run(config, log, move |moray_object, shard| {
+                    trace!("Sharkspotter discovered object: {:#?}", &moray_object);
+                    count += 1;
+                    // while testing, limit the number of objects processed for now
+                    if let Some(max) = max_objects {
+                        if count > max {
+                            return Err(std::io::Error::new(
+                                ErrorKind::Interrupted,
+                                "Max Objects Limit Reached",
+                            ));
+                        }
+                    }
+
+                    // For now we consider a poorly formatted moray object or a
+                    // missing objectId to be critical failures.  We cannot
+                    // insert an evacuate object without an objectId.
+                    let manta_object =
+                        match sharkspotter::manta_obj_from_moray_obj(&moray_object)
+                        {
+                            Ok(o) => o,
+                            Err(e) => {
+                                return Err(std::io::Error::new(
+                                    ErrorKind::Other,
+                                    e,
+                                ))
+                            }
+                        };
+
+                    let id = match common::get_objectId_from_value(&manta_object) {
+                        Ok(id_str) => id_str,
+                        Err(e) => {
+                            return Err(std::io::Error::new(ErrorKind::Other, e));
+                        }
+                    };
+
+                    // If we fail to get the etag then we can't rebalance this
+                    // object, but we return Ok(()) because we want to keep
+                    // scanning for other objects.
+                    let etag = match moray_object.get("_etag") {
+                        Some(tag) => match serde_json::to_string(tag) {
+                            Ok(t) => t.replace("\"", ""),
+                            Err(e) => {
+                                error!("Cannot convert etag to string: {}", e);
+                                _insert_bad_moray_object(
+                                    &job_action,
+                                    manta_object,
+                                    id,
+                                );
+                                return Ok(());
+                            }
+                        },
+                        None => {
+                            _insert_bad_moray_object(&job_action, manta_object, id);
+                            return Ok(());
+                        }
+                    };
+
+                    // TODO: build a test for this
+                    if shard > std::i32::MAX as u32 {
+                        error!("Found shard number over int32 max for: {}", id);
+
+                        let eobj = EvacuateObject {
+                            id,
+                            object: manta_object,
+                            status: EvacuateObjectStatus::Error,
+                            error: Some(EvacuateObjectError::BadShardNumber),
+                            etag,
+                            ..Default::default()
+                        };
+
+                        job_action
+                            .insert_into_db(&eobj)
+                            .expect("Error inserting bad EvacuateObject into DB");
+
+                        return Err(std::io::Error::new(
+                            ErrorKind::Other,
+                            "Exceeded max number of shards",
+                        ));
+                    }
+
+                    let eobj = EvacuateObject::from_parts(
+                        manta_object,
+                        id.clone(),
+                        etag,
+                        shard as i32,
+                    );
+
+                    obj_tx
+                        .send(eobj)
+                        .map_err(CrossbeamError::from)
+                        .map_err(|e| {
+                            error!("Sharkspotter: Error sending object: {}", e);
+                            job_action.mark_object_error(
+                                &id,
+                                EvacuateObjectError::InternalError,
+                            );
+                            std::io::Error::new(ErrorKind::Other, e.description())
+                        })
+                })
+                    .map_err(|e| {
+                        if e.kind() == ErrorKind::Interrupted {
+                            if let Some(max) = max_objects {
+                                if count > max {
+                                    return InternalError::new(
+                                        Some(InternalErrorCode::MaxObjectsLimit),
+                                        "Max Objects Limit Reached",
+                                    )
+                                        .into();
+                                }
+                            }
+                        }
+                        e.into()
+                    })
+            })
+            .map_err(Error::from)
+
+    }
+}
+// XXX: EUNUSED
 #[derive(Debug)]
 pub struct SharkSpotterObject {
     pub shard: i32,
