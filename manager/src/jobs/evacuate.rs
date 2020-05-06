@@ -1881,6 +1881,8 @@ where
                     remove_keys.push(key.clone());
                 }
 
+                // Send the stop command which flushes any outstanding
+                // assignments, then join the threads
                 _stop_join_some_assignment_threads(
                     &mut shark_hash,
                     remove_keys,
@@ -1923,7 +1925,7 @@ where
                 //      * find first shark that is a vaild destination
                 //      * send object to that shark's thread
                 // end loop
-                for _ in 0..max_assignment_size {
+                for _ in 0..max_assignment_size * max_sharks {
                     // Get an object
                     let mut eobj = match obj_rx.recv() {
                         Ok(obj) => {
@@ -1993,12 +1995,13 @@ where
                     }
                 }
 
-                // We have hit our maximum number of objects we want to
-                // have outstanding so send flush msg to all sharks.
-                // This is to ensure that we don't have an assignment
-                // hanging around with a single object on it just waiting to hit
-                // it's per assignment max, which may never come.
+                // This is a conditional check.  If a given assignment is older
+                // than MAX_ASSIGNMENT_AGE, then we will post it.  But we
+                // don't want to unconditionally post assignments here
+                // because we have seen that results in many single
+                // object/task assignments.
                 _flush_shark_assignment_threads(&mut shark_hash);
+
             }
 
             // Flush all the threads first so that while we are joining they
@@ -2057,8 +2060,10 @@ fn shark_assignment_generator(
 ) -> impl Fn() -> Result<(), Error> {
     move || {
         let max_tasks = job_action.max_tasks_per_assignment;
+        let max_age = job_action.options.max_assignment_age;
         let from_shark_host = job_action.from_shark.manta_storage_id.clone();
         let mut assignment = Assignment::new(shark.clone());
+        let mut assignment_birth_time = std::time::Instant::now();
         let mut flush = false;
         let mut stop = false;
         let mut eobj_vec = vec![];
@@ -2109,7 +2114,9 @@ fn shark_assignment_generator(
                     stop = true;
                 }
                 AssignmentMsg::Flush => {
-                    flush = true;
+                    if assignment_birth_time.elapsed().as_secs() > max_age {
+                        flush = true;
+                    }
                 }
                 AssignmentMsg::Data(data) => {
                     let mut eobj = *data;
@@ -2218,6 +2225,7 @@ fn shark_assignment_generator(
                 available_space = (shark.available_mb - assignment_size) / 2;
                 assignment = Assignment::new(shark.clone());
                 assignment.max_size = available_space;
+                assignment_birth_time = std::time::Instant::now();
 
                 eobj_vec = Vec::new();
             }
