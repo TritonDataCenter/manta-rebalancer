@@ -286,9 +286,9 @@ impl Handler for JobCreateHandler {
                 };
 
                 let job_uuid = job.get_id();
-           //     if let Err(e) = self.tx.send(job) {
-           //         panic!("Tx error: {}", e);
-           //     }
+                if let Err(e) = self.tx.send(job) {
+                    panic!("Tx error: {}", e);
+                }
 
                 let uuid_response = format!("{}\n", job_uuid);
                 create_response(
