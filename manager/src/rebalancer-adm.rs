@@ -8,9 +8,9 @@
  * Copyright 2020 Joyent, Inc.
  */
 
-use std::result::Result;
 use manager::jobs::{EvacuateJobPayload, JobPayload};
 use serde_json::Value::{self, Object};
+use std::result::Result;
 use tabular::{Row, Table};
 
 #[macro_use]
