@@ -1984,7 +1984,6 @@ where
                 // because we have seen that results in many single
                 // object/task assignments.
                 _flush_shark_assignment_threads(&mut shark_hash);
-
             }
 
             // Flush all the threads first so that while we are joining they
