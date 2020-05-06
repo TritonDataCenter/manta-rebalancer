@@ -46,6 +46,12 @@ static DEFAULT_MAX_SHARKS: usize = 5;
 // available.
 static DEFAULT_STATIC_QUEUE_DEPTH: usize = 10;
 
+// The maximum amount of time in seconds that an assignment should remain in
+// memory before it is posted to an agent.  This is not a hard and fast rule.
+// This will only be checked synchronously every time we gather another set of
+// destination sharks.
+static DEFAULT_MAX_ASSIGNMENT_AGE: u64 = 600;
+
 #[derive(Deserialize, Default, Debug, Clone)]
 pub struct Shard {
     pub host: String,
@@ -61,6 +67,7 @@ pub struct ConfigOptions {
     pub max_sharks: usize,
     pub use_static_md_update_threads: bool,
     pub static_queue_depth: usize,
+    pub max_assignment_age: u64,
 }
 
 impl Default for ConfigOptions {
@@ -71,6 +78,7 @@ impl Default for ConfigOptions {
             max_sharks: DEFAULT_MAX_SHARKS,
             use_static_md_update_threads: true,
             static_queue_depth: DEFAULT_STATIC_QUEUE_DEPTH,
+            max_assignment_age: DEFAULT_MAX_ASSIGNMENT_AGE,
         }
     }
 }
