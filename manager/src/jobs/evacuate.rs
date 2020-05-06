@@ -2671,7 +2671,7 @@ fn metadata_update_one(
     job_action: &Arc<EvacuateJob>,
     client_hash: &mut HashMap<u32, MorayClient>,
     object: &EvacuateObjectValue,
-    etag: &String,
+    etag: &str,
     shard: u32,
 ) -> Result<(), Error> {
 
@@ -2762,19 +2762,18 @@ fn metadata_update_assignment(
                         .and_modify(|ent| {
                             ent.push(BatchRequest::Put(put_req.clone()))
                         })
-                        .or_insert(vec![
-                            BatchRequest::Put(put_req)
-                        ]);
-                } else {
-                    if let Err(e) = metadata_update_one(
-                        job_action, client_hash, &o, &etag, shard)
-                    {
+                        .or_insert_with(|| {
+                            vec![BatchRequest::Put(put_req)]
+                        });
+                } else if let Err(e) = metadata_update_one(
+                        job_action, client_hash, &o, &etag, shard) {
+
                         error!("Error updating object:\n{:#?}\nwith dest_shark \
                             {:?}\n({}).", o, dest_shark, e);
                         job_action.mark_object_error( &eobj.id, e.into());
 
                         continue;
-                    }
+
                 }
             }
 
