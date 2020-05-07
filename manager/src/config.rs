@@ -465,7 +465,7 @@ mod tests {
     use libc;
     use mustache::{Data, MapBuilder};
     use std::fs::File;
-    use std::io::{BufRead, BufReader, Write};
+    use std::io::{Read, Write};
 
     static TEST_CONFIG_FILE: &str = "config.test.json";
 
@@ -556,16 +556,16 @@ mod tests {
         assert_eq!(config.listen_port, 80);
 
         File::open(TEST_CONFIG_FILE)
-            .and_then(|f| {
-                for line in BufReader::new(f).lines() {
-                    let l = line.expect("line reader");
-                    println!("{}", l);
-
-                    assert!(!l.contains("options"));
-                    assert!(!l.contains("max_tasks_per_assignment"));
-                    assert!(!l.contains("max_metadata_update_threads"));
-                    assert!(!l.contains("max_sharks"));
-                }
+            .and_then(|mut f| {
+                let mut config_file = String::new();
+                f.read_to_string(&mut config_file).expect("config file");
+                assert!(config_file.contains("options"));
+                assert!(config_file.contains("max_tasks_per_assignment"));
+                assert!(config_file.contains("max_metadata_update_threads"));
+                assert!(config_file.contains("max_sharks"));
+                assert!(config_file.contains("use_static_md_update_threads"));
+                assert!(config_file.contains("static_queue_depth"));
+                assert!(config_file.contains("max_assignment_age"));
                 Ok(())
             })
             .expect("config_basic_test");

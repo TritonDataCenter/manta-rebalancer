@@ -7,6 +7,7 @@
         "static_queue_depth": 10,
         "max_assignment_age": 600
     },
+    "listen_port": 80,
     "domain_name": "{{DOMAIN_NAME}}",
     {{#SNAPLINK_CLEANUP_REQUIRED}}
     "snaplink_cleanup_required": true,
