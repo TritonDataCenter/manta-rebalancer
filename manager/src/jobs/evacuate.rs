@@ -453,7 +453,7 @@ impl EvacuateJob {
         from_shark.manta_storage_id = storage_id;
 
         Ok(Self {
-            min_avail_mb: Some(1000),             // TODO: config
+            min_avail_mb: Some(1000), // TODO: config
             dest_shark_list: RwLock::new(HashMap::new()),
             assignments: RwLock::new(HashMap::new()),
             from_shark,
@@ -1815,8 +1815,8 @@ where
         .spawn(move || {
             let mut done = false;
             let max_sharks = job_action.options.max_sharks;
-            let max_tasks_per_assignment = job_action.options
-                .max_tasks_per_assignment;
+            let max_tasks_per_assignment =
+                job_action.options.max_tasks_per_assignment;
 
             let algo = mod_storinfo::DefaultChooseAlgorithm {
                 min_avail_mb: job_action.min_avail_mb,
@@ -2094,8 +2094,9 @@ fn shark_assignment_generator(
                 }
                 AssignmentMsg::Flush => {
                     let assignment_len = assignment.tasks.len();
-                    if assignment_len > 0 &&
-                        assignment_birth_time.elapsed().as_secs() > max_age {
+                    if assignment_len > 0
+                        && assignment_birth_time.elapsed().as_secs() > max_age
+                    {
                         debug!(
                             "Timeout reached, flushing {} task assignment",
                             assignment_len
@@ -2166,6 +2167,13 @@ fn shark_assignment_generator(
                         },
                     );
 
+                    // If this is the first assignment to be added, start the
+                    // clock.  We don't care about the age of 0 task
+                    // assignments.
+                    if assignment.tasks.len() == 1 {
+                        assignment_birth_time = std::time::Instant::now();
+                    }
+
                     assignment.total_size += content_mb;
                     available_space -= content_mb;
 
@@ -2212,7 +2220,6 @@ fn shark_assignment_generator(
                 available_space = (shark.available_mb - assignment_size) / 2;
                 assignment = Assignment::new(shark.clone());
                 assignment.max_size = available_space;
-                assignment_birth_time = std::time::Instant::now();
 
                 eobj_vec = Vec::new();
             }
@@ -2277,8 +2284,11 @@ where
         match assign_rx.recv() {
             Ok(assignment) => {
                 {
-                    trace!("posting {} task assignment: {:#?}",
-                           assignment.tasks.len(), &assignment);
+                    trace!(
+                        "posting {} task assignment: {:#?}",
+                        assignment.tasks.len(),
+                        &assignment
+                    );
 
                     match job_action.post(assignment) {
                         Ok(()) => (),
