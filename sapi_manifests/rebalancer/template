@@ -1,10 +1,12 @@
 {
-	"max_tasks_per_assignment": 50,
-	"max_metadata_update_threads": 2,
-	"max_sharks": 5,
-	"use_static_md_update_threads": true,
-	"static_queue_depth": 10,
-	"max_assignment_age": 600,
+    "options": {
+        "max_tasks_per_assignment": 50,
+        "max_metadata_update_threads": 2,
+        "max_sharks": 5,
+        "use_static_md_update_threads": true,
+        "static_queue_depth": 10,
+        "max_assignment_age": 600
+    },
     "domain_name": "{{DOMAIN_NAME}}",
     {{#SNAPLINK_CLEANUP_REQUIRED}}
     "snaplink_cleanup_required": true,
