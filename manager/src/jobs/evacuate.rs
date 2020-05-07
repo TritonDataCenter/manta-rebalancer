@@ -2187,7 +2187,7 @@ fn shark_assignment_generator(
             //      * We have reached the maximum number of tasks per assignment
             if !assignment.tasks.is_empty() && flush
                 || stop
-                || assignment.tasks.len() > max_tasks
+                || assignment.tasks.len() >= max_tasks
             {
                 let assignment_size = assignment.total_size;
 
