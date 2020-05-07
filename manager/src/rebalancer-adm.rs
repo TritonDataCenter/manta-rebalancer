@@ -8,16 +8,12 @@
  * Copyright 2020 Joyent, Inc.
  */
 
+use clap::{App, Arg, ArgMatches};
 use manager::jobs::{EvacuateJobPayload, JobPayload};
+use reqwest;
 use serde_json::Value::{self, Object};
 use std::result::Result;
 use tabular::{Row, Table};
-
-#[macro_use]
-extern crate rebalancer;
-
-use clap::{App, Arg, ArgMatches};
-use reqwest;
 
 pub static JOBS_URL: &str = "http://localhost/jobs";
 
@@ -141,11 +137,20 @@ fn job_get(matches: &ArgMatches) -> Result<(), String> {
     Ok(())
 }
 
+fn job_create(matches: &ArgMatches) -> Result<(), String> {
+    let job_type = matches.value_of("type").unwrap();
+
+    match job_type.as_ref() {
+        "evacuate" => job_create_evacuate(matches),
+        _ => Err("Invalid job type specified".to_owned()),
+    }
+}
+
 // Post an evacuate job to the manager.  In the future, there may be more than
 // one kind of job that is supported, at which point, we should probably break
 // out the evacate-specific logic in to another subroutine that this function
 // calls.
-fn job_post(matches: &ArgMatches) -> Result<(), String> {
+fn job_create_evacuate(matches: &ArgMatches) -> Result<(), String> {
     // Get the storage id from the args.  Clap ensures that this argument is
     // supplied to us before we even reach this point.
     let shark = matches.value_of("shark").unwrap();
@@ -200,68 +205,74 @@ fn job_post(matches: &ArgMatches) -> Result<(), String> {
 // arguments.  While there are other arguments that might accompany the
 // ones listed below, those are parsed separately depending on which of
 // the pimary arguments are supplied.
-fn process_subcmd_job(matches: &ArgMatches) -> Result<(), String> {
-    if matches.is_present("list") {
-        return job_list(matches);
-    } else if matches.is_present("get") {
-        return job_get(matches);
-    } else if matches.is_present("evacuate") {
-        return job_post(matches);
-    } else {
-        return Err("Invalid sub-command".to_string());
+fn process_subcmd_job(job_matches: &ArgMatches) -> Result<(), String> {
+    match job_matches.subcommand() {
+        ("get", Some(get_matches)) => job_get(get_matches),
+        ("list", Some(list_matches)) => job_list(list_matches),
+        ("create", Some(create_matches)) => job_create(create_matches),
+        _ => unreachable!(),
     }
 }
 
 fn main() {
+    let output = Arg::with_name("json")
+        .short("j")
+        .long("json")
+        .help("Prints information in json format");
+
     let matches = App::new("rebalancer-adm")
         .version("0.1.0")
         .about("Rebalancer client utility")
         .subcommand(
             App::new("job")
                 .about("Job operations")
-                .arg(
-                    Arg::with_name("list")
-                        .short("l")
-                        .long("list")
-                        .help("List uuids and status of all known jobs"),
+                // Get subcommand
+                .subcommand(
+                    App::new("get")
+                        .about("Get information on a specific job")
+                        .arg(
+                            Arg::with_name("uuid")
+                            .short("u")
+                            .long("uuid")
+                            .takes_value(true)
+                            .required(true)
+                            .help("Uuid of a job"),
+                        )
+                        .arg(&output),
                 )
-                .arg(
-                    Arg::with_name("uuid")
-                        .short("u")
-                        .long("uuid")
-                        .takes_value(true)
-                        .help("List details of a specific job"),
+                // List subcommand
+                .subcommand(
+                    App::new("list")
+                        .about("List all known rebalancer jobs")
+                        .arg(&output),
                 )
-                .arg(
-                    Arg::with_name("get")
-                        .short("g")
-                        .long("get")
-                        .help("List details of a specific job")
-                        .requires("uuid")
-                        .conflicts_with("list"),
-                )
-                .arg(
-                    Arg::with_name("shark")
-                        .short("s")
-                        .long("shark")
-                        .takes_value(true)
-                        .help("Specifies a shark on which to run a job"),
-                )
-                .arg(
-                    Arg::with_name("max_objects")
-                        .short("m")
-                        .long("max_objects")
-                        .help("Maximum number of objects allowed in the job"),
-                )
-                .arg(
-                    Arg::with_name("evacuate")
-                        .short("e")
-                        .long("evacuate")
-                        .help("Create an evacuate job")
-                        .requires("shark")
-                        .conflicts_with("uuid")
-                        .conflicts_with("get")
-                        .conflicts_with("list"),
+                // Create subcommand
+                .subcommand(
+                    App::new("create")
+                        .about("Create a rebalancer job")
+                        .arg(
+                            Arg::with_name("type")
+                            .short("t")
+                            .long("type")
+                            .takes_value(true)
+                            .required(true)
+                            .help("Rebalancer job type"),
+                        )
+                        .arg(
+                            Arg::with_name("shark")
+                            .short("s")
+                            .long("shark")
+                            .takes_value(true)
+                            .required(true)
+                            .help("Specifies a shark on which to run a job"),
+                        )
+                        .arg(
+                            Arg::with_name("max_objects")
+                            .short("m")
+                            .long("max_objects")
+                            .takes_value(true)
+                            .help("Maximum number of objects allowed in the job"),
+                        )
                 )
                 .arg(
                     Arg::with_name("json")
@@ -281,7 +292,7 @@ fn main() {
     std::process::exit(match result {
         Ok(_) => 0,
         Err(e) => {
-            error!("{}", e);
+            println!("{}", e);
             1
         }
     });
