@@ -2786,7 +2786,6 @@ fn metadata_update_assignment(
                         job_action.mark_object_error( &eobj.id, e.into());
 
                         continue;
-
                 }
             }
 
@@ -2851,9 +2850,6 @@ fn metadata_update_assignment(
                     continue;
                 }
             };
-
-            // XXX TODO: confirm that if a single object fails update they all
-            // fail update.
 
             // If we fail the batch step through the objects and attempt to
             // update each one individually. For each object that fails to
