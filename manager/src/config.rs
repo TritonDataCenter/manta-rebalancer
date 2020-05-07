@@ -558,7 +558,9 @@ mod tests {
         File::open(TEST_CONFIG_FILE)
             .and_then(|mut f| {
                 let mut config_file = String::new();
+
                 f.read_to_string(&mut config_file).expect("config file");
+
                 assert!(config_file.contains("options"));
                 assert!(config_file.contains("max_tasks_per_assignment"));
                 assert!(config_file.contains("max_metadata_update_threads"));
@@ -566,6 +568,7 @@ mod tests {
                 assert!(config_file.contains("use_static_md_update_threads"));
                 assert!(config_file.contains("static_queue_depth"));
                 assert!(config_file.contains("max_assignment_age"));
+
                 Ok(())
             })
             .expect("config_basic_test");
