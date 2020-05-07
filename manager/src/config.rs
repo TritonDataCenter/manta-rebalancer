@@ -598,6 +598,15 @@ mod tests {
         assert_eq!(config.options.max_tasks_per_assignment, 1111);
         assert_eq!(config.options.max_metadata_update_threads, 2222);
         assert_eq!(config.options.max_sharks, 3333);
+        assert_eq!(config.options.use_static_md_update_threads, true);
+        assert_eq!(
+            config.options.static_queue_depth,
+            DEFAULT_STATIC_QUEUE_DEPTH
+        );
+        assert_eq!(
+            config.options.max_assignment_age,
+            DEFAULT_MAX_ASSIGNMENT_AGE
+        );
 
         config_fini();
     }
