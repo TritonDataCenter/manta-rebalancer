@@ -2093,16 +2093,14 @@ fn shark_assignment_generator(
                     stop = true;
                 }
                 AssignmentMsg::Flush => {
-                    if assignment_birth_time.elapsed().as_secs() > max_age {
-                        let assignment_len = assignment.tasks.len();
-
-                        if assignment_len > 0 {
-                            debug!(
-                                "Timeout reached, flushing {} task assignment",
-                                assignment_len
-                            );
-                            flush = true;
-                        }
+                    let assignment_len = assignment.tasks.len();
+                    if assignment_len > 0 &&
+                        assignment_birth_time.elapsed().as_secs() > max_age {
+                        debug!(
+                            "Timeout reached, flushing {} task assignment",
+                            assignment_len
+                        );
+                        flush = true;
                     }
                 }
 
