@@ -29,7 +29,7 @@ use std::thread::JoinHandle;
 static DEFAULT_CONFIG_PATH: &str = "/opt/smartdc/rebalancer/config.json";
 
 // The maximum number of tasks we will send in a single assignment to the agent.
-static DEFAULT_MAX_ASSIGNMENT_SIZE: usize = 50;
+static DEFAULT_MAX_TASKS_PER_ASSIGNMENT: usize = 50;
 
 // The maximum number of threads that will be used for metadata updates.
 // Each thread has its own hash of moray clients.
@@ -62,7 +62,7 @@ pub struct Shard {
 #[derive(Deserialize, Debug, Clone, Copy)]
 #[serde(default)]
 pub struct ConfigOptions {
-    pub max_assignment_size: usize,
+    pub max_tasks_per_assignment: usize,
     pub max_metadata_update_threads: usize,
     pub max_sharks: usize,
     pub use_static_md_update_threads: bool,
@@ -73,7 +73,7 @@ pub struct ConfigOptions {
 impl Default for ConfigOptions {
     fn default() -> ConfigOptions {
         ConfigOptions {
-            max_assignment_size: DEFAULT_MAX_ASSIGNMENT_SIZE,
+            max_tasks_per_assignment: DEFAULT_MAX_TASKS_PER_ASSIGNMENT,
             max_metadata_update_threads: DEFAULT_MAX_METADATA_UPDATE_THREADS,
             max_sharks: DEFAULT_MAX_SHARKS,
             use_static_md_update_threads: true,
@@ -562,7 +562,7 @@ mod tests {
                     println!("{}", l);
 
                     assert!(!l.contains("options"));
-                    assert!(!l.contains("max_assignment_size"));
+                    assert!(!l.contains("max_tasks_per_assignment"));
                     assert!(!l.contains("max_metadata_update_threads"));
                     assert!(!l.contains("max_sharks"));
                 }
@@ -579,7 +579,7 @@ mod tests {
 
         let file_contents = r#"{
                 "options": {
-                    "max_assignment_size": 1111,
+                    "max_tasks_per_assignment": 1111,
                     "max_metadata_update_threads": 2222,
                     "max_sharks": 3333
                 },
@@ -595,7 +595,7 @@ mod tests {
         std::fs::remove_file(TEST_CONFIG_FILE).unwrap_or(());
         let config = write_config_file(file_contents.as_bytes());
 
-        assert_eq!(config.options.max_assignment_size, 1111);
+        assert_eq!(config.options.max_tasks_per_assignment, 1111);
         assert_eq!(config.options.max_metadata_update_threads, 2222);
         assert_eq!(config.options.max_sharks, 3333);
 

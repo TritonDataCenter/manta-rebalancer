@@ -409,9 +409,6 @@ pub struct EvacuateJob {
     /// The minimum available space for a shark to be considered a destination.
     pub min_avail_mb: Option<u64>,
 
-    /// Maximum number of tasks to include in a single assignment.
-    pub max_tasks_per_assignment: Option<u32>,
-
     // TODO: Maximum total size of objects to include in a single assignment.
 
     // TODO: max number of shark threads
@@ -457,7 +454,6 @@ impl EvacuateJob {
 
         Ok(Self {
             min_avail_mb: Some(1000),             // TODO: config
-            max_tasks_per_assignment: Some(1000), // TODO: config
             dest_shark_list: RwLock::new(HashMap::new()),
             assignments: RwLock::new(HashMap::new()),
             from_shark,
@@ -1819,7 +1815,8 @@ where
         .spawn(move || {
             let mut done = false;
             let max_sharks = job_action.options.max_sharks;
-            let max_assignment_size = job_action.options.max_assignment_size;
+            let max_tasks_per_assignment = job_action.options
+                .max_tasks_per_assignment;
 
             let algo = mod_storinfo::DefaultChooseAlgorithm {
                 min_avail_mb: job_action.min_avail_mb,
@@ -1908,7 +1905,7 @@ where
                 //      * find first shark that is a vaild destination
                 //      * send object to that shark's thread
                 // end loop
-                for _ in 0..max_assignment_size * max_sharks {
+                for _ in 0..max_tasks_per_assignment * max_sharks {
                     // Get an object
                     let mut eobj = match obj_rx.recv() {
                         Ok(obj) => {
@@ -2041,7 +2038,7 @@ fn shark_assignment_generator(
     full_assignment_tx: crossbeam::Sender<Assignment>,
 ) -> impl Fn() -> Result<(), Error> {
     move || {
-        let max_tasks = job_action.max_tasks_per_assignment;
+        let max_tasks = job_action.options.max_tasks_per_assignment;
         let max_age = job_action.options.max_assignment_age;
         let from_shark_host = job_action.from_shark.manta_storage_id.clone();
         let mut assignment = Assignment::new(shark.clone());
@@ -2097,9 +2094,14 @@ fn shark_assignment_generator(
                 }
                 AssignmentMsg::Flush => {
                     if assignment_birth_time.elapsed().as_secs() > max_age {
+                        debug!(
+                            "Timeout reached, flushing {} task assignment",
+                            assignment.tasks.len()
+                        );
                         flush = true;
                     }
                 }
+
                 AssignmentMsg::Data(data) => {
                     let mut eobj = *data;
                     eobj.dest_shark = shark.manta_storage_id.clone();
@@ -2166,7 +2168,8 @@ fn shark_assignment_generator(
                     available_space -= content_mb;
 
                     trace!(
-                        "Available space: {} | Tasks: {}",
+                        "{}: Available space: {} | Tasks: {}",
+                        assignment.id,
                         &available_space,
                         &assignment.tasks.len()
                     );
@@ -2184,7 +2187,7 @@ fn shark_assignment_generator(
             //      * We have reached the maximum number of tasks per assignment
             if !assignment.tasks.is_empty() && flush
                 || stop
-                || !_continue_adding_tasks(max_tasks, &assignment)
+                || assignment.tasks.len() > max_tasks
             {
                 let assignment_size = assignment.total_size;
 
@@ -2214,16 +2217,6 @@ fn shark_assignment_generator(
         }
         Ok(())
     }
-}
-
-// If we have exceeded the per shark number of tasks then move on.  If
-// max_tasks is not specified then we continue to fill it up, and rely on the
-// max_size limit to tell us when the assignment is full.
-fn _continue_adding_tasks(
-    max_tasks: Option<u32>,
-    assignment: &Assignment,
-) -> bool {
-    max_tasks.map_or(true, |m| assignment.tasks.len() < m as usize)
 }
 
 fn validate_destination(
@@ -2282,7 +2275,8 @@ where
         match assign_rx.recv() {
             Ok(assignment) => {
                 {
-                    info!("Posting Assignment: {:#?}", &assignment);
+                    trace!("posting {} task assignment: {:#?}",
+                           assignment.tasks.len(), &assignment);
 
                     match job_action.post(assignment) {
                         Ok(()) => (),
