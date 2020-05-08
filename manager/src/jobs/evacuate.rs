@@ -36,7 +36,6 @@ use std::collections::hash_map::Entry::{Occupied, Vacant};
 use std::collections::HashMap;
 use std::error::Error as _Error;
 use std::io::{ErrorKind, Write};
-use std::path::Path;
 use std::str::FromStr;
 use std::string::ToString;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -53,7 +52,7 @@ use quickcheck::{Arbitrary, Gen};
 use quickcheck_helpers::random::string as random_string;
 use rand::seq::SliceRandom;
 use reqwest;
-use serde::{self, Deserialize};
+use serde::{self, Deserialize, Serialize};
 use serde_json::Value;
 use strum::IntoEnumIterator;
 use threadpool::ThreadPool;
@@ -289,46 +288,56 @@ trait ObjectGenerator {
 
 struct SharkSpotterGenerator {
     job_action: Arc<EvacuateJob>,
+    min_shard: u32,
+    max_shard: u32,
+    domain: String,
 }
 
-struct FileGenerator<P> {
-    filename: P,
+struct FileGenerator {
+    filename: String,
 }
-impl<P> FileGenerator<P> {
-    fn new(path: P) -> Self
-    where P: Into<Path>
-    {
-        let filename: Path = path.into();
 
+impl ObjectGenerator for FileGenerator {
+    fn generate(
+        self,
+        obj_tx: crossbeam_channel::Sender<EvacuateObject>,
+    ) -> Result<thread::JoinHandle<Result<(), Error>>, Error> {
+        thread::Builder::new()
+            .name(String::from("file_gen"))
+            .spawn(move || Ok(()))
+            .map_err(Error::from)
     }
 }
 
 impl ObjectGenerator for SharkSpotterGenerator {
     fn generate(
         self,
-        obj_tx: crossbeam_channel::Sender<EvacuateObject>
+        obj_tx: crossbeam_channel::Sender<EvacuateObject>,
     ) -> Result<thread::JoinHandle<Result<(), Error>>, Error> {
         let job_action = self.job_action;
         let max_objects = job_action.max_objects;
         let shark = &job_action.from_shark.manta_storage_id;
         let config = sharkspotter::config::Config {
-            domain: String::from(domain),
-            min_shard,
-            max_shard,
+            domain: self.domain,
+            min_shard: self.min_shard,
+            max_shard: self.max_shard,
             shark: String::from(shark.as_str()),
             ..Default::default()
         };
 
-        debug!("Starting sharkspotter thread: {:?}", &config);
+        debug!("Starting sharkspotter generator: {:?}", &config);
 
         let log = slog_scope::logger();
 
         thread::Builder::new()
-            .name(String::from("sharkspotter"))
+            .name(String::from("sharkspotter_gen"))
             .spawn(move || {
                 let mut count = 0;
                 sharkspotter::run(config, log, move |moray_object, shard| {
-                    trace!("Sharkspotter discovered object: {:#?}", &moray_object);
+                    trace!(
+                        "Sharkspotter discovered object: {:#?}",
+                        &moray_object
+                    );
                     count += 1;
                     // while testing, limit the number of objects processed for now
                     if let Some(max) = max_objects {
@@ -344,8 +353,9 @@ impl ObjectGenerator for SharkSpotterGenerator {
                     // missing objectId to be critical failures.  We cannot
                     // insert an evacuate object without an objectId.
                     let manta_object =
-                        match sharkspotter::manta_obj_from_moray_obj(&moray_object)
-                        {
+                        match sharkspotter::manta_obj_from_moray_obj(
+                            &moray_object,
+                        ) {
                             Ok(o) => o,
                             Err(e) => {
                                 return Err(std::io::Error::new(
@@ -355,12 +365,16 @@ impl ObjectGenerator for SharkSpotterGenerator {
                             }
                         };
 
-                    let id = match common::get_objectId_from_value(&manta_object) {
-                        Ok(id_str) => id_str,
-                        Err(e) => {
-                            return Err(std::io::Error::new(ErrorKind::Other, e));
-                        }
-                    };
+                    let id =
+                        match common::get_objectId_from_value(&manta_object) {
+                            Ok(id_str) => id_str,
+                            Err(e) => {
+                                return Err(std::io::Error::new(
+                                    ErrorKind::Other,
+                                    e,
+                                ));
+                            }
+                        };
 
                     // If we fail to get the etag then we can't rebalance this
                     // object, but we return Ok(()) because we want to keep
@@ -379,7 +393,11 @@ impl ObjectGenerator for SharkSpotterGenerator {
                             }
                         },
                         None => {
-                            _insert_bad_moray_object(&job_action, manta_object, id);
+                            _insert_bad_moray_object(
+                                &job_action,
+                                manta_object,
+                                id,
+                            );
                             return Ok(());
                         }
                     };
@@ -397,9 +415,9 @@ impl ObjectGenerator for SharkSpotterGenerator {
                             ..Default::default()
                         };
 
-                        job_action
-                            .insert_into_db(&eobj)
-                            .expect("Error inserting bad EvacuateObject into DB");
+                        job_action.insert_into_db(&eobj).expect(
+                            "Error inserting bad EvacuateObject into DB",
+                        );
 
                         return Err(std::io::Error::new(
                             ErrorKind::Other,
@@ -414,35 +432,36 @@ impl ObjectGenerator for SharkSpotterGenerator {
                         shard as i32,
                     );
 
-                    obj_tx
-                        .send(eobj)
-                        .map_err(CrossbeamError::from)
-                        .map_err(|e| {
+                    obj_tx.send(eobj).map_err(CrossbeamError::from).map_err(
+                        |e| {
                             error!("Sharkspotter: Error sending object: {}", e);
                             job_action.mark_object_error(
                                 &id,
                                 EvacuateObjectError::InternalError,
                             );
-                            std::io::Error::new(ErrorKind::Other, e.description())
-                        })
+                            std::io::Error::new(
+                                ErrorKind::Other,
+                                e.description(),
+                            )
+                        },
+                    )
                 })
-                    .map_err(|e| {
-                        if e.kind() == ErrorKind::Interrupted {
-                            if let Some(max) = max_objects {
-                                if count > max {
-                                    return InternalError::new(
-                                        Some(InternalErrorCode::MaxObjectsLimit),
-                                        "Max Objects Limit Reached",
-                                    )
-                                        .into();
-                                }
+                .map_err(|e| {
+                    if e.kind() == ErrorKind::Interrupted {
+                        if let Some(max) = max_objects {
+                            if count > max {
+                                return InternalError::new(
+                                    Some(InternalErrorCode::MaxObjectsLimit),
+                                    "Max Objects Limit Reached",
+                                )
+                                .into();
                             }
                         }
-                        e.into()
-                    })
+                    }
+                    e.into()
+                })
             })
             .map_err(Error::from)
-
     }
 }
 // XXX: EUNUSED
@@ -556,6 +575,18 @@ pub enum DestSharkStatus {
     Ready,
 }
 
+#[derive(Deserialize, Serialize)]
+pub enum ObjectSource {
+    SharkSpotter,
+    File(String),
+}
+
+impl Default for ObjectSource {
+    fn default() -> ObjectSource {
+        ObjectSource::SharkSpotter
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct EvacuateDestShark {
     pub shark: StorageNode,
@@ -584,6 +615,8 @@ pub struct EvacuateJob {
     /// domain_name of manta deployment
     pub domain_name: String,
 
+    pub object_source: ObjectSource,
+
     /// Tunable options
     pub options: ConfigOptions,
 
@@ -604,6 +637,7 @@ impl EvacuateJob {
         storage_id: String,
         domain_name: &str,
         db_name: &str,
+        object_source: ObjectSource,
         options: ConfigOptions,
         max_objects: Option<u32>,
     ) -> Result<Self, Error> {
@@ -626,6 +660,7 @@ impl EvacuateJob {
             from_shark,
             conn: Mutex::new(conn),
             domain_name: domain_name.to_string(),
+            object_source,
             options,
             max_objects,
             post_client: reqwest::Client::new(),
@@ -659,11 +694,7 @@ impl EvacuateJob {
 
         // job_action will be shared between threads so create an Arc for it.
         let job_action = Arc::new(self);
-
-        // get what the evacuate job needs from the config structure
         let domain = &config.domain_name;
-        let min_shard = config.min_shard_num();
-        let max_shard = config.max_shard_num();
 
         // TODO: How big should each channel be?
         // Set up channels for thread to communicate.
@@ -675,14 +706,8 @@ impl EvacuateJob {
         // TODO: lock evacuating server to readonly
         // TODO: add thread barriers MANTA-4457
 
-        // start threads to process objects
-        let sharkspotter_thread = start_sharkspotter(
-            obj_tx,
-            domain.as_str(),
-            Arc::clone(&job_action),
-            min_shard,
-            max_shard,
-        )?;
+        let generator_thread =
+            start_generator_thread(Arc::clone(&job_action), config, obj_tx)?;
 
         let metadata_update_thread =
             start_metadata_update_broker(Arc::clone(&job_action), md_update_rx)
@@ -737,11 +762,11 @@ impl EvacuateJob {
 
         storinfo.fini();
 
-        sharkspotter_thread
+        generator_thread
             .join()
-            .expect("Sharkspotter Thread")
+            .expect("Generator Thread")
             .unwrap_or_else(|e| {
-                error!("Error joining sharkspotter: {}\n", e);
+                error!("Error joining Generator Thread: {}\n", e);
                 set_run_error(&mut ret, e);
             });
 
@@ -1696,150 +1721,32 @@ fn _insert_bad_moray_object(
         .expect("Error inserting bad EvacuateObject into DB");
 }
 
-/// Start the sharkspotter thread and feed the objects into the assignment
-/// thread.  If the assignment thread (the rx side of the channel) exits
-/// prematurely the sender.send() method will return a SenderError and that
-/// needs to be handled properly.
-fn start_sharkspotter(
-    obj_tx: crossbeam::Sender<EvacuateObject>,
-    domain: &str,
+fn start_generator_thread(
     job_action: Arc<EvacuateJob>,
-    min_shard: u32,
-    max_shard: u32,
+    config: &Config,
+    obj_tx: crossbeam::Sender<EvacuateObject>,
 ) -> Result<thread::JoinHandle<Result<(), Error>>, Error> {
-    let max_objects = job_action.max_objects;
-    let shark = &job_action.from_shark.manta_storage_id;
-    let config = sharkspotter::config::Config {
-        domain: String::from(domain),
-        min_shard,
-        max_shard,
-        shark: String::from(shark.as_str()),
-        ..Default::default()
-    };
+    match &job_action.object_source {
+        ObjectSource::File(filename) => {
+            let fgen = FileGenerator {
+                filename: filename.to_owned(),
+            };
+            fgen.generate(obj_tx)
+        }
+        ObjectSource::SharkSpotter => {
+            let domain = &config.domain_name;
+            let min_shard = config.min_shard_num();
+            let max_shard = config.max_shard_num();
 
-    debug!("Starting sharkspotter thread: {:?}", &config);
-
-    let log = slog_scope::logger();
-
-    thread::Builder::new()
-        .name(String::from("sharkspotter"))
-        .spawn(move || {
-            let mut count = 0;
-            sharkspotter::run(config, log, move |moray_object, shard| {
-                trace!("Sharkspotter discovered object: {:#?}", &moray_object);
-                count += 1;
-                // while testing, limit the number of objects processed for now
-                if let Some(max) = max_objects {
-                    if count > max {
-                        return Err(std::io::Error::new(
-                            ErrorKind::Interrupted,
-                            "Max Objects Limit Reached",
-                        ));
-                    }
-                }
-
-                // For now we consider a poorly formatted moray object or a
-                // missing objectId to be critical failures.  We cannot
-                // insert an evacuate object without an objectId.
-                let manta_object =
-                    match sharkspotter::manta_obj_from_moray_obj(&moray_object)
-                    {
-                        Ok(o) => o,
-                        Err(e) => {
-                            return Err(std::io::Error::new(
-                                ErrorKind::Other,
-                                e,
-                            ))
-                        }
-                    };
-
-                let id = match common::get_objectId_from_value(&manta_object) {
-                    Ok(id_str) => id_str,
-                    Err(e) => {
-                        return Err(std::io::Error::new(ErrorKind::Other, e));
-                    }
-                };
-
-                // If we fail to get the etag then we can't rebalance this
-                // object, but we return Ok(()) because we want to keep
-                // scanning for other objects.
-                let etag = match moray_object.get("_etag") {
-                    Some(tag) => match serde_json::to_string(tag) {
-                        Ok(t) => t.replace("\"", ""),
-                        Err(e) => {
-                            error!("Cannot convert etag to string: {}", e);
-                            _insert_bad_moray_object(
-                                &job_action,
-                                manta_object,
-                                id,
-                            );
-                            return Ok(());
-                        }
-                    },
-                    None => {
-                        _insert_bad_moray_object(&job_action, manta_object, id);
-                        return Ok(());
-                    }
-                };
-
-                // TODO: build a test for this
-                if shard > std::i32::MAX as u32 {
-                    error!("Found shard number over int32 max for: {}", id);
-
-                    let eobj = EvacuateObject {
-                        id,
-                        object: manta_object,
-                        status: EvacuateObjectStatus::Error,
-                        error: Some(EvacuateObjectError::BadShardNumber),
-                        etag,
-                        ..Default::default()
-                    };
-
-                    job_action
-                        .insert_into_db(&eobj)
-                        .expect("Error inserting bad EvacuateObject into DB");
-
-                    return Err(std::io::Error::new(
-                        ErrorKind::Other,
-                        "Exceeded max number of shards",
-                    ));
-                }
-
-                let eobj = EvacuateObject::from_parts(
-                    manta_object,
-                    id.clone(),
-                    etag,
-                    shard as i32,
-                );
-
-                obj_tx
-                    .send(eobj)
-                    .map_err(CrossbeamError::from)
-                    .map_err(|e| {
-                        error!("Sharkspotter: Error sending object: {}", e);
-                        job_action.mark_object_error(
-                            &id,
-                            EvacuateObjectError::InternalError,
-                        );
-                        std::io::Error::new(ErrorKind::Other, e.description())
-                    })
-            })
-            .map_err(|e| {
-                if e.kind() == ErrorKind::Interrupted {
-                    if let Some(max) = max_objects {
-                        if count > max {
-                            return InternalError::new(
-                                Some(InternalErrorCode::MaxObjectsLimit),
-                                "Max Objects Limit Reached",
-                            )
-                            .into();
-                        }
-                    }
-                }
-                e.into()
-            })
-        })
-        .map_err(Error::from)
+            let shark_gen = SharkSpotterGenerator {
+                domain: domain.clone(),
+                job_action: Arc::clone(&job_action),
+                min_shard,
+                max_shard,
+            };
+            shark_gen.generate(obj_tx)
+        }
+    }
 }
 
 /// The assignment manager manages the destination sharks and
@@ -3365,6 +3272,7 @@ mod tests {
             from_shark,
             "fakedomain.us",
             &Uuid::new_v4().to_string(),
+            ObjectSource::default(),
             ConfigOptions::default(),
             Some(100),
         )
@@ -3556,6 +3464,7 @@ mod tests {
             String::new(),
             "fakedomain.us",
             &Uuid::new_v4().to_string(),
+            ObjectSource::default(),
             ConfigOptions::default(),
             None,
         )
@@ -3687,6 +3596,7 @@ mod tests {
             String::new(),
             "fakedomain.us",
             &Uuid::new_v4().to_string(),
+            ObjectSource::default(),
             ConfigOptions::default(),
             None,
         )
@@ -3818,6 +3728,7 @@ mod tests {
             String::new(),
             "region.fakedomain.us",
             &Uuid::new_v4().to_string(),
+            ObjectSource::default(),
             ConfigOptions::default(),
             None,
         )

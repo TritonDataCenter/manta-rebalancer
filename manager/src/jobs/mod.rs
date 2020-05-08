@@ -14,7 +14,7 @@ pub mod status;
 use crate::config::Config;
 use crate::pg_db::connect_or_create_db;
 use crate::storinfo::StorageNode;
-use evacuate::EvacuateJob;
+use evacuate::{EvacuateJob, ObjectSource};
 use rebalancer::common::{ObjectId, Task};
 use rebalancer::error::{Error, InternalError, InternalErrorCode};
 
@@ -91,12 +91,14 @@ impl JobBuilder {
         mut self,
         from_shark: String,
         domain_name: &str,
+        object_source: ObjectSource,
         max_objects: Option<u32>,
     ) -> JobBuilder {
         match EvacuateJob::new(
             from_shark,
             domain_name,
             &self.id.to_string(),
+            object_source,
             self.config.options,
             max_objects,
         ) {
@@ -566,7 +568,12 @@ mod test {
         assert_eq!(builder.state, JobState::Init);
 
         let from_shark = String::from("1.stor.domain");
-        let builder = builder.evacuate(from_shark, "fakedomain.us", Some(1));
+        let builder = builder.evacuate(
+            from_shark,
+            "fakedomain.us",
+            ObjectSource::default(),
+            Some(1),
+        );
         assert_eq!(builder.state, JobState::Init);
 
         let job = builder.commit().expect("failed to create job");

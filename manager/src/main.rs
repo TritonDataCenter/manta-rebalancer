@@ -24,7 +24,8 @@ static GLOBAL: Jemalloc = Jemalloc;
 
 use manager::config::Config;
 use manager::jobs::status::StatusError;
-use manager::jobs::{self, JobBuilder, JobDbEntry, JobPayload};
+use manager::jobs::{self, evacuate::ObjectSource, JobBuilder, JobDbEntry,
+                    JobPayload};
 use manager::metrics::{metrics_init, metrics_request_inc};
 use rebalancer::util;
 
@@ -271,6 +272,7 @@ impl Handler for JobCreateHandler {
                     .evacuate(
                         evac_payload.from_shark,
                         &domain_name,
+                        evac_payload.source,
                         max_objects,
                     )
                     .commit()
@@ -467,7 +469,12 @@ mod tests {
         let config = config.lock().expect("lock config").clone();
         let job_builder = JobBuilder::new(config);
         let job = job_builder
-            .evacuate(String::from("fake_storage_id"), "fake.joyent.us", None)
+            .evacuate(
+                String::from("fake_storage_id"),
+                "fake.joyent.us",
+                ObjectSource::default(),
+                None,
+            )
             .commit()
             .expect("Failed to create job");
         let job_id = job.get_id().to_string();
@@ -498,6 +505,7 @@ mod tests {
         let job_payload = JobPayload::Evacuate(EvacuateJobPayload {
             from_shark: String::from("fake_storage_id"),
             max_objects: Some(10),
+            source: ObjectSource::default(),
         });
         let payload = serde_json::to_string(&job_payload)
             .expect("serde serialize payload");
