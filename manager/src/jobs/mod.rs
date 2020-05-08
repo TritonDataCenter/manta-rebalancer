@@ -261,13 +261,11 @@ impl fmt::Debug for Job {
                  assignments: {:#?}, \
                  from_shark: {:#?}, \
                  min_avail_mb: {:#?}, \
-                 max_tasks_per_assignment: {:#?}, \
                  }}",
                 ej.dest_shark_list,
                 ej.assignments,
                 ej.from_shark,
                 ej.min_avail_mb,
-                ej.max_tasks_per_assignment
             ),
             _ => String::new(),
         };

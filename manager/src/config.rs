@@ -29,7 +29,7 @@ use std::thread::JoinHandle;
 static DEFAULT_CONFIG_PATH: &str = "/opt/smartdc/rebalancer/config.json";
 
 // The maximum number of tasks we will send in a single assignment to the agent.
-static DEFAULT_MAX_ASSIGNMENT_SIZE: usize = 50;
+static DEFAULT_MAX_TASKS_PER_ASSIGNMENT: usize = 50;
 
 // The maximum number of threads that will be used for metadata updates.
 // Each thread has its own hash of moray clients.
@@ -46,6 +46,12 @@ static DEFAULT_MAX_SHARKS: usize = 5;
 // available.
 static DEFAULT_STATIC_QUEUE_DEPTH: usize = 10;
 
+// The maximum amount of time in seconds that an assignment should remain in
+// memory before it is posted to an agent.  This is not a hard and fast rule.
+// This will only be checked synchronously every time we gather another set of
+// destination sharks.
+static DEFAULT_MAX_ASSIGNMENT_AGE: u64 = 600;
+
 #[derive(Deserialize, Default, Debug, Clone)]
 pub struct Shard {
     pub host: String,
@@ -56,21 +62,23 @@ pub struct Shard {
 #[derive(Deserialize, Debug, Clone, Copy)]
 #[serde(default)]
 pub struct ConfigOptions {
-    pub max_assignment_size: usize,
+    pub max_tasks_per_assignment: usize,
     pub max_metadata_update_threads: usize,
     pub max_sharks: usize,
     pub use_static_md_update_threads: bool,
     pub static_queue_depth: usize,
+    pub max_assignment_age: u64,
 }
 
 impl Default for ConfigOptions {
     fn default() -> ConfigOptions {
         ConfigOptions {
-            max_assignment_size: DEFAULT_MAX_ASSIGNMENT_SIZE,
+            max_tasks_per_assignment: DEFAULT_MAX_TASKS_PER_ASSIGNMENT,
             max_metadata_update_threads: DEFAULT_MAX_METADATA_UPDATE_THREADS,
             max_sharks: DEFAULT_MAX_SHARKS,
             use_static_md_update_threads: true,
             static_queue_depth: DEFAULT_STATIC_QUEUE_DEPTH,
+            max_assignment_age: DEFAULT_MAX_ASSIGNMENT_AGE,
         }
     }
 }
@@ -457,7 +465,7 @@ mod tests {
     use libc;
     use mustache::{Data, MapBuilder};
     use std::fs::File;
-    use std::io::{BufRead, BufReader, Write};
+    use std::io::{Read, Write};
 
     static TEST_CONFIG_FILE: &str = "config.test.json";
 
@@ -548,16 +556,19 @@ mod tests {
         assert_eq!(config.listen_port, 80);
 
         File::open(TEST_CONFIG_FILE)
-            .and_then(|f| {
-                for line in BufReader::new(f).lines() {
-                    let l = line.expect("line reader");
-                    println!("{}", l);
+            .and_then(|mut f| {
+                let mut config_file = String::new();
 
-                    assert!(!l.contains("options"));
-                    assert!(!l.contains("max_assignment_size"));
-                    assert!(!l.contains("max_metadata_update_threads"));
-                    assert!(!l.contains("max_sharks"));
-                }
+                f.read_to_string(&mut config_file).expect("config file");
+
+                assert!(config_file.contains("options"));
+                assert!(config_file.contains("max_tasks_per_assignment"));
+                assert!(config_file.contains("max_metadata_update_threads"));
+                assert!(config_file.contains("max_sharks"));
+                assert!(config_file.contains("use_static_md_update_threads"));
+                assert!(config_file.contains("static_queue_depth"));
+                assert!(config_file.contains("max_assignment_age"));
+
                 Ok(())
             })
             .expect("config_basic_test");
@@ -571,7 +582,7 @@ mod tests {
 
         let file_contents = r#"{
                 "options": {
-                    "max_assignment_size": 1111,
+                    "max_tasks_per_assignment": 1111,
                     "max_metadata_update_threads": 2222,
                     "max_sharks": 3333
                 },
@@ -587,9 +598,18 @@ mod tests {
         std::fs::remove_file(TEST_CONFIG_FILE).unwrap_or(());
         let config = write_config_file(file_contents.as_bytes());
 
-        assert_eq!(config.options.max_assignment_size, 1111);
+        assert_eq!(config.options.max_tasks_per_assignment, 1111);
         assert_eq!(config.options.max_metadata_update_threads, 2222);
         assert_eq!(config.options.max_sharks, 3333);
+        assert_eq!(config.options.use_static_md_update_threads, true);
+        assert_eq!(
+            config.options.static_queue_depth,
+            DEFAULT_STATIC_QUEUE_DEPTH
+        );
+        assert_eq!(
+            config.options.max_assignment_age,
+            DEFAULT_MAX_ASSIGNMENT_AGE
+        );
 
         config_fini();
     }
