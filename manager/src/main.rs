@@ -9,6 +9,9 @@
  */
 
 #[macro_use]
+extern crate failure;
+
+#[macro_use]
 extern crate gotham_derive;
 
 #[macro_use]

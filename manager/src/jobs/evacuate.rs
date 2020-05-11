@@ -35,7 +35,9 @@ use crate::storinfo::{self as mod_storinfo, SharkSource, StorageNode};
 use std::collections::hash_map::Entry::{Occupied, Vacant};
 use std::collections::HashMap;
 use std::error::Error as _Error;
-use std::io::{ErrorKind, Write};
+use std::fs::{self, File};
+use std::io::{BufRead, BufReader, ErrorKind, Write};
+use std::path::PathBuf;
 use std::str::FromStr;
 use std::string::ToString;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -46,17 +48,26 @@ use std::time::Duration;
 use crossbeam_channel as crossbeam;
 use crossbeam_channel::TryRecvError;
 use crossbeam_deque::{Injector, Steal};
+use lazy_static::lazy_static;
 use libmanta::moray::{MantaObject, MantaObjectShark};
 use moray::client::MorayClient;
 use quickcheck::{Arbitrary, Gen};
 use quickcheck_helpers::random::string as random_string;
 use rand::seq::SliceRandom;
+use regex::Regex;
 use reqwest;
 use serde::{self, Deserialize, Serialize};
 use serde_json::Value;
 use strum::IntoEnumIterator;
 use threadpool::ThreadPool;
 use uuid::Uuid;
+
+lazy_static! {
+    static ref OBJ_FILE_RE: Regex =
+        Regex::new(r#"^shard_(?P<shard>\d+)\.objs$"#).expect("compile regex");
+    static ref SHARK_DIR_RE: Regex =
+        Regex::new(r#"^\d+\.stor$"#).expect("compile regex");
+}
 
 // --- Diesel Stuff, TODO This should be refactored --- //
 
@@ -65,6 +76,7 @@ use diesel::pg::{Pg, PgConnection, PgValue};
 use diesel::prelude::*;
 use diesel::serialize::{self, IsNull, Output, ToSql};
 use diesel::sql_types;
+use std::path::Path;
 
 // Note: The ordering of the fields in this table must match the ordering of
 // the fields in 'struct EvacuateObject'
@@ -280,10 +292,7 @@ pub fn create_evacuateobjects_table(
 struct FiniMsg;
 
 trait ObjectGenerator {
-    fn generate(
-        self,
-        obj_tx: crossbeam_channel::Sender<EvacuateObject>,
-    ) -> Result<thread::JoinHandle<Result<(), Error>>, Error>;
+    fn generate(self) -> Result<thread::JoinHandle<Result<(), Error>>, Error>;
 }
 
 struct SharkSpotterGenerator {
@@ -291,32 +300,161 @@ struct SharkSpotterGenerator {
     min_shard: u32,
     max_shard: u32,
     domain: String,
+    obj_tx: crossbeam_channel::Sender<EvacuateObject>,
 }
 
 struct FileGenerator {
-    filename: String,
+    job_action: Arc<EvacuateJob>,
+    directory: String,
+    min_shard: u32,
+    max_shard: u32,
+    obj_tx: crossbeam_channel::Sender<EvacuateObject>,
+}
+
+use failure::Error as Failure;
+use failure::Fail;
+
+#[derive(Debug, Fail)]
+enum FileGeneratorError {
+    #[fail(
+        display = "Filename ({})should be of the format <num>_shard.objs",
+        filename
+    )]
+    ImproperlyFormattedFilename { filename: String },
+    #[fail(
+        display = "Filename ({})should be of the format <num>_shard.objs",
+        dirname
+    )]
+    ImproperlyFormattedDirname { dirname: String },
+    #[fail(display = "Input directory should not contain sub-directories")]
+    NestedDirectory,
+    #[fail(display = "Input path must end in a filename and not '..'")]
+    InvalidFileName,
+    #[fail(display = "Input path must start with a directory")]
+    MissingDirectory,
+    #[fail(display = "Directory must be named as a storage node")]
+    InvalidDirName,
+}
+
+impl FileGenerator {
+    /// Validate that the input directory is of the form:
+    /// <shark name>/
+    ///     <per_shard object file>
+    ///     <per_shard object file>
+    ///     <per_shard object file>
+    ///     ...
+    fn validate_directory(&self) -> Result<(), Failure> {
+        let dir = Path::new(self.directory.as_str());
+        if !dir.is_dir() {
+            return Err(FileGeneratorError::MissingDirectory.into());
+        }
+
+        let dirname = match dir.file_name() {
+            Some(d) => d.to_string_lossy().to_string(),
+            None => {
+                return Err(FileGeneratorError::InvalidDirName.into());
+            }
+        };
+
+        if !SHARK_DIR_RE.is_match(&dirname) {
+            return Err(FileGeneratorError::ImproperlyFormattedDirname {
+                dirname,
+            }
+            .into());
+        }
+
+        for entry in fs::read_dir(dir)? {
+            let entry = entry?.path();
+            if entry.is_dir() {
+                return Err(FileGeneratorError::NestedDirectory.into());
+            } else if entry.is_file() {
+                let filename = match entry.file_name() {
+                    Some(f) => f.to_string_lossy().to_string(),
+                    None => {
+                        return Err(FileGeneratorError::InvalidFileName.into());
+                    }
+                };
+
+                // Does this filename match the format.
+                if !OBJ_FILE_RE.is_match(&filename) {
+                    return Err(
+                        FileGeneratorError::ImproperlyFormattedFilename {
+                            filename,
+                        }
+                        .into(),
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn walk_shards<F>(
+        &self,
+        obj_tx: crossbeam_channel::Sender<EvacuateObject>,
+    ) -> Result<(), Error> {
+        let dir = Path::new(self.directory.as_str());
+        for shard in fs::read_dir(dir)? {
+            let shard = shard?.path();
+            self.walk_objects(shard)?
+        }
+        Ok(())
+    }
+
+    ///
+    /// Walk the objects in a single file named "shard_<shard_num>.objs"
+    ///
+    fn walk_objects(&self, shard: PathBuf) -> Result<(), Error> {
+        let captures = shard
+            .to_str()
+            .ok_or(InternalError::new(
+                None,
+                "failed to convert filename to string",
+            ))
+            .and_then(|file_str| {
+                OBJ_FILE_RE.captures(file_str).ok_or(InternalError::new(
+                    None,
+                    "failed to capture shard number",
+                ))
+            })
+            .map_err(Error::from)?;
+
+        let shard_num = captures["shard"].parse::<u32>()?;
+
+        // TODO: Check for min & max shard?
+
+        let reader = BufReader::new(File::open(shard)?);
+        for l in reader.lines() {
+            // create the EvacuateObject and send it down the channel
+        }
+        Ok(())
+    }
 }
 
 impl ObjectGenerator for FileGenerator {
-    fn generate(
-        self,
-        obj_tx: crossbeam_channel::Sender<EvacuateObject>,
-    ) -> Result<thread::JoinHandle<Result<(), Error>>, Error> {
+    fn generate(self) -> Result<thread::JoinHandle<Result<(), Error>>, Error> {
         thread::Builder::new()
             .name(String::from("file_gen"))
-            .spawn(move || Ok(()))
+            .spawn(move || {
+                if let Err(e) = self.validate_directory() {
+                    return Err(InternalError::new(
+                        Some(InternalErrorCode::InvalidJobAction),
+                        e.to_string(),
+                    )
+                    .into());
+                }
+                Ok(())
+            })
             .map_err(Error::from)
     }
 }
 
 impl ObjectGenerator for SharkSpotterGenerator {
-    fn generate(
-        self,
-        obj_tx: crossbeam_channel::Sender<EvacuateObject>,
-    ) -> Result<thread::JoinHandle<Result<(), Error>>, Error> {
+    fn generate(self) -> Result<thread::JoinHandle<Result<(), Error>>, Error> {
         let job_action = self.job_action;
         let max_objects = job_action.max_objects;
         let shark = &job_action.from_shark.manta_storage_id;
+        let obj_tx = self.obj_tx;
         let config = sharkspotter::config::Config {
             domain: self.domain,
             min_shard: self.min_shard,
@@ -1726,25 +1864,31 @@ fn start_generator_thread(
     config: &Config,
     obj_tx: crossbeam::Sender<EvacuateObject>,
 ) -> Result<thread::JoinHandle<Result<(), Error>>, Error> {
+    let min_shard = config.min_shard_num();
+    let max_shard = config.max_shard_num();
+
     match &job_action.object_source {
-        ObjectSource::File(filename) => {
+        ObjectSource::File(directory) => {
             let fgen = FileGenerator {
-                filename: filename.to_owned(),
+                job_action: Arc::clone(&job_action), // XXX Used?
+                directory: directory.to_owned(),
+                min_shard,
+                max_shard,
+                obj_tx,
             };
-            fgen.generate(obj_tx)
+            fgen.generate()
         }
         ObjectSource::SharkSpotter => {
             let domain = &config.domain_name;
-            let min_shard = config.min_shard_num();
-            let max_shard = config.max_shard_num();
 
             let shark_gen = SharkSpotterGenerator {
                 domain: domain.clone(),
                 job_action: Arc::clone(&job_action),
                 min_shard,
                 max_shard,
+                obj_tx,
             };
-            shark_gen.generate(obj_tx)
+            shark_gen.generate()
         }
     }
 }
