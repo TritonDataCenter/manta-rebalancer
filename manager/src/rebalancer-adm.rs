@@ -11,72 +11,15 @@
 use clap::{App, Arg, ArgMatches};
 use manager::jobs::{EvacuateJobPayload, JobPayload};
 use reqwest;
-use serde_json::Value::{self, Object};
+use serde_json::Value;
 use std::result::Result;
-use tabular::{Row, Table};
 
 pub static JOBS_URL: &str = "http://localhost/jobs";
-
-// Display the result.  This function takes a Vector of Values and prints its
-// contents either in tabular format (the current default) or in JSON, depending
-// on what the user specified in their arguments.
-fn display_result(values: Vec<Value>, matches: &ArgMatches) {
-    // The user specified JSON output.  Print it and return.
-    if matches.is_present("json") {
-        match serde_json::to_string_pretty(&values) {
-            Ok(v) => println!("{}", v),
-            Err(e) => println!("Failed to serialize value: {}", &e),
-        };
-        return;
-    }
-
-    // Get the first value from our vector.  We examine the keys of the first
-    // object.  This information will tell us how many cells to have per row.
-    let entry = &values[0];
-    let mut header = Row::new();
-    let mut fmtstr = "".to_owned();
-
-    if let Object(map) = entry {
-        for (key, _val) in map {
-            // Use the key name in the map to be the column label for the table.
-            header.add_cell(key);
-
-            // Push another argument on to the format string. {:<} means that
-            // the value in the cell will be left-justified.
-            fmtstr.push_str("{:<}   ");
-        }
-    }
-
-    // Create the table.  The first row is our header of the table.
-    let mut table = Table::new(&fmtstr);
-    table.add_row(header);
-
-    // Now iterate through our vector of values.  Each value is a type of map,
-    // where it contains a list of keys and values.  The values of a single
-    // entry form a single row in the table.  The loop below populates each
-    // cell in the row, one at a time.
-    for v in values.iter() {
-        if let Object(map) = v {
-            let mut row = Row::new();
-
-            // Iterate through our value like a map.
-            for (_key, val) in map {
-                let mut element = format!("{}", val);
-                element.retain(|x| !['"'].contains(&x));
-                row.add_cell(&element);
-            }
-
-            // Add the row to the table now that it is fully populated.
-            table.add_row(row);
-        }
-    }
-    print!("{}", table);
-}
 
 // Common function used in order to get a list of jobs, or get specific job
 // information.  The contents of the response are evaluated and printed by
 // the caller.
-fn manager_get_common(url: &str) -> Result<String, String> {
+fn get_common(url: &str) -> Result<(), String> {
     let mut response = match reqwest::get(url) {
         Ok(resp) => resp,
         Err(e) => return Err(format!("Request failed: {}", &e)),
@@ -87,27 +30,17 @@ fn manager_get_common(url: &str) -> Result<String, String> {
         return Err(format!("Error creating job: {}", response.status()));
     }
 
-    match response.text() {
-        Ok(p) => Ok(p),
-        Err(e) => return Err(format!("Failed to parse response body: {}", &e)),
-    }
-}
-
-// Send a request to the manager asking for the uuids of all known jobs.
-fn job_list(matches: &ArgMatches) -> Result<(), String> {
-    let payload = match manager_get_common(JOBS_URL) {
-        Ok(p) => p,
-        Err(e) => return Err(e),
-    };
-
-    let result = match serde_json::from_str(&payload) {
+    let v: Value = match response.json() {
         Ok(v) => v,
-        Err(e) => {
-            return Err(format!("Failed to deserialize response: {}", &e))
-        }
+        Err(e) => return Err(format!("Failed to parse response body: {}", &e)),
     };
 
-    display_result(result, matches);
+    let result = match serde_json::to_string_pretty(&v) {
+        Ok(s) => s,
+        Err(e) => return Err(format!("Failed to deserialize: {}", &e)),
+    };
+
+    println!("{}", result);
     Ok(())
 }
 
@@ -117,24 +50,7 @@ fn job_get(matches: &ArgMatches) -> Result<(), String> {
     let uuid = matches.value_of("uuid").unwrap();
     let url = format!("{}/{}", JOBS_URL, uuid);
 
-    let payload = match manager_get_common(&url) {
-        Ok(p) => p,
-        Err(e) => return Err(e),
-    };
-
-    let result = match serde_json::from_str(&payload) {
-        Ok(v) => {
-            let mut vec = Vec::new();
-            vec.push(v);
-            vec
-        }
-        Err(e) => {
-            return Err(format!("Failed to deserialize response: {}", &e))
-        }
-    };
-
-    display_result(result, matches);
-    Ok(())
+    get_common(&url)
 }
 
 fn job_create(matches: &ArgMatches) -> Result<(), String> {
@@ -208,18 +124,13 @@ fn job_create_evacuate(matches: &ArgMatches) -> Result<(), String> {
 fn process_subcmd_job(job_matches: &ArgMatches) -> Result<(), String> {
     match job_matches.subcommand() {
         ("get", Some(get_matches)) => job_get(get_matches),
-        ("list", Some(list_matches)) => job_list(list_matches),
+        ("list", Some(_)) => get_common(JOBS_URL),
         ("create", Some(create_matches)) => job_create(create_matches),
         _ => unreachable!(),
     }
 }
 
 fn main() {
-    let output = Arg::with_name("json")
-        .short("j")
-        .long("json")
-        .help("Prints information in json format");
-
     let matches = App::new("rebalancer-adm")
         .version("0.1.0")
         .about("Rebalancer client utility")
@@ -238,13 +149,11 @@ fn main() {
                             .required(true)
                             .help("Uuid of a job"),
                         )
-                        .arg(&output),
                 )
                 // List subcommand
                 .subcommand(
                     App::new("list")
                         .about("List all known rebalancer jobs")
-                        .arg(&output),
                 )
                 // Create subcommand
                 .subcommand(
@@ -274,12 +183,6 @@ fn main() {
                             .help("Maximum number of objects allowed in the job"),
                         )
                 )
-                .arg(
-                    Arg::with_name("json")
-                        .short("j")
-                        .long("json")
-                        .help("Prints information in json format"),
-                ),
         )
         .get_matches();
 

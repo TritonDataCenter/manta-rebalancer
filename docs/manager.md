@@ -126,34 +126,77 @@ SUBCOMMANDS:
 
 ```
 
-```
 Job Management
+```
+Job operations
 
 USAGE:
-   rebalancer-adm job [SUBCOMMAND]
+    rebalancer-adm job [SUBCOMMAND]
 
 FLAGS:
     -h, --help       Prints help information
     -V, --version    Prints version information
 
 SUBCOMMANDS:
+    create    Create a rebalancer job
+    get       Get information on a specific job
     help      Prints this message or the help of the given subcommand(s)
-    list      Get list of rebalancer jobs
-    status    Get the status of a rebalancer job
-```
+    list      List all known rebalancer jobs
 
 ```
+
 Get the status of a rebalancer job
+```
+    rebalancer-adm job get --uuid <uuid>
+```
 
-USAGE:
-    remora job status <JOB_ID>
+List all known jobs
+```
+    rebalancer-adm job list
+```
 
-FLAGS:
-    -h, --help       Prints help information
-    -V, --version    Prints version information
+Create a new job
+```
+    rebalancer-adm job create --type=<job type> --shark=<storage server name> [--max_objects=<maximum number of ojects]
+```
 
-ARGS:
-    <JOB_ID>    UUID of job
+Note: All output is displayed in JSON.  The output below is the result of a `job list` request:
+```
+[
+  {
+    "action": "Evacuate",
+    "id": "9d5e4b18-cdec-440c-88fa-64f6c49ea814",
+    "state": "Setup"
+  },
+  {
+    "action": "Evacuate",
+    "id": "bbd4088d-fec9-4875-9aa4-d1ca43a21c93",
+    "state": "Setup"
+  },
+  {
+    "action": "Evacuate",
+    "id": "1090b9de-d03c-4082-8a61-8637193ff829",
+    "state": "Setup"
+  }
+]
+
+```
+
+Note: One current shortcoming of the tool is that it can not display results
+in tabular format, however, it is still possible to do via the JSON command
+line utility (jq).
+
+Example:
+```
+[root@a422f03b-f17e-62fc-d3d5-eacc548e8a8a]#  rebalancer-adm job list | jq -r '.[] | "\(.action)\t\(.id)\t\(.state)"'
+Evacuate        0c89c985-3e79-4011-b7e3-191c09b074af    Complete
+Evacuate        5a2ddd94-c52c-491d-9ca8-8f80840712dc    Failed
+Evacuate        e13e6181-ca7c-486c-8ece-3b129052a482    Setup
+Evacuate        1e80ca29-816e-4dd1-a6c8-418e050e5c22    Failed
+Evacuate        964e4031-8e90-4244-b4e6-826e98a6236f    Setup
+Evacuate        9d25d63f-b659-4633-b692-8b4402e57c8e    Setup
+Evacuate        611ce930-8f14-470d-b271-3044c6cf782a    Setup
+Evacuate        c17370f4-33b3-4e5b-b3d7-04a0ec9bbd9a    Complete
 ```
 
 ## Manager Configuration Parameters
