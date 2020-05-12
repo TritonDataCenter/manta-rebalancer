@@ -200,6 +200,33 @@ pub enum EvacuateObjectError {
     BadContentLength,
 }
 
+impl From<Error> for EvacuateObjectError {
+    fn from(error: Error) -> Self {
+        if let Error::Internal(int_err) = error {
+            match int_err.code {
+                InternalErrorCode::BadShardNumber => {
+                    EvacuateObjectError::BadShardNumber
+                }
+                InternalErrorCode::BadMorayObject => {
+                    EvacuateObjectError::BadMorayObject
+                }
+                InternalErrorCode::BadMantaObject => {
+                    EvacuateObjectError::BadMantaObject
+                }
+                InternalErrorCode::DuplicateShark => {
+                    EvacuateObjectError::DuplicateShark
+                }
+                InternalErrorCode::SharkNotFound => {
+                    EvacuateObjectError::MissingSharks
+                }
+                _ => EvacuateObjectError::InternalError,
+            }
+        } else {
+            EvacuateObjectError::InternalError
+        }
+    }
+}
+
 impl Arbitrary for EvacuateObjectError {
     fn arbitrary<G: Gen>(g: &mut G) -> EvacuateObjectError {
         let i: usize = g.next_u32() as usize % Self::iter().count();
@@ -389,10 +416,7 @@ impl FileGenerator {
         Ok(())
     }
 
-    fn walk_shards<F>(
-        &self,
-        obj_tx: crossbeam_channel::Sender<EvacuateObject>,
-    ) -> Result<(), Error> {
+    fn walk_shards(&self) -> Result<(), Error> {
         let dir = Path::new(self.directory.as_str());
         for shard in fs::read_dir(dir)? {
             let shard = shard?.path();
@@ -407,12 +431,12 @@ impl FileGenerator {
     fn walk_objects(&self, shard: PathBuf) -> Result<(), Error> {
         let captures = shard
             .to_str()
-            .ok_or(InternalError::new(
+            .ok_or_else(|| InternalError::new(
                 None,
                 "failed to convert filename to string",
             ))
             .and_then(|file_str| {
-                OBJ_FILE_RE.captures(file_str).ok_or(InternalError::new(
+                OBJ_FILE_RE.captures(file_str).ok_or_else(|| InternalError::new(
                     None,
                     "failed to capture shard number",
                 ))
@@ -424,8 +448,53 @@ impl FileGenerator {
         // TODO: Check for min & max shard?
 
         let reader = BufReader::new(File::open(shard)?);
-        for l in reader.lines() {
-            // create the EvacuateObject and send it down the channel
+        for obj in reader.lines() {
+            let moray_object = serde_json::to_value(obj?)?;
+            let eobj = match EvacuateObject::from_moray_object(
+                moray_object,
+                shard_num,
+            ) {
+                Ok(obj) => obj,
+                Err((partial_obj, e)) => {
+                    match partial_obj {
+                        Some(po) => {
+                            let id = common::get_objectId_from_value(&po)?;
+
+                            _insert_bad_object(
+                                &self.job_action,
+                                po,
+                                id,
+                                e.into(),
+                            );
+                            // We were able to record the issue with this
+                            // object, so there is no data loss.  Keep
+                            // reading in objects.
+                            continue;
+                        }
+                        None => {
+                            error!("Error converting moray object: {}", e);
+                            return Err(e);
+                        }
+                    }
+                }
+            };
+
+            let id = eobj.id.clone();
+            self.obj_tx
+                .send(eobj)
+                .map_err(CrossbeamError::from)
+                .map_err(|e| {
+                    error!("Error sending object: {}", e);
+                    self.job_action.mark_object_error(
+                        &id,
+                        EvacuateObjectError::InternalError,
+                    );
+                    InternalError::new(
+                        Some(InternalErrorCode::Crossbeam),
+                        e.description(),
+                    )
+                })
+                .map_err(Error::from)?;
         }
         Ok(())
     }
@@ -443,7 +512,7 @@ impl ObjectGenerator for FileGenerator {
                     )
                     .into());
                 }
-                Ok(())
+                self.walk_shards()
             })
             .map_err(Error::from)
     }
@@ -487,89 +556,46 @@ impl ObjectGenerator for SharkSpotterGenerator {
                         }
                     }
 
-                    // For now we consider a poorly formatted moray object or a
-                    // missing objectId to be critical failures.  We cannot
-                    // insert an evacuate object without an objectId.
-                    let manta_object =
-                        match sharkspotter::manta_obj_from_moray_obj(
-                            &moray_object,
-                        ) {
-                            Ok(o) => o,
-                            Err(e) => {
-                                return Err(std::io::Error::new(
-                                    ErrorKind::Other,
-                                    e,
-                                ))
-                            }
-                        };
+                    // If the call to from_moray_object() fails, we will
+                    // return here.  If we fail to even get a partial evacuate
+                    // object then we should return error here and stop
+                    // scanning.  If we get enough of an object that we can at
+                    // least record the error in our persistent store then
+                    // return Ok(()) and keep scanning.
+                    let eobj = match EvacuateObject::from_moray_object(
+                        moray_object,
+                        shard,
+                    ) {
+                        Ok(obj) => obj,
+                        Err((partial_obj, e)) => match partial_obj {
+                            Some(po) => {
+                                let id = common::get_objectId_from_value(&po)
+                                    .map_err(|e| {
+                                    std::io::Error::new(
+                                        ErrorKind::Other,
+                                        e.description(),
+                                    )
+                                })?;
 
-                    let id =
-                        match common::get_objectId_from_value(&manta_object) {
-                            Ok(id_str) => id_str,
-                            Err(e) => {
+                                _insert_bad_object(
+                                    &job_action,
+                                    po,
+                                    id,
+                                    e.into(),
+                                );
+                                return Ok(());
+                            }
+                            None => {
+                                error!("Error converting moray object: {}", e);
                                 return Err(std::io::Error::new(
                                     ErrorKind::Other,
                                     e,
                                 ));
                             }
-                        };
-
-                    // If we fail to get the etag then we can't rebalance this
-                    // object, but we return Ok(()) because we want to keep
-                    // scanning for other objects.
-                    let etag = match moray_object.get("_etag") {
-                        Some(tag) => match serde_json::to_string(tag) {
-                            Ok(t) => t.replace("\"", ""),
-                            Err(e) => {
-                                error!("Cannot convert etag to string: {}", e);
-                                _insert_bad_moray_object(
-                                    &job_action,
-                                    manta_object,
-                                    id,
-                                );
-                                return Ok(());
-                            }
                         },
-                        None => {
-                            _insert_bad_moray_object(
-                                &job_action,
-                                manta_object,
-                                id,
-                            );
-                            return Ok(());
-                        }
                     };
 
-                    // TODO: build a test for this
-                    if shard > std::i32::MAX as u32 {
-                        error!("Found shard number over int32 max for: {}", id);
-
-                        let eobj = EvacuateObject {
-                            id,
-                            object: manta_object,
-                            status: EvacuateObjectStatus::Error,
-                            error: Some(EvacuateObjectError::BadShardNumber),
-                            etag,
-                            ..Default::default()
-                        };
-
-                        job_action.insert_into_db(&eobj).expect(
-                            "Error inserting bad EvacuateObject into DB",
-                        );
-
-                        return Err(std::io::Error::new(
-                            ErrorKind::Other,
-                            "Exceeded max number of shards",
-                        ));
-                    }
-
-                    let eobj = EvacuateObject::from_parts(
-                        manta_object,
-                        id.clone(),
-                        etag,
-                        shard as i32,
-                    );
-
+                    let id = eobj.id.clone();
                     obj_tx.send(eobj).map_err(CrossbeamError::from).map_err(
                         |e| {
                             error!("Sharkspotter: Error sending object: {}", e);
@@ -577,6 +603,7 @@ impl ObjectGenerator for SharkSpotterGenerator {
                                 &id,
                                 EvacuateObjectError::InternalError,
                             );
+                            // TODO crossbeam error
                             std::io::Error::new(
                                 ErrorKind::Other,
                                 e.description(),
@@ -601,13 +628,6 @@ impl ObjectGenerator for SharkSpotterGenerator {
             })
             .map_err(Error::from)
     }
-}
-// XXX: EUNUSED
-#[derive(Debug)]
-pub struct SharkSpotterObject {
-    pub shard: i32,
-    pub object: Value,
-    pub etag: String,
 }
 
 impl Default for EvacuateObjectStatus {
@@ -703,6 +723,102 @@ impl EvacuateObject {
             etag,
             ..Default::default()
         }
+    }
+
+    // This function converts a moray object to an evacuate object.
+    // On error it returns a tuple of (Option<MantaObject>, Error>).  The
+    // reason for this is so that on return callers can insert the bad manta
+    // object into the local DB so that we track the data.  If the object is
+    // missing it means that the input moray_object was so malformed that we
+    // couldn't even get the corresponding manta object from it.  If the
+    // return value is Err(None, Error), the caller should consider this a
+    // critical failure and consider failing the evacuate job as data loss
+    // is likely.
+    fn from_moray_object(
+        moray_object: Value,
+        shard: u32,
+    ) -> Result<Self, (Option<Value>, Error)> {
+        // For now we consider a poorly formatted manta object or a
+        // missing objectId to be critical failures.  We cannot
+        // insert an evacuate object without an objectId, so we can't record
+        // an error here.  If we keep scanning at this point we risk losing
+        // data, so we must let the caller know that this is a critical failure.
+        let manta_object =
+            match sharkspotter::manta_obj_from_moray_obj(&moray_object) {
+                Ok(o) => o,
+                Err(e) => {
+                    return Err((
+                        None,
+                        InternalError::new(
+                            Some(InternalErrorCode::BadMantaObject),
+                            e,
+                        )
+                        .into(),
+                    ))
+                }
+            };
+
+        // A missing objectID is also considered to be a critical failure.
+        let id = common::get_objectId_from_value(&manta_object)
+            .map_err(|e| (None, e))?;
+
+        // From here on we have enough information to record an error in our
+        // persistent store.
+
+        // If we fail to get the etag then we can't rebalance this
+        // object, but we return Ok(()) because we want to keep
+        // scanning for other objects.
+        let etag = match moray_object.get("_etag") {
+            Some(tag) => match serde_json::to_string(tag) {
+                Ok(t) => t.replace("\"", ""),
+                Err(e) => {
+                    let err_msg =
+                        format!("Cannot convert etag to string: {}", e);
+                    error!("{}", err_msg);
+                    return Err((
+                        Some(manta_object),
+                        InternalError::new(
+                            Some(InternalErrorCode::BadMorayObject),
+                            err_msg,
+                        )
+                        .into(),
+                    ));
+                }
+            },
+            None => {
+                return Err((
+                    Some(manta_object),
+                    InternalError::new(
+                        Some(InternalErrorCode::BadMorayObject),
+                        "moray object is missing _etag",
+                    )
+                    .into(),
+                ));
+            }
+        };
+
+        // TODO: build a test for this
+        if shard > std::i32::MAX as u32 {
+            let err_msg =
+                format!("Found shard number over int32 max for: {}", id);
+            error!("{}", err_msg);
+
+            return Err((
+                Some(manta_object),
+                InternalError::new(
+                    Some(InternalErrorCode::BadShardNumber),
+                    err_msg,
+                )
+                .into(),
+            ));
+        }
+
+        Ok(Self::from_parts(
+            manta_object,
+            id,
+            etag,
+            shard as i32,
+        ))
     }
 }
 
@@ -1840,17 +1956,17 @@ impl ProcessAssignment for EvacuateJob {
     }
 }
 
-fn _insert_bad_moray_object(
+fn _insert_bad_object(
     job_action: &EvacuateJob,
     object: Value,
     id: ObjectId,
+    error_code: EvacuateObjectError,
 ) {
-    error!("Moray value missing etag {:#?}", object);
     let eobj = EvacuateObject {
         id,
         object,
         status: EvacuateObjectStatus::Error,
-        error: Some(EvacuateObjectError::BadMorayObject),
+        error: Some(error_code),
         ..Default::default()
     };
 
