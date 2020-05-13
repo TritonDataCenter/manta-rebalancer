@@ -133,7 +133,7 @@ SUBCOMMANDS:
 
 ```
 
-### Job Management
+### Job Operations
 ```
 Job operations
 
