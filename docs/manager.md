@@ -110,7 +110,7 @@ Note: When building the manager, it comes with two binary deliverables:
 
 
 ## rebalancer-adm
-A command line utility has been created to make managing the rebalaner more
+A command line utility has been created to make managing the rebalacner more
 convenient.  Currently, it can get a single job, list the uuids of all known
 jobs as well as create new ones.  As the functionality of the rebalancer
 expands, rebalancer-adm will too in order to meet the needs of the operator.
