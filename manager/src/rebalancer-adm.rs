@@ -8,7 +8,7 @@
  * Copyright 2020 Joyent, Inc.
  */
 
-use clap::{App, Arg, ArgMatches};
+use clap::{App, Arg, ArgMatches, AppSettings};
 use manager::jobs::{EvacuateJobPayload, JobPayload};
 use reqwest;
 use serde_json::Value;
@@ -27,7 +27,7 @@ fn get_common(url: &str) -> Result<(), String> {
 
     // Flag failure if we get a status code of anything other than 200.
     if !response.status().is_success() {
-        return Err(format!("Error creating job: {}", response.status()));
+        return Err(format!("Failed to post job: {}", response.status()));
     }
 
     let v: Value = match response.json() {
@@ -99,18 +99,18 @@ fn job_create_evacuate(matches: &ArgMatches) -> Result<(), String> {
     let client = reqwest::Client::new();
     let mut response = match client.post(JOBS_URL).body(payload).send() {
         Ok(resp) => resp,
-        Err(e) => return Err(format!("Job post failed: {}", &e)),
+        Err(e) => return Err(format!("Failed to post job: {}", &e)),
     };
 
     // Flag failure if we get a status code of anything other than 200.
     if !response.status().is_success() {
-        return Err(format!("Error creating job: {}", response.status()));
+        return Err(format!("Server response: {}", response.status()));
     }
 
     // Parse out the job uuid from the response payload.
     let job_uuid = match response.text() {
         Ok(j) => j,
-        Err(e) => return Err(format!("Error: {}", e)),
+        Err(e) => return Err(format!("Failed to parse response: {}", e)),
     };
 
     println!("{}", job_uuid);
@@ -130,12 +130,14 @@ fn process_subcmd_job(job_matches: &ArgMatches) -> Result<(), String> {
     }
 }
 
-fn main() {
+fn main() -> Result<(), String> {
     let matches = App::new("rebalancer-adm")
+        .setting(AppSettings::SubcommandRequiredElseHelp)
         .version("0.1.0")
         .about("Rebalancer client utility")
         .subcommand(
             App::new("job")
+                .setting(AppSettings::SubcommandRequiredElseHelp)
                 .about("Job operations")
                 // Get subcommand
                 .subcommand(
@@ -186,17 +188,8 @@ fn main() {
         )
         .get_matches();
 
-    let mut result = Ok(());
-
-    if let Some(ref matches) = matches.subcommand_matches("job") {
-        result = process_subcmd_job(matches);
+    match matches.subcommand() {
+        ("job", Some(job_matches)) => process_subcmd_job(job_matches),
+        _ => unreachable!(),
     }
-
-    std::process::exit(match result {
-        Ok(_) => 0,
-        Err(e) => {
-            println!("{}", e);
-            1
-        }
-    });
 }
