@@ -54,11 +54,9 @@ fn job_get(matches: &ArgMatches) -> Result<(), String> {
 }
 
 fn job_create(matches: &ArgMatches) -> Result<(), String> {
-    let job_type = matches.value_of("type").unwrap();
-
-    match job_type.as_ref() {
-        "evacuate" => job_create_evacuate(matches),
-        _ => Err("Invalid job type specified".to_owned()),
+    match matches.subcommand() {
+        ("evacuate", Some(evac_matches)) => job_create_evacuate(evac_matches),
+        _ => unreachable!(),
     }
 }
 
@@ -131,6 +129,24 @@ fn process_subcmd_job(job_matches: &ArgMatches) -> Result<(), String> {
 }
 
 fn main() -> Result<(), String> {
+    let evacuate = App::new("evacuate")
+        .about("Create an evacuate job")
+        .arg(
+            Arg::with_name("shark")
+                .short("s")
+                .long("shark")
+                .takes_value(true)
+                .required(true)
+                .help("Specifies a shark on which to run a job"),
+        )
+        .arg(
+            Arg::with_name("max_objects")
+                .short("m")
+                .long("max_objects")
+                .takes_value(true)
+                .help("Maximum number of objects allowed in the job"),
+        );
+
     let matches = App::new("rebalancer-adm")
         .setting(AppSettings::SubcommandRequiredElseHelp)
         .version("0.1.0")
@@ -145,46 +161,25 @@ fn main() -> Result<(), String> {
                         .about("Get information on a specific job")
                         .arg(
                             Arg::with_name("uuid")
-                            .short("u")
-                            .long("uuid")
-                            .takes_value(true)
-                            .required(true)
-                            .help("Uuid of a job"),
-                        )
+                                .short("u")
+                                .long("uuid")
+                                .takes_value(true)
+                                .required(true)
+                                .help("Uuid of a job"),
+                        ),
                 )
                 // List subcommand
                 .subcommand(
-                    App::new("list")
-                        .about("List all known rebalancer jobs")
+                    App::new("list").about("List all known rebalancer jobs"),
                 )
                 // Create subcommand
                 .subcommand(
                     App::new("create")
                         .about("Create a rebalancer job")
-                        .arg(
-                            Arg::with_name("type")
-                            .short("t")
-                            .long("type")
-                            .takes_value(true)
-                            .required(true)
-                            .help("Rebalancer job type"),
-                        )
-                        .arg(
-                            Arg::with_name("shark")
-                            .short("s")
-                            .long("shark")
-                            .takes_value(true)
-                            .required(true)
-                            .help("Specifies a shark on which to run a job"),
-                        )
-                        .arg(
-                            Arg::with_name("max_objects")
-                            .short("m")
-                            .long("max_objects")
-                            .takes_value(true)
-                            .help("Maximum number of objects allowed in the job"),
-                        )
-                )
+                        .setting(AppSettings::SubcommandRequiredElseHelp)
+                        // Create evacuate job
+                        .subcommand(evacuate),
+                ),
         )
         .get_matches();
 
