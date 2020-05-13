@@ -163,8 +163,14 @@ rebalancer-adm job list
 ```
 
 ### Create a new job
+To see a list of all currently supported jobs:
 ```
-rebalancer-adm job create --type=<job type> --shark=<storage server name> [--max_objects=<maximum number of ojects]
+rebalancer-adm help job create
+```
+
+Create an evacuate job:
+```
+rebalancer-adm job create evacuate --shark=<storage server name> [--max_objects=<maximum number of ojects]
 ```
 
 All output is displayed in JSON format.  The output below is the result of a
