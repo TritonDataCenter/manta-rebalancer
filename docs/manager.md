@@ -162,17 +162,6 @@ rebalancer-adm job get --uuid <uuid>
 rebalancer-adm job list
 ```
 
-### Create a new job
-To see a list of all currently supported jobs:
-```
-rebalancer-adm help job create
-```
-
-Create an evacuate job:
-```
-rebalancer-adm job create evacuate --shark=<storage server name> [--max_objects=<maximum number of ojects]
-```
-
 All output is displayed in JSON format.  The output below is the result of a
 `job list` request:
 ```
@@ -210,6 +199,17 @@ Evacuate        964e4031-8e90-4244-b4e6-826e98a6236f    Setup
 Evacuate        9d25d63f-b659-4633-b692-8b4402e57c8e    Setup
 Evacuate        611ce930-8f14-470d-b271-3044c6cf782a    Setup
 Evacuate        c17370f4-33b3-4e5b-b3d7-04a0ec9bbd9a    Complete
+```
+
+### Create a new job
+To see a list of all currently supported jobs:
+```
+rebalancer-adm help job create
+```
+
+Create an evacuate job:
+```
+rebalancer-adm job create evacuate --shark=<storage server name> [--max_objects=<maximum number of ojects]
 ```
 
 ## Manager Configuration Parameters
