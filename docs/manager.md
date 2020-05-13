@@ -108,13 +108,20 @@ Note: When building the manager, it comes with two binary deliverables:
 2. rebalancer-adm: Utility for interacting with the manager.
 3. For release bits, include the `--release` flag when building.
 
-## Usage
 
-### rebalancer-adm
+## rebalancer-adm
+A command line utility has been created to make managing the rebalaner more
+convenient.  Currently, it can get a single job, list the uuids of all known
+jobs as well as create new ones.  As the functionality of the rebalancer
+expands, rebalancer-adm will too in order to meet the needs of the operator.
+
+### Usage
 ```
+rebalancer-adm 0.1.0
+Rebalancer client utility
 
 USAGE:
-    rebalancer-adm [FLAGS] [SUBCOMMAND]
+    rebalancer-adm [SUBCOMMAND]
 
 FLAGS:
     -h, --help       Prints help information
@@ -122,11 +129,11 @@ FLAGS:
 
 SUBCOMMANDS:
     help    Prints this message or the help of the given subcommand(s)
-    job     Job Management
+    job     Job operations
 
 ```
 
-Job Management
+### Job Management
 ```
 Job operations
 
@@ -145,22 +152,23 @@ SUBCOMMANDS:
 
 ```
 
-Get the status of a rebalancer job
+### Get the status of a rebalancer job
 ```
-    rebalancer-adm job get --uuid <uuid>
-```
-
-List all known jobs
-```
-    rebalancer-adm job list
+rebalancer-adm job get --uuid <uuid>
 ```
 
-Create a new job
+### List all known jobs
 ```
-    rebalancer-adm job create --type=<job type> --shark=<storage server name> [--max_objects=<maximum number of ojects]
+rebalancer-adm job list
 ```
 
-Note: All output is displayed in JSON.  The output below is the result of a `job list` request:
+### Create a new job
+```
+rebalancer-adm job create --type=<job type> --shark=<storage server name> [--max_objects=<maximum number of ojects]
+```
+
+All output is displayed in JSON format.  The output below is the result of a
+`job list` request:
 ```
 [
   {
@@ -183,10 +191,9 @@ Note: All output is displayed in JSON.  The output below is the result of a `job
 ```
 
 Note: One current shortcoming of the tool is that it can not display results
-in tabular format, however, it is still possible to do via the JSON command
-line utility (jq).
+in tabular format, however, it is still possible to format the output to your
+liking via `jq` (a command line utility which processes JSON data):
 
-Example:
 ```
 [root@a422f03b-f17e-62fc-d3d5-eacc548e8a8a]#  rebalancer-adm job list | jq -r '.[] | "\(.action)\t\(.id)\t\(.state)"'
 Evacuate        0c89c985-3e79-4011-b7e3-191c09b074af    Complete
