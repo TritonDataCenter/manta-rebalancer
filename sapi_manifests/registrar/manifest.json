@@ -1,0 +1,5 @@
+{
+    "name": "rebalancer",
+    "path": "/opt/smartdc/registrar/etc/config.json",
+	"master": true
+}
