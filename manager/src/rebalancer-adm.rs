@@ -8,7 +8,7 @@
  * Copyright 2020 Joyent, Inc.
  */
 
-use clap::{App, Arg, ArgMatches, AppSettings};
+use clap::{App, AppSettings, Arg, ArgMatches};
 use manager::jobs::{EvacuateJobPayload, JobPayload};
 use reqwest;
 use serde_json::Value;
