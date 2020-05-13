@@ -1,19 +1,30 @@
 {
-    "registration": {
-        "domain": "{{SERVICE_NAME}}",
-        "type": "host",
-        "ttl": {{#REGISTRAR_TTL}}{{REGISTRAR_TTL}}{{/REGISTRAR_TTL}}{{^REGISTRAR_TTL}}1800{{/REGISTRAR_TTL}}
+  "registration": {
+    "domain": "{{SERVICE_NAME}}",
+    "type": "load_balancer",
+    "service": {
+      "type": "service",
+      "service": {
+        "srvce": "_http",
+        "proto": "_tcp",
+        "port": 80
+      },
+      "ttl": 60
     },
-    "zookeeper": {
-        "servers": [
-            {{#ZK_SERVERS}}
-            {
-                "host": "{{host}}",
-                "port": {{port}}
-            }{{^last}}, {{/last}}
-            {{/ZK_SERVERS}}
-        ],
-        "timeout": 60000
-    },
-    "adminIp": "{{auto.MANTA_IP}}"
+    "ttl": 30
+  },
+
+  "zookeeper": {
+    "servers": [
+      {{#ZK_SERVERS}}
+        {
+          "host": "{{host}}",
+          "port": {{port}}
+        }{{^last}}, {{/last}}
+      {{/ZK_SERVERS}}
+    ],
+    "timeout": 60000
+  },
+
+  "adminIp": "{{auto.MANTA_IP}}"
 }
