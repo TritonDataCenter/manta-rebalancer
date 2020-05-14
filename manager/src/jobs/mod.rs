@@ -37,6 +37,28 @@ pub type HttpStatusCode = u16;
 
 pub(crate) static REBALANCER_DB: &str = "rebalancer";
 
+/// The JobPayload is an enum with variants of JobActions.  A properly
+/// formatted JobPayload submitted from the client in JSON form looks like:
+///
+/// ```json
+/// {
+///     "action": <job action (String)>,
+///     "params": { <job action specific params > }
+/// }
+/// ```
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "action", content = "params")]
+#[serde(rename_all = "lowercase")]
+pub enum JobPayload {
+    Evacuate(EvacuateJobPayload),
+}
+
+#[derive(Serialize, Deserialize, Default)]
+pub struct EvacuateJobPayload {
+    pub from_shark: String,
+    pub max_objects: Option<u32>,
+}
+
 pub struct Job {
     id: Uuid,
     action: JobAction,

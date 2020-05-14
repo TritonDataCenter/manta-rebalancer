@@ -24,7 +24,7 @@ static GLOBAL: Jemalloc = Jemalloc;
 
 use manager::config::Config;
 use manager::jobs::status::StatusError;
-use manager::jobs::{self, JobBuilder, JobDbEntry};
+use manager::jobs::{self, JobBuilder, JobDbEntry, JobPayload};
 use manager::metrics::{metrics_init, metrics_request_inc};
 use rebalancer::util;
 
@@ -188,28 +188,6 @@ fn list_jobs(state: State) -> Box<HandlerFuture> {
             future::ok((state, ret))
         }
     }))
-}
-
-/// The JobPayload is an enum with variants of JobActions.  A properly
-/// formatted JobPayload submitted from the client in JSON form looks like:
-///
-/// ```json
-/// {
-///     "action": <job action (String)>,
-///     "params": { <job action specific params > }
-/// }
-/// ```
-#[derive(Serialize, Deserialize)]
-#[serde(tag = "action", content = "params")]
-#[serde(rename_all = "lowercase")]
-enum JobPayload {
-    Evacuate(EvacuateJobPayload),
-}
-
-#[derive(Serialize, Deserialize, Default)]
-struct EvacuateJobPayload {
-    from_shark: String,
-    max_objects: Option<u32>,
 }
 
 #[derive(Clone)]
@@ -420,6 +398,7 @@ mod tests {
     use super::*;
     use gotham::test::TestServer;
     use lazy_static::lazy_static;
+    use manager::jobs::{EvacuateJobPayload, JobPayload};
     use rebalancer::error::{Error, InternalError};
     use std::sync::Mutex;
     use std::thread;
