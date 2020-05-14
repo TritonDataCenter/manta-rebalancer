@@ -14,8 +14,8 @@ use moray::{
     objects::{Etag, MethodOptions as ObjectMethodOptions},
 };
 use rand::seq::SliceRandom;
-use rebalancer::error::{Error, InternalError, InternalErrorCode};
 use rebalancer::common;
+use rebalancer::error::{Error, InternalError, InternalErrorCode};
 use serde_json::Value;
 use slog_scope;
 use std::net::{IpAddr, SocketAddr};

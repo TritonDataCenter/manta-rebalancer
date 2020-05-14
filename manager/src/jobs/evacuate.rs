@@ -48,8 +48,9 @@ use crossbeam_channel::TryRecvError;
 use crossbeam_deque::{Injector, Steal};
 use libmanta::moray::{MantaObject, MantaObjectShark};
 use moray::client::MorayClient;
-use moray::objects::{BatchRequest, BatchPutOp, Etag, MethodOptions as
-ObjectMethodOptions};
+use moray::objects::{
+    BatchPutOp, BatchRequest, Etag, MethodOptions as ObjectMethodOptions,
+};
 use quickcheck::{Arbitrary, Gen};
 use quickcheck_helpers::random::string as random_string;
 use rand::seq::SliceRandom;
@@ -209,15 +210,19 @@ impl From<Error> for EvacuateObjectError {
     fn from(error: Error) -> Self {
         match error {
             Error::Internal(e) => match e.code {
-                InternalErrorCode::BadMantaObject =>
-                    EvacuateObjectError::BadMantaObject,
-                InternalErrorCode::DuplicateShark =>
-                    EvacuateObjectError::DuplicateShark,
-                InternalErrorCode::BadMorayClient =>
-                    EvacuateObjectError::BadMorayClient,
-                InternalErrorCode::MetadataUpdateFailure =>
-                    EvacuateObjectError::MetadataUpdateFailed,
-                _ => EvacuateObjectError::InternalError
+                InternalErrorCode::BadMantaObject => {
+                    EvacuateObjectError::BadMantaObject
+                }
+                InternalErrorCode::DuplicateShark => {
+                    EvacuateObjectError::DuplicateShark
+                }
+                InternalErrorCode::BadMorayClient => {
+                    EvacuateObjectError::BadMorayClient
+                }
+                InternalErrorCode::MetadataUpdateFailure => {
+                    EvacuateObjectError::MetadataUpdateFailed
+                }
+                _ => EvacuateObjectError::InternalError,
             },
             _ => EvacuateObjectError::InternalError,
         }
@@ -1355,13 +1360,15 @@ impl UpdateMetadata for EvacuateJob {
         let mut sharks = match common::get_sharks_from_value(&object) {
             Ok(s) => s,
             Err(e) => {
-                let msg =
-                    format!("Could not get sharks from Manta Object {:#?}: {}",
-                            object, e);
+                let msg = format!(
+                    "Could not get sharks from Manta Object {:#?}: {}",
+                    object, e
+                );
                 return Err(InternalError::new(
                     Some(InternalErrorCode::DuplicateShark),
                     msg,
-                ).into());
+                )
+                .into());
             }
         };
 
@@ -2664,13 +2671,13 @@ fn get_client_from_hash<'a>(
                 Err(e) => {
                     let msg = format!(
                         "Failed to get Moray Client for shard {}: {}",
-                        shard, e);
-                    return Err(
-                        InternalError::new(
-                            Some(InternalErrorCode::BadMorayClient),
-                            msg
-                        ).into()
+                        shard, e
+                    );
+                    return Err(InternalError::new(
+                        Some(InternalErrorCode::BadMorayClient),
+                        msg,
                     )
+                    .into());
                 }
             };
             Ok(entry.insert(client))
@@ -2687,19 +2694,16 @@ fn metadata_update_one(
     etag: &str,
     shard: u32,
 ) -> Result<(), Error> {
-
-    let mclient = get_client_from_hash(
-        job_action,
-        client_hash,
-        shard
-    )?;
+    let mclient = get_client_from_hash(job_action, client_hash, shard)?;
 
     moray_client::put_object(mclient, object, etag)
         .map_err(|e| {
             InternalError::new(
-                Some (InternalErrorCode::MetadataUpdateFailure),
-                e.description())
-        }).map_err(Error::from)
+                Some(InternalErrorCode::MetadataUpdateFailure),
+                e.description(),
+            )
+        })
+        .map_err(Error::from)
 }
 
 fn metadata_update_assignment(
@@ -2712,7 +2716,7 @@ fn metadata_update_assignment(
     // There is one moray client per shard, so when we collect the requests
     // into a batch we need to know which moray client this is going to based
     // on the shard number.
-//    let mut batched_requests: HashMap<u32, Vec<EvacuateObjectBatchRequest>> =
+    //    let mut batched_requests: HashMap<u32, Vec<EvacuateObjectBatchRequest>> =
     let mut batched_requests: HashMap<u32, Vec<BatchRequest>> = HashMap::new();
 
     let mut updated_objects = vec![];
@@ -2755,10 +2759,7 @@ fn metadata_update_assignment(
 
         // This function updates the manta object with the new
         // sharks, and then returns the updated Manta metadata object.
-        match job_action.update_object_shark(
-            mobj,
-            dest_shark,
-        ) {
+        match job_action.update_object_shark(mobj, dest_shark) {
             Ok(o) => {
                 if job_action.options.use_batched_updates {
                     let mut options = ObjectMethodOptions::default();
@@ -2771,21 +2772,27 @@ fn metadata_update_assignment(
                         value: o.clone(), // clone necessary?
                     };
 
-                    batched_requests.entry(shard)
+                    batched_requests
+                        .entry(shard)
                         .and_modify(|ent| {
                             ent.push(BatchRequest::Put(put_req.clone()))
                         })
-                        .or_insert_with(|| {
-                            vec![BatchRequest::Put(put_req)]
-                        });
+                        .or_insert_with(|| vec![BatchRequest::Put(put_req)]);
                 } else if let Err(e) = metadata_update_one(
-                        job_action, client_hash, &o, &etag, shard) {
+                    job_action,
+                    client_hash,
+                    &o,
+                    &etag,
+                    shard,
+                ) {
+                    error!(
+                        "Error updating object:\n{:#?}\nwith dest_shark \
+                         {:?}\n({}).",
+                        o, dest_shark, e
+                    );
+                    job_action.mark_object_error(&eobj.id, e.into());
 
-                        error!("Error updating object:\n{:#?}\nwith dest_shark \
-                            {:?}\n({}).", o, dest_shark, e);
-                        job_action.mark_object_error( &eobj.id, e.into());
-
-                        continue;
+                    continue;
                 }
             }
 
@@ -2795,10 +2802,7 @@ fn metadata_update_assignment(
                      dest_shark {:?}\n\n({}).",
                     &eobj.object, dest_shark, e
                 );
-                job_action.mark_object_error(
-                    &eobj.id,
-                    e.into()
-                );
+                job_action.mark_object_error(&eobj.id, e.into());
             }
         };
 
@@ -2826,30 +2830,27 @@ fn metadata_update_assignment(
     let mut marked_error = vec![];
     if job_action.options.use_batched_updates {
         for (shard, requests) in batched_requests.into_iter() {
-            let mclient = match get_client_from_hash(
-                job_action,
-                client_hash,
-                shard
-            ) {
-                Ok(c) => c,
-                Err(e) => {
-                    // If we can't get the client for these objects there's
-                    // nothing we can do.  Mark them all as error.
-                    // TODO: want mark_many_objects_error()
-                    let eobj_err: EvacuateObjectError = e.into();
-                    for r in requests.iter() {
-                        let br = match r {
-                            BatchRequest::Put(br) => br,
-                            _ => panic!("Unexpected Batch Request"),
-                        };
-                        let id = common::get_objectId_from_value(&br.value)
-                            .expect("Object Id missing");
-                        job_action.mark_object_error(&id,eobj_err.clone());
-                        marked_error.push(id);
+            let mclient =
+                match get_client_from_hash(job_action, client_hash, shard) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        // If we can't get the client for these objects there's
+                        // nothing we can do.  Mark them all as error.
+                        // TODO: want mark_many_objects_error()
+                        let eobj_err: EvacuateObjectError = e.into();
+                        for r in requests.iter() {
+                            let br = match r {
+                                BatchRequest::Put(br) => br,
+                                _ => panic!("Unexpected Batch Request"),
+                            };
+                            let id = common::get_objectId_from_value(&br.value)
+                                .expect("Object Id missing");
+                            job_action.mark_object_error(&id, eobj_err.clone());
+                            marked_error.push(id);
+                        }
+                        continue;
                     }
-                    continue;
-                }
-            };
+                };
 
             // If we fail the batch step through the objects and attempt to
             // update each one individually. For each object that fails to
@@ -2858,9 +2859,8 @@ fn metadata_update_assignment(
             if let Err(e) = mclient.batch(
                 &requests,
                 &ObjectMethodOptions::default(),
-                |_| { Ok(()) } // TODO: do we want this data?
+                |_| Ok(()), // TODO: do we want this data?
             ) {
-
                 error!("Batch update failed, retrying: {}", e);
 
                 for r in requests.into_iter() {
@@ -2869,20 +2869,26 @@ fn metadata_update_assignment(
                         _ => panic!("Unexpected Batch Request"),
                     };
 
-                    let etag = br.options.etag
+                    let etag = br
+                        .options
+                        .etag
                         .specified_value()
                         .expect("etag should be specified");
 
                     let o = br.value;
 
                     if let Err(muo_err) = metadata_update_one(
-                        job_action, client_hash, &o, &etag, shard)
-                    {
+                        job_action,
+                        client_hash,
+                        &o,
+                        &etag,
+                        shard,
+                    ) {
                         let id = common::get_objectId_from_value(&o)
                             .expect("cannot get objectId");
 
                         error!("Error updating object: {}\n{:?}", muo_err, o);
-                        job_action.mark_object_error( &id, muo_err.into());
+                        job_action.mark_object_error(&id, muo_err.into());
 
                         marked_error.push(id);
 
