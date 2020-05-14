@@ -86,7 +86,7 @@ fn job_create_evacuate(matches: &ArgMatches) -> Result<(), String> {
     // Form the payload of the request.
     let job_payload = JobPayload::Evacuate(EvacuateJobPayload {
         from_shark: shark.to_owned(),
-        max_objects,
+        max_objects: max_objects,
     });
 
     // Serialize it.
