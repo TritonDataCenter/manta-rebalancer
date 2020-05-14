@@ -18,7 +18,6 @@ use crossbeam_channel::TrySendError;
 use serde::Deserialize;
 use signal_hook::{self, iterator::Signals};
 
-use crate::jobs::{evacuate::ObjectSource, Job, JobBuilder};
 use rebalancer::error::Error;
 use rebalancer::util;
 use std::thread;

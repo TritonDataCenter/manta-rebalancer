@@ -57,6 +57,8 @@ pub enum JobPayload {
 pub struct EvacuateJobPayload {
     pub from_shark: String,
     pub max_objects: Option<u32>,
+    #[serde(default)]
+    pub source: ObjectSource,
 }
 
 pub struct Job {

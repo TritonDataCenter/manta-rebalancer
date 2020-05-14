@@ -9,7 +9,7 @@
  */
 
 use clap::{App, AppSettings, Arg, ArgMatches};
-use manager::jobs::{EvacuateJobPayload, JobPayload};
+use manager::jobs::{EvacuateJobPayload, JobPayload, evacuate::ObjectSource};
 use reqwest;
 use serde_json::Value;
 use std::result::Result;
@@ -87,6 +87,7 @@ fn job_create_evacuate(matches: &ArgMatches) -> Result<(), String> {
     let job_payload = JobPayload::Evacuate(EvacuateJobPayload {
         from_shark: shark.to_owned(),
         max_objects,
+        source: ObjectSource::default(),
     });
 
     // Serialize it.

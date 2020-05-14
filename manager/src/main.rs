@@ -27,8 +27,7 @@ static GLOBAL: Jemalloc = Jemalloc;
 
 use manager::config::Config;
 use manager::jobs::status::StatusError;
-use manager::jobs::{self, evacuate::ObjectSource, JobBuilder, JobDbEntry,
-                    JobPayload};
+use manager::jobs::{self, JobBuilder, JobDbEntry, JobPayload};
 use manager::metrics::{metrics_init, metrics_request_inc};
 use rebalancer::util;
 
@@ -404,6 +403,7 @@ mod tests {
     use gotham::test::TestServer;
     use lazy_static::lazy_static;
     use manager::jobs::{EvacuateJobPayload, JobPayload};
+    use manager::jobs::evacuate::ObjectSource;
     use rebalancer::error::{Error, InternalError};
     use std::sync::Mutex;
     use std::thread;

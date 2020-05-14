@@ -427,7 +427,7 @@ impl FileGenerator {
 
     ///
     /// Walk the objects in a single file named "shard_<shard_num>.objs"
-    ///
+    ////
     fn walk_objects(&self, shard: PathBuf) -> Result<(), Error> {
         let captures = shard
             .to_str()
