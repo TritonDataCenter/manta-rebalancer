@@ -402,8 +402,8 @@ mod tests {
     use super::*;
     use gotham::test::TestServer;
     use lazy_static::lazy_static;
-    use manager::jobs::{EvacuateJobPayload, JobPayload};
     use manager::jobs::evacuate::ObjectSource;
+    use manager::jobs::{EvacuateJobPayload, JobPayload};
     use rebalancer::error::{Error, InternalError};
     use std::sync::Mutex;
     use std::thread;

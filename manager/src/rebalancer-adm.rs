@@ -9,7 +9,7 @@
  */
 
 use clap::{App, AppSettings, Arg, ArgMatches};
-use manager::jobs::{EvacuateJobPayload, JobPayload, evacuate::ObjectSource};
+use manager::jobs::{evacuate::ObjectSource, EvacuateJobPayload, JobPayload};
 use reqwest;
 use serde_json::Value;
 use std::result::Result;

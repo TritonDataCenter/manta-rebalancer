@@ -431,15 +431,13 @@ impl FileGenerator {
     fn walk_objects(&self, shard: PathBuf) -> Result<(), Error> {
         let captures = shard
             .to_str()
-            .ok_or_else(|| InternalError::new(
-                None,
-                "failed to convert filename to string",
-            ))
+            .ok_or_else(|| {
+                InternalError::new(None, "failed to convert filename to string")
+            })
             .and_then(|file_str| {
-                OBJ_FILE_RE.captures(file_str).ok_or_else(|| InternalError::new(
-                    None,
-                    "failed to capture shard number",
-                ))
+                OBJ_FILE_RE.captures(file_str).ok_or_else(|| {
+                    InternalError::new(None, "failed to capture shard number")
+                })
             })
             .map_err(Error::from)?;
 
@@ -813,12 +811,7 @@ impl EvacuateObject {
             ));
         }
 
-        Ok(Self::from_parts(
-            manta_object,
-            id,
-            etag,
-            shard as i32,
-        ))
+        Ok(Self::from_parts(manta_object, id, etag, shard as i32))
     }
 }
 
