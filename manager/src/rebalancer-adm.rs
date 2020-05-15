@@ -188,3 +188,133 @@ fn main() -> Result<(), String> {
         _ => unreachable!(),
     }
 }
+
+#[cfg(test)]
+mod rebalancer_adm_tests {
+    use assert_cli;
+    use indoc::indoc;
+
+    #[test]
+    fn no_params() {
+        let version = env!("CARGO_PKG_VERSION");
+        let usage = indoc!(
+            "
+            Rebalancer client utility
+
+            USAGE:
+                rebalancer-adm <SUBCOMMAND>
+
+            FLAGS:
+                -h, --help       Prints help information
+                -V, --version    Prints version information
+
+            SUBCOMMANDS:
+                help    Prints this message or the help of the given \
+                subcommand(s)
+                job     Job operations
+            "
+        );
+
+        assert_cli::Assert::cargo_binary("rebalancer-adm")
+            .fails()
+            .and()
+            .stderr()
+            .contains(version)
+            .and()
+            .stderr()
+            .contains(usage)
+            .unwrap();
+    }
+
+    #[test]
+    fn job_list_extra_params() {
+        let err_msg = indoc!(
+            "
+            error: Found argument 'extra' which wasn't expected, or isn't \
+            valid in this context
+
+            USAGE:
+                rebalancer-adm job list
+            "
+        );
+
+        assert_cli::Assert::cargo_binary("rebalancer-adm")
+            .with_args(&["job", "list", "extra"])
+            .fails()
+            .and()
+            .stderr()
+            .contains(err_msg)
+            .unwrap();
+    }
+
+    #[test]
+    fn job_get_no_params() {
+        let err_msg = indoc!(
+            "
+            error: The following required arguments were not provided:
+                --uuid <uuid>
+
+            USAGE:
+                rebalancer-adm job get --uuid <uuid>
+            "
+        );
+
+        assert_cli::Assert::cargo_binary("rebalancer-adm")
+            .with_args(&["job", "get"])
+            .fails()
+            .and()
+            .stderr()
+            .contains(err_msg)
+            .unwrap();
+    }
+
+    #[test]
+    fn job_create_no_params() {
+        let err_msg = indoc!(
+            "
+            Create a rebalancer job
+
+            USAGE:
+                rebalancer-adm job create <SUBCOMMAND>
+
+            FLAGS:
+                -h, --help       Prints help information
+                -V, --version    Prints version information
+
+            SUBCOMMANDS:
+                evacuate    Create an evacuate job
+                help        Prints this message or the help of the given \
+                subcommand(s)
+            "
+        );
+
+        assert_cli::Assert::cargo_binary("rebalancer-adm")
+            .with_args(&["job", "create"])
+            .fails()
+            .and()
+            .stderr()
+            .contains(err_msg)
+            .unwrap();
+    }
+
+    #[test]
+    fn job_evacuate_no_params() {
+        let err_msg = indoc!(
+            "
+            error: The following required arguments were not provided:
+                --shark <shark>
+
+            USAGE:
+                rebalancer-adm job create evacuate [OPTIONS] --shark <shark>
+            "
+        );
+
+        assert_cli::Assert::cargo_binary("rebalancer-adm")
+            .with_args(&["job", "create", "evacuate"])
+            .fails()
+            .and()
+            .stderr()
+            .contains(err_msg)
+            .unwrap();
+    }
+}
