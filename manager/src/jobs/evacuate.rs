@@ -822,7 +822,29 @@ pub enum DestSharkStatus {
     Ready,
 }
 
+///
+/// Default souce is SharkSpotter.  To specify a file source add the
+/// following to the params section of your evacuate job payload:
+///
+/// ```json
+/// "source": {
+///     "type": "file",
+///     "options": "/1.stor"
+/// }
+/// ```
+///
+/// To use the default sharkspotter source, simply leave this block out, or
+/// explicitly specify it like so:
+///
+/// ```json
+/// "source": {
+///     "type": "sharkspotter"
+/// }
+/// ```
+///
 #[derive(Deserialize, Serialize)]
+#[serde(tag = "type", content = "options")]
+#[serde(rename_all = "lowercase")]
 pub enum ObjectSource {
     SharkSpotter,
     File(String),
