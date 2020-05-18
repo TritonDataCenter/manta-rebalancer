@@ -431,9 +431,16 @@ impl FileGenerator {
     fn walk_objects(&self, shard: PathBuf) -> Result<(), Error> {
         debug!("walking objects for shard: {:#?}", shard);
         let captures = shard
-            .to_str()
+            .file_name()
             .ok_or_else(|| {
-                InternalError::new(None, "failed to convert filename to string")
+                InternalError::new(None, "failed to get filename from path")
+            })
+            .and_then(|filename| {
+                filename
+                    .to_str()
+                    .ok_or_else(|| {
+                        InternalError::new(None, "failed to convert filename to string")
+                    })
             })
             .and_then(|file_str| {
                 debug!("capturing shard number on: {}", file_str);
@@ -449,7 +456,11 @@ impl FileGenerator {
 
         let reader = BufReader::new(File::open(shard)?);
         for obj in reader.lines() {
-            let moray_object = serde_json::to_value(obj?)?;
+            let obj = obj?;
+
+            let moray_object: HashMap<String, Value> = serde_json::from_str(&obj)?;
+            let moray_object = serde_json::to_value(moray_object)?;
+
             let eobj = match EvacuateObject::from_moray_object(
                 moray_object,
                 shard_num,
@@ -3405,6 +3416,7 @@ mod tests {
     use rebalancer::libagent::{router as agent_router, AgentAssignmentStats};
     use rebalancer::util;
     use reqwest::Client;
+    use std::fs::OpenOptions;
 
     lazy_static! {
         static ref INITIALIZED: Mutex<bool> = Mutex::new(false);
@@ -3508,6 +3520,64 @@ mod tests {
         fn choose(&self, _algo: &ChooseAlgorithm) -> Option<Vec<StorageNode>> {
             None
         }
+    }
+
+    #[test]
+    fn file_object_source() {
+        unit_test_init();
+
+        let test_path = format!(
+            "{}/testfiles/1.stor",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let (obj_tx, obj_rx) = crossbeam_channel::bounded(5);
+        let from_shark = String::from("1.stor.domain");
+        let job_action = EvacuateJob::new(
+            from_shark,
+            "fakedomain.us",
+            &Uuid::new_v4().to_string(),
+            ObjectSource::File(test_path.clone()),
+            ConfigOptions::default(),
+            None,
+        ).expect("initialize evacuate job");
+        let job_action = Arc::new(job_action);
+        let line_count = {
+            let mut count = 0;
+            for shard in fs::read_dir(test_path.clone()).expect("read dir") {
+                let shard = shard.expect("shard").path();
+                let f = OpenOptions::new()
+                    .read(true)
+                    .open(shard)
+                    .expect("open file");
+                for _ in BufReader::new(f).lines() {
+                    count += 1;
+                }
+            }
+            count
+        };
+
+        let fgen = FileGenerator {
+            job_action: Arc::clone(&job_action),
+            directory: test_path,
+            min_shard: 1,
+            max_shard: 2,
+            obj_tx,
+        };
+
+        let fgen_handle = fgen.generate().expect("generate");
+
+        let mut received_count = 0;
+        loop {
+            if let Ok(o) = obj_rx.recv() {
+                received_count += 1;
+            } else {
+                break;
+            }
+        }
+
+        assert_eq!(received_count, line_count);
+
+        fgen_handle.join().expect("join fgen").expect("fgen result");
     }
 
     #[test]
