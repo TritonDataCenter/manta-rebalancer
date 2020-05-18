@@ -429,12 +429,14 @@ impl FileGenerator {
     /// Walk the objects in a single file named "shard_<shard_num>.objs"
     ////
     fn walk_objects(&self, shard: PathBuf) -> Result<(), Error> {
+        debug!("walking objects for shard: {:#?}", shard);
         let captures = shard
             .to_str()
             .ok_or_else(|| {
                 InternalError::new(None, "failed to convert filename to string")
             })
             .and_then(|file_str| {
+                debug!("capturing shard number on: {}", file_str);
                 OBJ_FILE_RE.captures(file_str).ok_or_else(|| {
                     InternalError::new(None, "failed to capture shard number")
                 })
