@@ -2877,7 +2877,10 @@ fn metadata_update_broker_dynamic(
     job_action: Arc<EvacuateJob>,
     md_update_rx: crossbeam::Receiver<AssignmentCacheEntry>,
 ) -> Result<thread::JoinHandle<Result<(), Error>>, Error> {
-    let pool = ThreadPool::new(job_action.options.max_metadata_update_threads);
+    let pool = ThreadPool::with_name(
+        "Dyn_MD_Update".into(),
+        job_action.options.max_metadata_update_threads,
+    );
     let queue = Arc::new(Injector::<AssignmentCacheEntry>::new());
     let queue_back = Arc::clone(&queue);
 
