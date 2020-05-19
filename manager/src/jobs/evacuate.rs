@@ -65,8 +65,6 @@ use uuid::Uuid;
 lazy_static! {
     static ref OBJ_FILE_RE: Regex =
         Regex::new(r#"^shard_(?P<shard>\d+)\.objs$"#).expect("compile regex");
-    static ref SHARK_DIR_RE: Regex =
-        Regex::new(r#"^\d+\.stor$"#).expect("compile regex");
 }
 
 // --- Diesel Stuff, TODO This should be refactored --- //
@@ -353,13 +351,17 @@ enum FileGeneratorError {
         dirname
     )]
     ImproperlyFormattedDirname { dirname: String },
-    #[fail(display = "Input directory should not contain sub-directories")]
+
+    #[fail(display = "Shark directory should not contain sub-directories")]
     NestedDirectory,
+
     #[fail(display = "Input path must end in a filename and not '..'")]
     InvalidFileName,
-    #[fail(display = "Input path must start with a directory")]
+
+    #[fail(display = "Input path must be a directory")]
     MissingDirectory,
-    #[fail(display = "Directory must be named as a storage node")]
+
+    #[fail(display = "Shark directory must be named as a storage node")]
     InvalidDirName,
 }
 
@@ -370,27 +372,27 @@ impl FileGenerator {
     ///     <per_shard object file>
     ///     <per_shard object file>
     ///     ...
+    ///
+    /// or
+    /// <parent_dir>
+    ///     <shark name>/
+    ///         <per_shard object file>
+    ///         <per_shard object file>
+    ///         <per_shard object file>
+    ///         ...
+    ///
+    // Note that we do something very similar when we actually run the job.
+    // The reason we do this upfront is really to make sure all the files in
+    // the directory have valid names before we start rebalancing.
     fn validate_directory(&self) -> Result<(), Failure> {
         let dir = Path::new(self.directory.as_str());
         if !dir.is_dir() {
             return Err(FileGeneratorError::MissingDirectory.into());
         }
 
-        let dirname = match dir.file_name() {
-            Some(d) => d.to_string_lossy().to_string(),
-            None => {
-                return Err(FileGeneratorError::InvalidDirName.into());
-            }
-        };
+        let source_dir = self.get_source_dir()?;
 
-        if !SHARK_DIR_RE.is_match(&dirname) {
-            return Err(FileGeneratorError::ImproperlyFormattedDirname {
-                dirname,
-            }
-            .into());
-        }
-
-        for entry in fs::read_dir(dir)? {
+        for entry in fs::read_dir(source_dir.as_path())? {
             let entry = entry?.path();
             if entry.is_dir() {
                 return Err(FileGeneratorError::NestedDirectory.into());
@@ -417,12 +419,82 @@ impl FileGenerator {
     }
 
     fn walk_shards(&self) -> Result<(), Error> {
-        let dir = Path::new(self.directory.as_str());
-        for shard in fs::read_dir(dir)? {
+        let dir = self.get_source_dir()
+            .map_err(|e| {
+                InternalError::new(
+                    Some(InternalErrorCode::InvalidJobAction),
+                    e.to_string())
+            })?;
+        for shard in fs::read_dir(dir.as_path())? {
             let shard = shard?.path();
             self.walk_objects(shard)?
         }
         Ok(())
+    }
+
+    ///
+    /// We want to be flexible about the source directory.  It can be named
+    /// with either the short ID ("1.stor") or the full manta_storage_id
+    /// ("1 .stor.domain.joyent.us")
+    ///
+    /// This function creates both possibilities, and puts them in a vector.
+    ///
+    /// If the user provided path ends in the shark name then we are done.
+    ///
+    /// If not then scan the path provided and check for either of the
+    /// possibilities noted above, and return the PathBuf for the first one
+    /// that matches.
+    ///
+    fn get_source_dir(&self) -> Result<PathBuf, Failure> {
+        let from_shark = &self.job_action.from_shark.manta_storage_id.clone();
+        let dir = Path::new(self.directory.as_str());
+        let mut possibilities = vec![from_shark.clone()];
+
+        // This should always be the case, but we want to be liberal with
+        // what we receive.  Also, we don't want a change elsewhere in the
+        // code to break this part.
+        if from_shark.contains(&self.job_action.domain_name) {
+            let re_str =  format!(
+                "^(?P<host>.*).{}",
+                self.job_action.domain_name
+            );
+            let host_only_re: Regex = Regex::new(&re_str)
+                .expect("compile regex");
+
+            let host = match host_only_re.captures(&from_shark) {
+                Some(c) => c["host"].to_string(),
+                None => {
+                    return Err(FileGeneratorError::InvalidDirName.into());
+                }
+            };
+            possibilities.push(host);
+        }
+
+        // If the path provided ends in the shark name, just return that
+        // PathBuf.
+        for p in possibilities.iter() {
+            if dir.ends_with(p) {
+                return Ok(dir.to_path_buf());
+            }
+        }
+
+        // Find the per shark path in the path provided provided by the user
+        for subdir in fs::read_dir(dir)? {
+            let subdir = subdir?.path();
+            let dirname = match subdir.file_name() {
+                Some(d) => d,
+                None => continue
+            };
+            if possibilities.contains(&dirname.to_string_lossy().to_string()) {
+                return Ok(subdir);
+            }
+        }
+
+        // TODO: FileGeneratorError
+        Err(FileGeneratorError::ImproperlyFormattedDirname {
+            dirname: self.directory.clone()
+        }.into())
+
     }
 
     ///
@@ -3531,7 +3603,7 @@ mod tests {
             env!("CARGO_MANIFEST_DIR")
         );
         let (obj_tx, obj_rx) = crossbeam_channel::bounded(5);
-        let from_shark = String::from("1.stor.domain");
+        let from_shark = String::from("1.stor.fakedomain.us");
         let job_action = EvacuateJob::new(
             from_shark,
             "fakedomain.us",
@@ -3569,6 +3641,7 @@ mod tests {
         let mut received_count = 0;
         loop {
             if let Ok(o) = obj_rx.recv() {
+                debug!("{}", o.id);
                 received_count += 1;
             } else {
                 break;
