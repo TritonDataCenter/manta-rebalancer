@@ -970,6 +970,71 @@ fn log_file_stats(task: &Task, uuid: &str) {
     );
 }
 
+async fn process_task_async(
+    assignment: Arc<RwLock<Assignment>>,
+    index: usize,
+    uuid: &str,
+    f: fn(&mut Task, &Client),
+    failures: Arc<Mutex<Vec<Task>>>,
+    metrics: &Option<MetricsMap>,
+    client: &Client,
+) {
+    let assn = assignment.clone();
+
+    // Obtain a copy of the current task from our task list.  We
+    // will update the state information of the task and write it
+    // back in to the vector.  We want to retain ownership of the
+    // write-lock on the vector for as little as possible, so we
+    // perform this operation inside of a new scope -- as soon as
+    // it ends, the lock will be dropped along with the reference
+    // to the task list which is why we obtain a copy of the task
+    // as opposed to a reference to it.
+    let mut t = {
+        let tmp = &mut assn.write().unwrap().tasks;
+        tmp[index].set_status(TaskStatus::Running);
+        tmp[index].clone()
+    };
+
+    // Process it.
+    f(&mut t, client);
+
+    // Grab the write lock on the assignment.  It will only be held until
+    // the end of the loop (which is not for very long).
+    let tmp = &mut assn.write().unwrap();
+
+    // Update the total number of objects that have been processes, whether
+    // successful or not.
+    if let Some(m) = metrics.clone() {
+        // Note: The rebalncer agent does not currently break down this
+        // metric by anything meaningful, so we don't supply a bucket.
+        // That is, the only thing we track here is the total number of
+        // objects processed.
+        counter_vec_inc(&m, OBJECT_COUNT, None);
+    }
+
+    // Update our stats.
+    match t.status {
+        TaskStatus::Pending => (),
+        TaskStatus::Running => (),
+        TaskStatus::Complete => {
+            log_file_stats(&t, &uuid);
+            tmp.stats.complete += 1;
+        }
+        TaskStatus::Failed(e) => {
+            if let Some(m) = metrics.clone() {
+                counter_vec_inc(&m, ERROR_COUNT, Some(&e.to_string()));
+            }
+            tmp.stats.complete += 1;
+            tmp.stats.failed += 1;
+            //failures.push(t.clone());
+            failures.lock().unwrap().push(t.clone());
+        }
+    }
+
+    // Update the task in the vector.
+    tmp.tasks[index] = t;
+}
+
 // Invoked by the worker thread, this function receives a caller-supplied
 // HashMap and a uuid that it uses as a key to find the assignment within
 // it.  Once it has obtained it, it processes each task in the assignment
@@ -1003,73 +1068,23 @@ fn process_assignment(
 
     let assignment = assignment_get(&assignments, &uuid).unwrap();
     let len = assignment.read().unwrap().tasks.len();
-    let mut failures = Vec::new();
-
+   // let mut failures = Vec::new();
+    let failures = Arc::new(Mutex::new(Vec::new()));
     assignment.write().unwrap().stats.state = AgentAssignmentState::Running;
 
     info!("Begin processing assignment {}.", &uuid);
 
     for i in 0..len {
-        let assn = assignment.clone();
-
-        // Obtain a copy of the current task from our task list.  We
-        // will update the state information of the task and write it
-        // back in to the vector.  We want to retain ownership of the
-        // write-lock on the vector for as little as possible, so we
-        // perform this operation inside of a new scope -- as soon as
-        // it ends, the lock will be dropped along with the reference
-        // to the task list which is why we obtain a copy of the task
-        // as opposed to a reference to it.
-        let mut t = {
-            let tmp = &mut assn.write().unwrap().tasks;
-            tmp[i].set_status(TaskStatus::Running);
-            tmp[i].clone()
-        };
-
-        // Process it.
-        f(&mut t, client);
-
-        // Grab the write lock on the assignment.  It will only be held until
-        // the end of the loop (which is not for very long).
-        let tmp = &mut assn.write().unwrap();
-
-        // Update the total number of objects that have been processes, whether
-        // successful or not.
-        if let Some(m) = metrics.clone() {
-            // Note: The rebalncer agent does not currently break down this
-            // metric by anything meaningful, so we don't supply a bucket.
-            // That is, the only thing we track here is the total number of
-            // objects processed.
-            counter_vec_inc(&m, OBJECT_COUNT, None);
-        }
-
-        // Update our stats.
-        match t.status {
-            TaskStatus::Pending => (),
-            TaskStatus::Running => (),
-            TaskStatus::Complete => {
-                log_file_stats(&t, &uuid);
-                tmp.stats.complete += 1;
-            }
-            TaskStatus::Failed(e) => {
-                if let Some(m) = metrics.clone() {
-                    counter_vec_inc(&m, ERROR_COUNT, Some(&e.to_string()));
-                }
-                tmp.stats.complete += 1;
-                tmp.stats.failed += 1;
-                failures.push(t.clone());
-            }
-        }
-
-        // Update the task in the vector.
-        tmp.tasks[i] = t;
+        process_task_async(assignment.clone(), i, &uuid, f, failures.clone(), &metrics, client);
     }
-
+    let failed = None; // FIX THIS
+/*
     let failed = if failures.is_empty() {
         None
     } else {
         Some(failures)
     };
+*/
 
     assignment.write().unwrap().stats.state =
         AgentAssignmentState::Complete(failed);
