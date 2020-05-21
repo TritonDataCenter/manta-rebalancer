@@ -419,12 +419,12 @@ impl FileGenerator {
     }
 
     fn walk_shards(&self) -> Result<(), Error> {
-        let dir = self.get_source_dir()
-            .map_err(|e| {
-                InternalError::new(
-                    Some(InternalErrorCode::InvalidJobAction),
-                    e.to_string())
-            })?;
+        let dir = self.get_source_dir().map_err(|e| {
+            InternalError::new(
+                Some(InternalErrorCode::InvalidJobAction),
+                e.to_string(),
+            )
+        })?;
         for shard in fs::read_dir(dir.as_path())? {
             let shard = shard?.path();
             self.walk_objects(shard)?
@@ -454,12 +454,10 @@ impl FileGenerator {
         // what we receive.  Also, we don't want a change elsewhere in the
         // code to break this part.
         if from_shark.contains(&self.job_action.domain_name) {
-            let re_str =  format!(
-                "^(?P<host>.*).{}",
-                self.job_action.domain_name
-            );
-            let host_only_re: Regex = Regex::new(&re_str)
-                .expect("compile regex");
+            let re_str =
+                format!("^(?P<host>.*).{}", self.job_action.domain_name);
+            let host_only_re: Regex =
+                Regex::new(&re_str).expect("compile regex");
 
             let host = match host_only_re.captures(&from_shark) {
                 Some(c) => c["host"].to_string(),
@@ -478,12 +476,14 @@ impl FileGenerator {
             }
         }
 
+        debug!("Looking for {} in {:#?}", from_shark, dir);
         // Find the per shark path in the path provided provided by the user
         for subdir in fs::read_dir(dir)? {
             let subdir = subdir?.path();
+            debug!("Checking {:?}", subdir);
             let dirname = match subdir.file_name() {
                 Some(d) => d,
-                None => continue
+                None => continue,
             };
             if possibilities.contains(&dirname.to_string_lossy().to_string()) {
                 return Ok(subdir);
@@ -492,9 +492,9 @@ impl FileGenerator {
 
         // TODO: FileGeneratorError
         Err(FileGeneratorError::ImproperlyFormattedDirname {
-            dirname: self.directory.clone()
-        }.into())
-
+            dirname: self.directory.clone(),
+        }
+        .into())
     }
 
     ///
@@ -508,11 +508,12 @@ impl FileGenerator {
                 InternalError::new(None, "failed to get filename from path")
             })
             .and_then(|filename| {
-                filename
-                    .to_str()
-                    .ok_or_else(|| {
-                        InternalError::new(None, "failed to convert filename to string")
-                    })
+                filename.to_str().ok_or_else(|| {
+                    InternalError::new(
+                        None,
+                        "failed to convert filename to string",
+                    )
+                })
             })
             .and_then(|file_str| {
                 debug!("capturing shard number on: {}", file_str);
@@ -530,7 +531,8 @@ impl FileGenerator {
         for obj in reader.lines() {
             let obj = obj?;
 
-            let moray_object: HashMap<String, Value> = serde_json::from_str(&obj)?;
+            let moray_object: HashMap<String, Value> =
+                serde_json::from_str(&obj)?;
             let moray_object = serde_json::to_value(moray_object)?;
 
             let eobj = match EvacuateObject::from_moray_object(
@@ -3594,16 +3596,12 @@ mod tests {
         }
     }
 
-    #[test]
-    fn file_object_source() {
-        unit_test_init();
-
-        let test_path = format!(
-            "{}/testfiles/1.stor",
-            env!("CARGO_MANIFEST_DIR")
-        );
+    fn run_file_object_source_test(
+        test_path: String,
+        from_shark: String,
+        expected_line_count: u32,
+    ) {
         let (obj_tx, obj_rx) = crossbeam_channel::bounded(5);
-        let from_shark = String::from("1.stor.fakedomain.us");
         let job_action = EvacuateJob::new(
             from_shark,
             "fakedomain.us",
@@ -3611,22 +3609,9 @@ mod tests {
             ObjectSource::File(test_path.clone()),
             ConfigOptions::default(),
             None,
-        ).expect("initialize evacuate job");
+        )
+        .expect("initialize evacuate job");
         let job_action = Arc::new(job_action);
-        let line_count = {
-            let mut count = 0;
-            for shard in fs::read_dir(test_path.clone()).expect("read dir") {
-                let shard = shard.expect("shard").path();
-                let f = OpenOptions::new()
-                    .read(true)
-                    .open(shard)
-                    .expect("open file");
-                for _ in BufReader::new(f).lines() {
-                    count += 1;
-                }
-            }
-            count
-        };
 
         let fgen = FileGenerator {
             job_action: Arc::clone(&job_action),
@@ -3648,9 +3633,57 @@ mod tests {
             }
         }
 
-        assert_eq!(received_count, line_count);
+        assert_eq!(received_count, expected_line_count);
 
         fgen_handle.join().expect("join fgen").expect("fgen result");
+    }
+
+    // Get a count of the lines for all the files in this directory.
+    fn total_shard_line_count(directory: &str) -> u32 {
+        let mut count = 0;
+        for shard in fs::read_dir(directory).expect("read dir") {
+            let shard = shard.expect("shard").path();
+            let f = OpenOptions::new()
+                .read(true)
+                .open(shard)
+                .expect("open file");
+            for _ in BufReader::new(f).lines() {
+                count += 1;
+            }
+        }
+        count
+    }
+
+    #[test]
+    fn file_source_shark_dir() {
+        unit_test_init();
+
+        let test_path =
+            format!("{}/testfiles/1.stor", env!("CARGO_MANIFEST_DIR"));
+
+        let line_count = total_shard_line_count(&test_path);
+
+        run_file_object_source_test(
+            test_path,
+            "1.stor.fakedomain.us".into(),
+            line_count,
+        );
+    }
+
+    #[test]
+    fn file_source_parent_dir() {
+        unit_test_init();
+
+        let test_path = format!("{}/testfiles/", env!("CARGO_MANIFEST_DIR"));
+
+        let line_count =
+            total_shard_line_count(format!("{}/1.stor", &test_path).as_str());
+
+        run_file_object_source_test(
+            test_path,
+            "1.stor.fakedomain.us".into(),
+            line_count,
+        );
     }
 
     #[test]
