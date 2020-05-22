@@ -48,9 +48,7 @@ use crossbeam_channel::TryRecvError;
 use crossbeam_deque::{Injector, Steal};
 use libmanta::moray::{MantaObject, MantaObjectShark};
 use moray::client::MorayClient;
-use moray::objects::{
-    BatchPutOp, BatchRequest, Etag, MethodOptions as ObjectMethodOptions,
-};
+use moray::objects::{BatchPutOp, BatchRequest, Etag, MethodOptions as ObjectMethodOptions};
 use quickcheck::{Arbitrary, Gen};
 use quickcheck_helpers::random::string as random_string;
 use rand::seq::SliceRandom;
@@ -2652,6 +2650,8 @@ fn metadata_update_worker_dynamic(
     }
 }
 
+// If a client for this shard does not exist in the hash this function will
+// create one and put it in the hash, and return it as an &mut.
 fn get_client_from_hash<'a>(
     job_action: &Arc<EvacuateJob>,
     client_hash: &'a mut HashMap<u32, MorayClient>,
@@ -2704,6 +2704,95 @@ fn metadata_update_one(
             )
         })
         .map_err(Error::from)
+}
+
+// Attempt to update all objects in this assignment in per shard batches.
+// So given an assignment with objects in two different shards, we will make
+// two calls to moray to update all the objects for this assignment in their
+// respective shards.
+//
+// If a batch fails this function falls back to updating each object
+// individually for that batch.
+fn metadata_update_batch(
+    job_action: &Arc<EvacuateJob>,
+    client_hash: &mut HashMap<u32, MorayClient>,
+    batched_requests: HashMap<u32, Vec<BatchRequest>>,
+) -> Vec<ObjectId> {
+    let mut marked_error = vec![];
+    for (shard, requests) in batched_requests.into_iter() {
+        info!("Updating {} objects for shard {} in a single batch",
+              requests.len(), shard);
+        let mclient =
+            match get_client_from_hash(job_action, client_hash, shard) {
+                Ok(c) => c,
+                Err(e) => {
+                    // If we can't get the client for these objects there's
+                    // nothing we can do.  Mark them all as error.
+                    // TODO: want mark_many_objects_error()
+                    error!("Could not get client for batch update: {}", e);
+                    let eobj_err: EvacuateObjectError = e.into();
+                    for r in requests.iter() {
+                        let br = match r {
+                            BatchRequest::Put(br) => br,
+                            _ => panic!("Unexpected Batch Request"),
+                        };
+
+                        let id = common::get_objectId_from_value(&br.value)
+                            .expect("Object Id missing");
+
+                        job_action.mark_object_error(&id, eobj_err.clone());
+                        marked_error.push(id);
+                    }
+                    continue;
+                }
+            };
+
+        // If we fail the batch, step through the objects and attempt to
+        // update each one individually. For each object that fails to
+        // update mark it as error, and add it to the marked_error Vec to
+        // be trimmed from our list of successful updates later.
+        if let Err(e) = mclient.batch(
+            &requests,
+            &ObjectMethodOptions::default(),
+            |_| Ok(()), // TODO: do we want this data?
+        ) {
+            error!("Batch update failed, retrying individually: {}", e);
+
+            for r in requests.into_iter() {
+                let br: BatchPutOp = match r {
+                    BatchRequest::Put(br) => br,
+                    _ => panic!("Unexpected Batch Request"),
+                };
+
+                let etag = br
+                    .options
+                    .etag
+                    .specified_value()
+                    .expect("etag should be specified");
+
+                let o = br.value;
+
+                if let Err(muo_err) = metadata_update_one(
+                    job_action,
+                    client_hash,
+                    &o,
+                    &etag,
+                    shard,
+                ) {
+                    let id = common::get_objectId_from_value(&o)
+                        .expect("cannot get objectId");
+
+                    error!("Error updating object: {}\n{:?}", muo_err, o);
+                    job_action.mark_object_error(&id, muo_err.into());
+
+                    marked_error.push(id);
+
+                    continue;
+                }
+            }
+        }
+    }
+    marked_error
 }
 
 fn metadata_update_assignment(
@@ -2825,81 +2914,17 @@ fn metadata_update_assignment(
         updated_objects.push(eobj.id.clone());
     }
 
-    let mut marked_error = vec![];
     if job_action.options.use_batched_updates {
-        for (shard, requests) in batched_requests.into_iter() {
-            let mclient =
-                match get_client_from_hash(job_action, client_hash, shard) {
-                    Ok(c) => c,
-                    Err(e) => {
-                        // If we can't get the client for these objects there's
-                        // nothing we can do.  Mark them all as error.
-                        // TODO: want mark_many_objects_error()
-                        let eobj_err: EvacuateObjectError = e.into();
-                        for r in requests.iter() {
-                            let br = match r {
-                                BatchRequest::Put(br) => br,
-                                _ => panic!("Unexpected Batch Request"),
-                            };
-                            let id = common::get_objectId_from_value(&br.value)
-                                .expect("Object Id missing");
-                            job_action.mark_object_error(&id, eobj_err.clone());
-                            marked_error.push(id);
-                        }
-                        continue;
-                    }
-                };
+        let marked_error = metadata_update_batch(
+            job_action,
+            client_hash,
+            batched_requests,
+        );
 
-            // If we fail the batch step through the objects and attempt to
-            // update each one individually. For each object that fails to
-            // update mark it as error, and add it to the marked_error Vec to
-            // be trimmed from our list of successful updates later.
-            if let Err(e) = mclient.batch(
-                &requests,
-                &ObjectMethodOptions::default(),
-                |_| Ok(()), // TODO: do we want this data?
-            ) {
-                error!("Batch update failed, retrying: {}", e);
-
-                for r in requests.into_iter() {
-                    let br: BatchPutOp = match r {
-                        BatchRequest::Put(br) => br,
-                        _ => panic!("Unexpected Batch Request"),
-                    };
-
-                    let etag = br
-                        .options
-                        .etag
-                        .specified_value()
-                        .expect("etag should be specified");
-
-                    let o = br.value;
-
-                    if let Err(muo_err) = metadata_update_one(
-                        job_action,
-                        client_hash,
-                        &o,
-                        &etag,
-                        shard,
-                    ) {
-                        let id = common::get_objectId_from_value(&o)
-                            .expect("cannot get objectId");
-
-                        error!("Error updating object: {}\n{:?}", muo_err, o);
-                        job_action.mark_object_error(&id, muo_err.into());
-
-                        marked_error.push(id);
-
-                        continue;
-                    }
-                }
-            }
-        }
+        // Remove any of the objects that we had to mark as "Error" from the list
+        // of updated objects.
+        updated_objects.retain(|o| !marked_error.contains(o));
     }
-
-    // Remove any of the objects that we had to mark as "Error" from the list
-    // of updated objects.
-    updated_objects.retain(|o| !marked_error.contains(o));
 
     debug!("Updated Objects: {:?}", updated_objects);
     info!("Assignment Complete: {}", &ace.id);
