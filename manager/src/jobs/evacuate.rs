@@ -2716,9 +2716,7 @@ fn metadata_update_assignment(
     // There is one moray client per shard, so when we collect the requests
     // into a batch we need to know which moray client this is going to based
     // on the shard number.
-    //    let mut batched_requests: HashMap<u32, Vec<EvacuateObjectBatchRequest>> =
     let mut batched_requests: HashMap<u32, Vec<BatchRequest>> = HashMap::new();
-
     let mut updated_objects = vec![];
     let dest_shark = &ace.dest_shark;
     let objects = job_action
