@@ -48,7 +48,9 @@ use crossbeam_channel::TryRecvError;
 use crossbeam_deque::{Injector, Steal};
 use libmanta::moray::{MantaObject, MantaObjectShark};
 use moray::client::MorayClient;
-use moray::objects::{BatchPutOp, BatchRequest, Etag, MethodOptions as ObjectMethodOptions};
+use moray::objects::{
+    BatchPutOp, BatchRequest, Etag, MethodOptions as ObjectMethodOptions,
+};
 use quickcheck::{Arbitrary, Gen};
 use quickcheck_helpers::random::string as random_string;
 use rand::seq::SliceRandom;
@@ -2720,32 +2722,35 @@ fn metadata_update_batch(
 ) -> Vec<ObjectId> {
     let mut marked_error = vec![];
     for (shard, requests) in batched_requests.into_iter() {
-        info!("Updating {} objects for shard {} in a single batch",
-              requests.len(), shard);
-        let mclient =
-            match get_client_from_hash(job_action, client_hash, shard) {
-                Ok(c) => c,
-                Err(e) => {
-                    // If we can't get the client for these objects there's
-                    // nothing we can do.  Mark them all as error.
-                    // TODO: want mark_many_objects_error()
-                    error!("Could not get client for batch update: {}", e);
-                    let eobj_err: EvacuateObjectError = e.into();
-                    for r in requests.iter() {
-                        let br = match r {
-                            BatchRequest::Put(br) => br,
-                            _ => panic!("Unexpected Batch Request"),
-                        };
+        info!(
+            "Updating {} objects for shard {} in a single batch",
+            requests.len(),
+            shard
+        );
+        let mclient = match get_client_from_hash(job_action, client_hash, shard)
+        {
+            Ok(c) => c,
+            Err(e) => {
+                // If we can't get the client for these objects there's
+                // nothing we can do.  Mark them all as error.
+                // TODO: want mark_many_objects_error()
+                error!("Could not get client for batch update: {}", e);
+                let eobj_err: EvacuateObjectError = e.into();
+                for r in requests.iter() {
+                    let br = match r {
+                        BatchRequest::Put(br) => br,
+                        _ => panic!("Unexpected Batch Request"),
+                    };
 
-                        let id = common::get_objectId_from_value(&br.value)
-                            .expect("Object Id missing");
+                    let id = common::get_objectId_from_value(&br.value)
+                        .expect("Object Id missing");
 
-                        job_action.mark_object_error(&id, eobj_err.clone());
-                        marked_error.push(id);
-                    }
-                    continue;
+                    job_action.mark_object_error(&id, eobj_err.clone());
+                    marked_error.push(id);
                 }
-            };
+                continue;
+            }
+        };
 
         // If we fail the batch, step through the objects and attempt to
         // update each one individually. For each object that fails to
@@ -2915,11 +2920,8 @@ fn metadata_update_assignment(
     }
 
     if job_action.options.use_batched_updates {
-        let marked_error = metadata_update_batch(
-            job_action,
-            client_hash,
-            batched_requests,
-        );
+        let marked_error =
+            metadata_update_batch(job_action, client_hash, batched_requests);
 
         // Remove any of the objects that we had to mark as "Error" from the list
         // of updated objects.
