@@ -2726,15 +2726,19 @@ fn metadata_update_one(
     shard: u32,
 ) -> Result<(), Error> {
     let mclient = get_client_from_hash(job_action, client_hash, shard)?;
+    let now = std::time::Instant::now();
 
-    moray_client::put_object(mclient, object, etag)
+    let ret = moray_client::put_object(mclient, object, etag)
         .map_err(|e| {
             InternalError::new(
                 Some(InternalErrorCode::MetadataUpdateFailure),
                 e.description(),
             )
         })
-        .map_err(Error::from)
+        .map_err(Error::from);
+
+    info!("Updated 1 object in {}us", now.elapsed().as_micros());
+    ret
 }
 
 // Attempt to update all objects in this assignment in per shard batches.
@@ -2751,10 +2755,10 @@ fn metadata_update_batch(
 ) -> Vec<ObjectId> {
     let mut marked_error = vec![];
     for (shard, requests) in batched_reqs.into_iter() {
+        let num_reqs = requests.len();
         info!(
             "Updating {} objects for shard {} in a single batch",
-            requests.len(),
-            shard
+            num_reqs, shard
         );
         let mclient = match get_client_from_hash(job_action, client_hash, shard)
         {
@@ -2785,11 +2789,17 @@ fn metadata_update_batch(
         // update each one individually. For each object that fails to
         // update mark it as error, and add it to the marked_error Vec to
         // be trimmed from our list of successful updates later.
-        if let Err(e) = mclient.batch(
-            &requests,
-            &ObjectMethodOptions::default(),
-            |_| Ok(()), // TODO: do we want this data?
-        ) {
+        let now = std::time::Instant::now();
+        if let Err(e) =
+            mclient.batch(&requests, &ObjectMethodOptions::default(), |_| {
+                info!(
+                    "Batch updated {} objects in {}us",
+                    num_reqs,
+                    now.elapsed().as_micros()
+                );
+                Ok(())
+            })
+        {
             error!("Batch update failed, retrying individually: {}", e);
 
             for r in requests.into_iter() {
