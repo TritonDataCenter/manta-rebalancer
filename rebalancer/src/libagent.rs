@@ -982,17 +982,6 @@ fn process_assignment_impl(
     let len = assignment.read().unwrap().tasks.len();
 
     for index in 0..len {
-/*
-        let tasks = &mut assignment.write().unwrap().tasks;
-
-        if tasks[index].status != TaskStatus::Pending {
-            drop(tasks);
-            continue;
-        }
-
-        tasks[index].set_status(TaskStatus::Running);
-        let mut t = tasks[index].clone();
-*/
         let mut t = {
             let tmp = &mut assignment.write().unwrap().tasks;
 
@@ -1004,14 +993,8 @@ fn process_assignment_impl(
             tmp[index].clone()
         };
 
-    //    drop(tasks);
-
         // Process it.
         f(&mut t, client);
-
-        // Grab the write lock on the assignment.  It will only be held until
-        // the end of the loop (which is not for very long).
-        //let tmp = &mut assn.write().unwrap();
 
         // Update the total number of objects that have been processes, whether
         // successful or not.
@@ -1022,7 +1005,6 @@ fn process_assignment_impl(
             // objects processed.
             counter_vec_inc(&m, OBJECT_COUNT, None);
         }
-
 
         let tmp = &mut assignment.write().unwrap();
 
@@ -1045,7 +1027,6 @@ fn process_assignment_impl(
         }
 
         // Update the task in the assignment.
-        //assignment.write().unwrap().tasks[index] = t;
         tmp.tasks[index] = t;
     }
 }
@@ -1084,7 +1065,7 @@ fn process_assignment(
 
     let assignment = assignment_get(&assignments, &uuid).unwrap();
     let len = assignment.read().unwrap().tasks.len();
-    let mut failures = Arc::new(Mutex::new(Vec::new()));
+    let failures = Arc::new(Mutex::new(Vec::new()));
 
     assignment.write().unwrap().stats.state = AgentAssignmentState::Running;
 
@@ -1100,12 +1081,12 @@ fn process_assignment(
         let c = client.clone();
         pool.execute(move || {
             process_assignment_impl(
-                a,//Arc::clone(&a),
-                &id,//&uuid,
+                a,
+                &id,
                 f,
-                fl,//Arc::clone(&failures),
-                &m,//&metrics,
-                &c//client
+                fl,
+                &m,
+                &c
             );
         });
     }
@@ -1114,10 +1095,9 @@ fn process_assignment(
     let failed = if failures.lock().unwrap().is_empty() {
         None
     } else {
-        let mut f = Vec::new();
-        f.append(&mut failures.lock().unwrap());
-        Some(f)
+        Some(failures.lock().unwrap().clone())
     };
+
     assignment.write().unwrap().stats.state =
         AgentAssignmentState::Complete(failed);
 
