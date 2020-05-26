@@ -643,22 +643,33 @@ impl EvacuateJob {
         ret
     }
 
-    fn update_bytes_transferred(&self, eobj: &EvacuateObject) {
-        eobj.object
-            .get("contentLength")
-            .and_then(|cl| {
-                if let Some(bytes) = cl.as_u64() {
-                    // TODO: metrics
-                    self.bytes_transferred.fetch_add(bytes, Ordering::SeqCst);
-                } else {
-                    warn!("Could not get bytes as number from {}", cl);
-                }
-                Some(())
-            })
-            .or_else(|| {
-                warn!("Could not find contentLength for {}", eobj.id);
-                None
-            });
+    fn mark_objects_complete(&self, completed_objects: Vec<EvacuateObject>) {
+        let mut obj_ids = vec![];
+
+        for eobj in completed_objects.into_iter() {
+            eobj.object
+                .get("contentLength")
+                .and_then(|cl| {
+                    if let Some(bytes) = cl.as_u64() {
+                        // TODO: metrics
+                        self.bytes_transferred
+                            .fetch_add(bytes, Ordering::SeqCst);
+                    } else {
+                        warn!("Could not get bytes as number from {}", cl);
+                    }
+                    Some(())
+                })
+                .or_else(|| {
+                    warn!("Could not find contentLength for {}", eobj.id);
+                    None
+                });
+
+            obj_ids.push(eobj.id);
+        }
+
+        debug!("Updated Objects: {:?}", obj_ids);
+        metrics_object_inc_by(Some(ACTION_EVACUATE), obj_ids.len());
+        self.mark_many_objects(obj_ids, EvacuateObjectStatus::Complete);
     }
 
     fn set_assignment_state(
@@ -2927,9 +2938,7 @@ fn metadata_update_assignment(
             }
         };
 
-        job_action.update_bytes_transferred(&eobj);
-
-        updated_objects.push(eobj.id.clone());
+        updated_objects.push(eobj);
     }
 
     if job_action.options.use_batched_updates {
@@ -2938,17 +2947,13 @@ fn metadata_update_assignment(
 
         // Remove any of the objects that we had to mark as "Error" from the list
         // of updated objects.
-        updated_objects.retain(|o| !marked_error.contains(o));
+        updated_objects.retain(|o| !marked_error.contains(&o.id));
     }
 
-    debug!("Updated Objects: {:?}", updated_objects);
     info!("Assignment Complete: {}", &ace.id);
 
-    metrics_object_inc_by(Some(ACTION_EVACUATE), updated_objects.len());
-
     job_action.remove_assignment_from_cache(&ace.id);
-    job_action
-        .mark_many_objects(updated_objects, EvacuateObjectStatus::Complete);
+    job_action.mark_objects_complete(updated_objects);
     // TODO: check for DB insert error
 }
 
