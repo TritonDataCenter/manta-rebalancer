@@ -14,7 +14,7 @@ pub mod status;
 use crate::config::Config;
 use crate::pg_db::connect_or_create_db;
 use crate::storinfo::StorageNode;
-use evacuate::EvacuateJob;
+use evacuate::{EvacuateJob, EvacuateJobUpdateMessage};
 use rebalancer::common::{ObjectId, Task};
 use rebalancer::error::{Error, InternalError, InternalErrorCode};
 
@@ -59,11 +59,16 @@ pub struct EvacuateJobPayload {
     pub max_objects: Option<u32>,
 }
 
+pub enum JobUpdateMessage {
+    Evacuate(EvacuateJobUpdateMessage),
+}
+
 pub struct Job {
     id: Uuid,
     action: JobAction,
     state: JobState,
     config: Config,
+    pub update_tx: crossbeam_channel::Sender<JobUpdateMessage>,
 }
 
 // JobBuilder allows us to build a job before commiting its configuration and
@@ -75,6 +80,7 @@ pub struct JobBuilder {
     action: Option<JobAction>,
     state: JobState,
     config: Config,
+    update_tx: Option<crossbeam_channel::Sender<JobUpdateMessage>>,
 }
 
 impl JobBuilder {
@@ -93,16 +99,19 @@ impl JobBuilder {
         domain_name: &str,
         max_objects: Option<u32>,
     ) -> JobBuilder {
+        let (tx, rx) = crossbeam_channel::unbounded();
         match EvacuateJob::new(
             from_shark,
             domain_name,
             &self.id.to_string(),
             self.config.options,
+            rx,
             max_objects,
         ) {
             Ok(j) => {
                 let action = JobAction::Evacuate(Box::new(j));
                 self.action = Some(action);
+                self.update_tx = Some(tx);
             }
             Err(e) => {
                 error!("Failed to initialize evacuate job: {}", e);
@@ -130,19 +139,34 @@ impl JobBuilder {
             .into());
         }
 
-        if self.action.is_none() {
-            return Err(InternalError::new(
-                Some(InternalErrorCode::JobBuilderError),
-                "A job action must be specified",
-            )
-            .into());
-        }
+        let action = match self.action {
+            Some(a) => a,
+            None => {
+                return Err(InternalError::new(
+                    Some(InternalErrorCode::JobBuilderError),
+                    "A job action must be specified",
+                )
+                .into());
+            }
+        };
+
+        let update_tx = match self.update_tx {
+            Some(tx) => tx,
+            None => {
+                return Err(InternalError::new(
+                    Some(InternalErrorCode::JobBuilderError),
+                    "Missing job update channel",
+                )
+                .into());
+            }
+        };
 
         let job = Job {
             id: self.id,
-            action: self.action.expect("job action"),
+            action,
             state: JobState::Setup,
             config: self.config,
+            update_tx,
         };
 
         job.insert_into_db()?;
@@ -486,24 +510,14 @@ impl Default for JobState {
     }
 }
 
-impl Default for Job {
-    fn default() -> Self {
-        Self {
-            action: JobAction::default(),
-            state: JobState::default(),
-            id: Uuid::new_v4(),
-            config: Config::default(),
-        }
-    }
-}
-
 impl Default for JobBuilder {
     fn default() -> Self {
         Self {
+            id: Uuid::new_v4(),
             action: None,
             state: JobState::default(),
-            id: Uuid::new_v4(),
             config: Config::default(),
+            update_tx: None,
         }
     }
 }

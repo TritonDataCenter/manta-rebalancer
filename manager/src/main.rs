@@ -24,12 +24,15 @@ static GLOBAL: Jemalloc = Jemalloc;
 
 use manager::config::Config;
 use manager::jobs::status::StatusError;
-use manager::jobs::{self, JobBuilder, JobDbEntry, JobPayload};
+use manager::jobs::{
+    self, JobBuilder, JobDbEntry, JobPayload, JobUpdateMessage,
+};
 use manager::metrics::{metrics_init, metrics_request_inc};
 use rebalancer::util;
 
 use std::collections::HashMap;
 use std::error::Error;
+use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
 use clap::{App, Arg, ArgMatches};
@@ -43,10 +46,16 @@ use gotham::router::builder::{
 use gotham::router::Router;
 use gotham::state::{FromState, State};
 use hyper::{Body, Response, StatusCode};
+use lazy_static::lazy_static;
 use threadpool::ThreadPool;
 use uuid::Uuid;
 
 static THREAD_COUNT: usize = 1;
+
+lazy_static! {
+    static ref UPDATE_CHANS: Mutex<HashMap<Uuid, crossbeam_channel::Sender<JobUpdateMessage>>> =
+        Mutex::new(HashMap::new());
+}
 
 #[derive(Deserialize, StateData, StaticResponseExtender)]
 struct GetJobParams {
@@ -61,6 +70,51 @@ struct JobStatus {
 #[derive(Debug, Deserialize, Serialize)]
 struct JobList {
     jobs: Vec<String>,
+}
+
+#[derive(Deserialize, StateData, StaticResponseExtender)]
+struct UpdateJobParams {
+    uuid: String,
+}
+
+fn add_update_channel(
+    uuid: Uuid,
+    update_tx: crossbeam_channel::Sender<JobUpdateMessage>,
+) {
+    let mut update_chans =
+        UPDATE_CHANS.lock().expect("lock update chans hashmap");
+
+    if update_chans.insert(uuid, update_tx).is_some() {
+        let msg = format!("update_tx for {} already exists", uuid.to_string());
+        error!("{}", msg);
+        panic!(msg); // XXX
+    }
+}
+
+fn remove_update_channel(uuid: Uuid) {
+    let mut update_chans =
+        UPDATE_CHANS.lock().expect("lock update chans hashmap");
+
+    if update_chans.remove(&uuid).is_none() {
+        warn!(
+            "attempt to remove update_tx for {} that  doesn't exist",
+            uuid.to_string()
+        );
+    }
+}
+
+fn get_update_channel<U: Into<Uuid>>(
+    uuid: U,
+) -> Result<crossbeam_channel::Sender<JobUpdateMessage>, String> {
+    let uuid = uuid.into();
+    let update_chans = UPDATE_CHANS.lock().expect("lock update chans hashmap");
+
+    // TODO error
+    let chan = update_chans
+        .get(&uuid)
+        .ok_or_else(|| format!("error: {}", uuid))?;
+
+    Ok(chan.clone())
 }
 
 fn bad_request(state: &State, msg: String) -> Response<Body> {
@@ -190,6 +244,29 @@ fn list_jobs(state: State) -> Box<HandlerFuture> {
     }))
 }
 
+// TODO: just the outline so far
+fn update_job(mut state: State) -> Box<HandlerFuture> {
+    let update_job_params = UpdateJobParams::take_from(&mut state);
+    let uuid = Uuid::from_str(update_job_params.uuid.as_str()).expect(
+        "uuid
+    from str",
+    );
+    let _tx = get_update_channel(uuid);
+
+    // Get JSON body
+    // Generate update message
+    // Send update message down channel
+
+    let res = create_response(
+        &state,
+        StatusCode::OK,
+        mime::APPLICATION_JSON,
+        "", // TODO
+    );
+
+    Box::new(future::ok((state, res)))
+}
+
 #[derive(Clone)]
 struct JobCreateHandler {
     tx: crossbeam_channel::Sender<jobs::Job>,
@@ -286,11 +363,14 @@ impl Handler for JobCreateHandler {
                 };
 
                 let job_uuid = job.get_id();
+                let uuid_response = format!("{}\n", &job_uuid);
+
+                add_update_channel(job_uuid, job.update_tx.clone());
+
                 if let Err(e) = self.tx.send(job) {
                     panic!("Tx error: {}", e);
                 }
 
-                let uuid_response = format!("{}\n", job_uuid);
                 create_response(
                     &state,
                     StatusCode::OK,
@@ -322,12 +402,16 @@ fn router(config: Arc<Mutex<Config>>) -> Router {
                     return;
                 }
             };
+            let job_id = job.get_id();
+
             // This blocks until the job is complete.  If the user wants to
             // see the status of the job, they can issue a request to:
             //      /jobs/<job uuid>
             if let Err(e) = job.run() {
                 warn!("Error running job: {}", e);
             }
+
+            remove_update_channel(job_id);
         });
     }
 
@@ -337,6 +421,10 @@ fn router(config: Arc<Mutex<Config>>) -> Router {
             .with_path_extractor::<GetJobParams>()
             .to(get_job);
         route.get("/jobs").to(list_jobs);
+        route
+            .put("jobs/:uuid")
+            .with_path_extractor::<UpdateJobParams>()
+            .to(update_job);
         route
             .post("/jobs")
             .to_new_handler(job_create_handler.clone());

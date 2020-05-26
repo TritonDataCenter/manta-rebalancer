@@ -26,7 +26,7 @@ use rebalancer::util::{MAX_HTTP_STATUS_CODE, MIN_HTTP_STATUS_CODE};
 use crate::config::{Config, ConfigOptions};
 use crate::jobs::{
     assignment_cache_usage, Assignment, AssignmentCacheEntry, AssignmentId,
-    AssignmentState, StorageId,
+    AssignmentState, JobUpdateMessage, StorageId,
 };
 use crate::moray_client;
 use crate::pg_db;
@@ -436,6 +436,10 @@ pub struct EvacuateDestShark {
     pub status: DestSharkStatus,
 }
 
+pub enum EvacuateJobUpdateMessage {
+    UpdateMetadataThreads(usize),
+}
+
 /// Evacuate a given shark
 pub struct EvacuateJob {
     /// Hash of destination sharks that may change during the job execution.
@@ -469,6 +473,8 @@ pub struct EvacuateJob {
 
     pub md_update_time: AtomicU64,
 
+    pub update_rx: crossbeam_channel::Receiver<JobUpdateMessage>,
+
     /// TESTING ONLY
     pub max_objects: Option<u32>,
 }
@@ -481,6 +487,7 @@ impl EvacuateJob {
         domain_name: &str,
         db_name: &str,
         options: ConfigOptions,
+        update_rx: crossbeam_channel::Receiver<JobUpdateMessage>,
         max_objects: Option<u32>,
     ) -> Result<Self, Error> {
         let mut from_shark = MantaObjectShark::default();
@@ -506,6 +513,7 @@ impl EvacuateJob {
             max_objects,
             post_client: reqwest::Client::new(),
             get_client: reqwest::Client::new(),
+            update_rx,
             bytes_transferred: AtomicU64::new(0),
             md_update_time: AtomicU64::new(0),
         })
@@ -3382,12 +3390,14 @@ mod tests {
             }
         }
 
+        let (_, update_rx) = crossbeam_channel::unbounded();
         let from_shark = String::from("1.stor.domain");
         let job_action = EvacuateJob::new(
             from_shark,
             "fakedomain.us",
             &Uuid::new_v4().to_string(),
             ConfigOptions::default(),
+            update_rx,
             Some(100),
         )
         .expect("initialize evacuate job");
@@ -3574,11 +3584,13 @@ mod tests {
     fn assignment_processing_test() {
         unit_test_init();
         let mut g = StdThreadGen::new(10);
+        let (_, update_rx) = crossbeam_channel::unbounded();
         let job_action = EvacuateJob::new(
             String::new(),
             "fakedomain.us",
             &Uuid::new_v4().to_string(),
             ConfigOptions::default(),
+            update_rx,
             None,
         )
         .expect("initialize evacuate job");
@@ -3702,6 +3714,7 @@ mod tests {
         let (full_assignment_tx, _) = crossbeam::bounded(5);
         let (checker_fini_tx, _) = crossbeam::bounded(1);
         let (_, obj_rx) = crossbeam::bounded(5);
+        let (_, update_rx) = crossbeam_channel::unbounded();
 
         // These tests are run locally and don't go out over the network so any properly formatted
         // host/domain name is valid here.
@@ -3710,6 +3723,7 @@ mod tests {
             "fakedomain.us",
             &Uuid::new_v4().to_string(),
             ConfigOptions::default(),
+            update_rx,
             None,
         )
         .expect("initialize evacuate job");
@@ -3833,6 +3847,7 @@ mod tests {
         let (obj_tx, obj_rx) = crossbeam::bounded(5);
         let (md_update_tx, md_update_rx) = crossbeam::bounded(5);
         let (checker_fini_tx, checker_fini_rx) = crossbeam::bounded(1);
+        let (_, update_rx) = crossbeam_channel::unbounded();
 
         // These tests are run locally and don't go out over the network so any properly formatted
         // host/domain name is valid here.
@@ -3841,6 +3856,7 @@ mod tests {
             "region.fakedomain.us",
             &Uuid::new_v4().to_string(),
             ConfigOptions::default(),
+            update_rx,
             None,
         )
         .expect("initialize evacuate job");
