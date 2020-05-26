@@ -643,6 +643,24 @@ impl EvacuateJob {
         ret
     }
 
+    fn update_bytes_transferred(&self, eobj: &EvacuateObject) {
+        eobj.object
+            .get("contentLength")
+            .and_then(|cl| {
+                if let Some(bytes) = cl.as_u64() {
+                    // TODO: metrics
+                    self.bytes_transferred.fetch_add(bytes, Ordering::SeqCst);
+                } else {
+                    warn!("Could not get bytes as number from {}", cl);
+                }
+                Some(())
+            })
+            .or_else(|| {
+                warn!("Could not find contentLength for {}", eobj.id);
+                None
+            });
+    }
+
     fn set_assignment_state(
         &self,
         assignment_id: &str,
@@ -2718,10 +2736,10 @@ fn metadata_update_one(
 fn metadata_update_batch(
     job_action: &Arc<EvacuateJob>,
     client_hash: &mut HashMap<u32, MorayClient>,
-    batched_requests: HashMap<u32, Vec<BatchRequest>>,
+    batched_reqs: HashMap<u32, Vec<BatchRequest>>,
 ) -> Vec<ObjectId> {
     let mut marked_error = vec![];
-    for (shard, requests) in batched_requests.into_iter() {
+    for (shard, requests) in batched_reqs.into_iter() {
         info!(
             "Updating {} objects for shard {} in a single batch",
             requests.len(),
@@ -2800,6 +2818,32 @@ fn metadata_update_batch(
     marked_error
 }
 
+fn batch_add_putobj(
+    batched_reqs: &mut HashMap<u32, Vec<BatchRequest>>,
+    object: Value,
+    shard: u32,
+    etag: String,
+) -> Result<(), Error> {
+    let key = common::get_key_from_object_value(&object)?;
+    let mut options = ObjectMethodOptions::default();
+
+    options.etag = Etag::Specified(etag);
+
+    let put_req = BatchPutOp {
+        bucket: "manta".to_string(),
+        options,
+        key,
+        value: object,
+    };
+
+    batched_reqs
+        .entry(shard)
+        .and_modify(|ent| ent.push(BatchRequest::Put(put_req.clone())))
+        .or_insert_with(|| vec![BatchRequest::Put(put_req)]);
+
+    Ok(())
+}
+
 fn metadata_update_assignment(
     job_action: &Arc<EvacuateJob>,
     ace: AssignmentCacheEntry,
@@ -2810,7 +2854,7 @@ fn metadata_update_assignment(
     // There is one moray client per shard, so when we collect the requests
     // into a batch we need to know which moray client this is going to based
     // on the shard number.
-    let mut batched_requests: HashMap<u32, Vec<BatchRequest>> = HashMap::new();
+    let mut batched_reqs: HashMap<u32, Vec<BatchRequest>> = HashMap::new();
     let mut updated_objects = vec![];
     let dest_shark = &ace.dest_shark;
     let objects = job_action
@@ -2823,14 +2867,6 @@ fn metadata_update_assignment(
     for eobj in objects {
         let etag = eobj.etag.clone();
         let mobj = eobj.object.clone();
-        let key = match common::get_key_from_object_value(&eobj.object) {
-            Ok(k) => k,
-            Err(e) => {
-                error!("Could not get key from object ({}): {}", &eobj.id, e);
-                job_action.mark_object_error(&eobj.id, e.into());
-                continue;
-            }
-        };
 
         // Unfortunately sqlite only accepts signed integers.  So we
         // have to do the conversion here and cross our fingers that
@@ -2854,22 +2890,16 @@ fn metadata_update_assignment(
         match job_action.update_object_shark(mobj, dest_shark) {
             Ok(o) => {
                 if job_action.options.use_batched_updates {
-                    let mut options = ObjectMethodOptions::default();
-                    options.etag = Etag::Specified(etag.to_string());
-
-                    let put_req = BatchPutOp {
-                        bucket: "manta".to_string(),
-                        options,
-                        key,
-                        value: o.clone(), // clone necessary?
-                    };
-
-                    batched_requests
-                        .entry(shard)
-                        .and_modify(|ent| {
-                            ent.push(BatchRequest::Put(put_req.clone()))
-                        })
-                        .or_insert_with(|| vec![BatchRequest::Put(put_req)]);
+                    if let Err(e) =
+                        batch_add_putobj(&mut batched_reqs, o, shard, etag)
+                    {
+                        error!(
+                            "Could add put object operation to batch ({}): {}",
+                            &eobj.id, e
+                        );
+                        job_action.mark_object_error(&eobj.id, e.into());
+                        continue;
+                    }
                 } else if let Err(e) = metadata_update_one(
                     job_action,
                     client_hash,
@@ -2883,7 +2913,6 @@ fn metadata_update_assignment(
                         o, dest_shark, e
                     );
                     job_action.mark_object_error(&eobj.id, e.into());
-
                     continue;
                 }
             }
@@ -2898,30 +2927,14 @@ fn metadata_update_assignment(
             }
         };
 
-        eobj.object
-            .get("contentLength")
-            .and_then(|cl| {
-                if let Some(bytes) = cl.as_u64() {
-                    // TODO: metrics
-                    job_action
-                        .bytes_transferred
-                        .fetch_add(bytes, Ordering::SeqCst);
-                } else {
-                    warn!("Could not get bytes as number from {}", cl);
-                }
-                Some(())
-            })
-            .or_else(|| {
-                warn!("Could not find contentLength for {}", eobj.id);
-                None
-            });
+        job_action.update_bytes_transferred(&eobj);
 
         updated_objects.push(eobj.id.clone());
     }
 
     if job_action.options.use_batched_updates {
         let marked_error =
-            metadata_update_batch(job_action, client_hash, batched_requests);
+            metadata_update_batch(job_action, client_hash, batched_reqs);
 
         // Remove any of the objects that we had to mark as "Error" from the list
         // of updated objects.
