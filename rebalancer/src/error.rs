@@ -109,21 +109,18 @@ pub struct InternalError {
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub enum InternalErrorCode {
     Other,
-    InvalidJobAction,
-    Crossbeam,
-    StorinfoError,
-    AssignmentLookupError,
-    AssignmentGetError,
-    LockError,
-    IpLookupError,
-    HashNotFound,
-    SharkNotFound,
-    DuplicateShark,
-    BadMantaObject,
-    BadMorayClient,
-    MetadataUpdateFailure,
-    JobBuilderError,
-    MaxObjectsLimit,
+    Crossbeam,             // An error relating to crossbeam
+    StorinfoError,         // An error from Storinfo service
+    AssignmentLookupError, // Could not lookup assignment in memory
+    AssignmentGetError,    // Could not get assignment from agent
+    IpLookupError,         // Could not lookup IP in DNS
+    SharkNotFound,         // Could not find shark
+    DuplicateShark,        // Found the same shark twice in object metadata
+    BadMantaObject,        // Manta object is malformed is missing data
+    BadMorayClient,        // Moray client errors
+    MetadataUpdateFailure, // Errors updating metadata in moray
+    JobBuilderError,       // Errors building a Job
+    MaxObjectsLimit,       // The max_objects limit has been reached
 }
 
 impl fmt::Display for InternalError {

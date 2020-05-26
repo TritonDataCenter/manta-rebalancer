@@ -1394,7 +1394,7 @@ impl UpdateMetadata for EvacuateJob {
                     object, e
                 );
                 return Err(InternalError::new(
-                    Some(InternalErrorCode::DuplicateShark),
+                    Some(InternalErrorCode::SharkNotFound),
                     msg,
                 )
                 .into());
@@ -2737,7 +2737,15 @@ fn metadata_update_one(
         })
         .map_err(Error::from);
 
-    info!("Updated 1 object in {}us", now.elapsed().as_micros());
+    if ret.is_err() {
+        error!(
+            "Failed to update 1 object in {}us",
+            now.elapsed().as_micros()
+        );
+    } else {
+        error!("Updated 1 object in {}us", now.elapsed().as_micros());
+    }
+
     ret
 }
 
