@@ -2923,7 +2923,8 @@ fn metadata_update_assignment(
                         batch_add_putobj(&mut batched_reqs, o, shard, etag)
                     {
                         error!(
-                            "Could add put object operation to batch ({}): {}",
+                            "Could not add put object operation to batch ({}): \
+                            {}",
                             &eobj.id, e
                         );
                         job_action.mark_object_error(&eobj.id, e.into());
