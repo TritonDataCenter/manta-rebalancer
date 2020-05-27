@@ -57,6 +57,7 @@ pub struct EvacuateJobPayload {
     pub max_objects: Option<u32>,
 }
 
+#[derive(Debug)]
 pub enum JobUpdateMessage {
     Evacuate(EvacuateJobUpdateMessage),
 }

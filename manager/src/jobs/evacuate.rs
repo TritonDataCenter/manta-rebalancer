@@ -436,9 +436,14 @@ pub struct EvacuateDestShark {
     pub status: DestSharkStatus,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 pub enum EvacuateJobUpdateMessage {
     UpdateMetadataThreads(usize),
+}
+
+enum DyanmicWorkerMsg {
+    Data(AssignmentCacheEntry),
+    Stop,
 }
 
 /// Evacuate a given shark
@@ -2680,7 +2685,7 @@ fn metadata_update_worker_static(
 // queue is empty the worker exits.
 fn metadata_update_worker_dynamic(
     job_action: Arc<EvacuateJob>,
-    queue_front: Arc<Injector<AssignmentCacheEntry>>,
+    queue_front: Arc<Injector<DyanmicWorkerMsg>>,
 ) -> impl Fn() {
     move || {
         // For each worker we create a hash of moray clients indexed by shard.
@@ -2695,9 +2700,19 @@ fn metadata_update_worker_dynamic(
             "Started metadata update worker: {:?}",
             thread::current().id()
         );
+
+        // If the queue is empty or we receive a Stop message, then break out
+        // of the loop and return.
+        //
+        // If we get a retry error then, retry.
+        //
+        // Otherwise get the assignment cache entry and process it.
         loop {
             let ace = match queue_front.steal() {
-                Steal::Success(a) => a,
+                Steal::Success(dwm) => match dwm {
+                    DyanmicWorkerMsg::Data(a) => a,
+                    DyanmicWorkerMsg::Stop => break,
+                },
                 Steal::Retry => continue,
                 Steal::Empty => break,
             };
@@ -3067,22 +3082,47 @@ fn metadata_update_assignment(
 // of of the current layout as possible, so that if future changes are made they
 // don't interfere too much with the previous (preferred) one when we
 // re-implement it.
-
 fn metadata_update_broker_dynamic(
     job_action: Arc<EvacuateJob>,
     md_update_rx: crossbeam::Receiver<AssignmentCacheEntry>,
 ) -> Result<thread::JoinHandle<Result<(), Error>>, Error> {
-    let pool = ThreadPool::with_name(
+    let mut max_thread_count = job_action.options.max_metadata_update_threads;
+    let mut pool = ThreadPool::with_name(
         "Dyn_MD_Update".into(),
         job_action.options.max_metadata_update_threads,
     );
-    let queue = Arc::new(Injector::<AssignmentCacheEntry>::new());
+    let queue = Arc::new(Injector::<DyanmicWorkerMsg>::new());
     let queue_back = Arc::clone(&queue);
 
     thread::Builder::new()
         .name(String::from("Metadata Update broker"))
         .spawn(move || {
             loop {
+                // TODO: refactor this
+                if let Ok(msg) = job_action.update_rx.try_recv() {
+                    // Currently there is only one valid message here so we
+                    // can use this irrefutable pattern.
+                    // If we add any additional messages we have to use match
+                    // statements.
+                    let JobUpdateMessage::Evacuate(eum) = msg;
+                    let EvacuateJobUpdateMessage::UpdateMetadataThreads(
+                        worker_count,
+                    ) = eum;
+                    let difference: i32 =
+                        max_thread_count as i32 - worker_count as i32;
+
+                    // If the difference is negative then we need to
+                    // reduce our running thread count, so inject
+                    // the appropriate number of Stop messages to
+                    // tell active threads to exit.
+                    // Otherwise the logic below will handle spinning up
+                    // more worker threads if they are needed.
+                    for _ in difference..0 {
+                        queue_back.push(DyanmicWorkerMsg::Stop);
+                    }
+                    max_thread_count = worker_count;
+                    pool.set_num_threads(max_thread_count);
+                }
                 let ace = match md_update_rx.recv() {
                     Ok(ace) => ace,
                     Err(e) => {
@@ -3108,7 +3148,7 @@ fn metadata_update_broker_dynamic(
                     }
                 };
 
-                queue_back.push(ace);
+                queue_back.push(DyanmicWorkerMsg::Data(ace));
 
                 // If all the pools threads are devoted to workers there's
                 // really no reason to queue up a new worker.
