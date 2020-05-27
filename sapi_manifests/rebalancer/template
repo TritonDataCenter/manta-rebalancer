@@ -5,7 +5,8 @@
         "max_sharks": 5,
         "use_static_md_update_threads": true,
         "static_queue_depth": 10,
-        "max_assignment_age": 600
+        "max_assignment_age": 600,
+        "use_batched_updates": true
     },
     "listen_port": 80,
     "domain_name": "{{DOMAIN_NAME}}",
