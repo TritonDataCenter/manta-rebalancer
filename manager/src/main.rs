@@ -25,9 +25,11 @@ static GLOBAL: Jemalloc = Jemalloc;
 use manager::config::Config;
 use manager::jobs::status::StatusError;
 use manager::jobs::{
-    self, JobBuilder, JobDbEntry, JobPayload, JobUpdateMessage,
+    self, JobActionDbEntry, JobBuilder, JobDbEntry, JobPayload, JobState,
+    JobUpdateMessage,
 };
 use manager::metrics::{metrics_init, metrics_request_inc};
+use manager::pg_db::{connect_db, REBALANCER_DB};
 use rebalancer::util;
 
 use std::collections::HashMap;
@@ -37,12 +39,15 @@ use std::sync::{Arc, Mutex};
 
 use clap::{App, Arg, ArgMatches};
 use crossbeam_channel;
+use diesel::query_dsl::{QueryDsl, RunQueryDsl};
+use diesel::PgConnection;
 use futures::{future, Future, Stream};
 use gotham::handler::{Handler, HandlerFuture, IntoHandlerError, NewHandler};
 use gotham::helpers::http::response::create_response;
-use gotham::router::builder::{
-    build_simple_router, DefineSingleRoute, DrawRoutes,
-};
+use gotham::middleware::Middleware;
+use gotham::pipeline::new_pipeline;
+use gotham::pipeline::set::{finalize_pipeline_set, new_pipeline_set};
+use gotham::router::builder::{build_router, DefineSingleRoute, DrawRoutes};
 use gotham::router::Router;
 use gotham::state::{FromState, State};
 use hyper::{Body, Response, StatusCode};
@@ -245,13 +250,35 @@ fn list_jobs(state: State) -> Box<HandlerFuture> {
 }
 
 // TODO: just the outline so far
-fn update_job(mut state: State) -> Box<HandlerFuture> {
+fn update_job(mut state: State) -> (State, Response<Body>) {
+    use crate::jobs::jobs::dsl::jobs as jobs_db;
+
+    let db_conn = DBConnMiddlewareData::take_from(&mut state).db_conn;
     let update_job_params = UpdateJobParams::take_from(&mut state);
-    let uuid = Uuid::from_str(update_job_params.uuid.as_str()).expect(
-        "uuid
-    from str",
-    );
+    let uuid =
+        Uuid::from_str(update_job_params.uuid.as_str()).expect("uuid from str");
     let _tx = get_update_channel(uuid);
+
+    // TODO error handling
+    let job_db_entry: JobDbEntry = jobs_db
+        .find(update_job_params.uuid.as_str())
+        .first(&db_conn)
+        .expect("job_db query");
+
+    if job_db_entry.state != JobState::Running {
+        // TODO: return error
+    }
+
+    #[allow(clippy::single_match)]
+    match job_db_entry.action {
+        JobActionDbEntry::Evacuate => {
+            // parse data as evacuate job
+            // here rui
+        }
+        _ => {
+            // TODO return error
+        }
+    }
 
     // Get JSON body
     // Generate update message
@@ -264,7 +291,7 @@ fn update_job(mut state: State) -> Box<HandlerFuture> {
         "", // TODO
     );
 
-    Box::new(future::ok((state, res)))
+    (state, res)
 }
 
 #[derive(Clone)]
@@ -384,6 +411,39 @@ impl Handler for JobCreateHandler {
     }
 }
 
+#[derive(NewMiddleware, Copy, Clone)]
+struct NoopMiddleware;
+
+impl Middleware for NoopMiddleware {
+    fn call<Chain>(self, state: State, chain: Chain) -> Box<HandlerFuture>
+    where
+        Chain: FnOnce(State) -> Box<HandlerFuture> + Send + 'static,
+    {
+        chain(state)
+    }
+}
+
+#[derive(NewMiddleware, Copy, Clone)]
+struct DBConnMiddleware;
+
+#[derive(StateData)]
+struct DBConnMiddlewareData {
+    db_conn: PgConnection,
+}
+
+impl Middleware for DBConnMiddleware {
+    fn call<Chain>(self, mut state: State, chain: Chain) -> Box<HandlerFuture>
+    where
+        Chain: FnOnce(State) -> Box<HandlerFuture> + Send + 'static,
+    {
+        // TODO: return 500 error to user
+        let db_conn = connect_db(REBALANCER_DB).expect("db connection");
+
+        state.put(DBConnMiddlewareData { db_conn });
+        chain(state)
+    }
+}
+
 fn router(config: Arc<Mutex<Config>>) -> Router {
     let (tx, rx) = crossbeam_channel::bounded(5);
     let job_create_handler = JobCreateHandler { tx, config };
@@ -415,19 +475,35 @@ fn router(config: Arc<Mutex<Config>>) -> Router {
         });
     }
 
-    let rtr = build_simple_router(|route| {
+    let ps_builder = new_pipeline_set();
+    let (ps_builder, noop) =
+        ps_builder.add(new_pipeline().add(NoopMiddleware).build());
+
+    let (ps_builder, db_conn) =
+        ps_builder.add(new_pipeline().add(DBConnMiddleware).build());
+
+    let ps = finalize_pipeline_set(ps_builder);
+
+    let noop_pipeline = (noop, ());
+    let db_conn_pipeline = (db_conn, ());
+
+    // By default we use the NoopPipeline.  If a given route needs a specific
+    // pipeline, then specify it via `.with_pipeline_chain()`
+    let rtr = build_router(noop_pipeline, ps, |route| {
+        route.with_pipeline_chain(db_conn_pipeline, |route| {
+            route
+                .put("/jobs/:uuid")
+                .with_path_extractor::<UpdateJobParams>()
+                .to(update_job);
+        });
+        route
+            .post("/jobs")
+            .to_new_handler(job_create_handler.clone());
         route
             .get("/jobs/:uuid")
             .with_path_extractor::<GetJobParams>()
             .to(get_job);
         route.get("/jobs").to(list_jobs);
-        route
-            .put("jobs/:uuid")
-            .with_path_extractor::<UpdateJobParams>()
-            .to(update_job);
-        route
-            .post("/jobs")
-            .to_new_handler(job_create_handler.clone());
     });
 
     info!("Rebalancer Online");

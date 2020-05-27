@@ -12,7 +12,7 @@ pub mod evacuate;
 pub mod status;
 
 use crate::config::Config;
-use crate::pg_db::connect_or_create_db;
+use crate::pg_db::{connect_or_create_db, REBALANCER_DB};
 use crate::storinfo::StorageNode;
 use evacuate::{EvacuateJob, EvacuateJobUpdateMessage};
 use rebalancer::common::{ObjectId, Task};
@@ -34,8 +34,6 @@ use uuid::Uuid;
 pub type StorageId = String; // Hostname
 pub type AssignmentId = String; // UUID
 pub type HttpStatusCode = u16;
-
-pub(crate) static REBALANCER_DB: &str = "rebalancer";
 
 /// The JobPayload is an enum with variants of JobActions.  A properly
 /// formatted JobPayload submitted from the client in JSON form looks like:
