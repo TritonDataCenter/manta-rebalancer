@@ -312,3 +312,32 @@ pub fn get_objectId_from_value(
 
     Ok(id)
 }
+
+pub fn get_key_from_object_value(object: &Value) -> Result<String, Error> {
+    let key = match object.get("key") {
+        Some(k) => match serde_json::to_string(k) {
+            Ok(ky) => ky.replace("\"", ""),
+            Err(e) => {
+                error!(
+                    "Could not parse key field in object {:#?} ({})",
+                    object, e
+                );
+                return Err(InternalError::new(
+                    Some(InternalErrorCode::BadMantaObject),
+                    "Could not parse Manta Object Key",
+                )
+                .into());
+            }
+        },
+        None => {
+            error!("Missing key field in object {:#?}", object);
+            return Err(InternalError::new(
+                Some(InternalErrorCode::BadMantaObject),
+                "Missing Manta Object Key",
+            )
+            .into());
+        }
+    };
+
+    Ok(key)
+}

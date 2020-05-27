@@ -14,6 +14,7 @@ use moray::{
     objects::{Etag, MethodOptions as ObjectMethodOptions},
 };
 use rand::seq::SliceRandom;
+use rebalancer::common;
 use rebalancer::error::{Error, InternalError, InternalErrorCode};
 use serde_json::Value;
 use slog_scope;
@@ -128,30 +129,7 @@ pub fn put_object(
     etag: &str,
 ) -> Result<(), Error> {
     let mut opts = ObjectMethodOptions::default();
-    let key = match object.get("key") {
-        Some(k) => match serde_json::to_string(k) {
-            Ok(ky) => ky.replace("\"", ""),
-            Err(e) => {
-                error!(
-                    "Could not parse key field in object {:#?} ({})",
-                    object, e
-                );
-                return Err(InternalError::new(
-                    Some(InternalErrorCode::BadMantaObject),
-                    "Could not parse Manta Object Key",
-                )
-                .into());
-            }
-        },
-        None => {
-            error!("Missing key field in object {:#?}", object);
-            return Err(InternalError::new(
-                Some(InternalErrorCode::BadMantaObject),
-                "Missing Manta Object Key",
-            )
-            .into());
-        }
-    };
+    let key = common::get_key_from_object_value(object)?;
 
     opts.etag = Etag::Specified(etag.to_string());
 
