@@ -2754,7 +2754,7 @@ fn metadata_update_one(
             now.elapsed().as_micros()
         );
     } else {
-        error!("Updated 1 object in {}us", now.elapsed().as_micros());
+        debug!("Updated 1 object in {}us", now.elapsed().as_micros());
     }
 
     ret
