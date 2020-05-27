@@ -62,6 +62,7 @@ use threadpool::ThreadPool;
 use uuid::Uuid;
 
 type EvacuateObjectValue = Value;
+type MorayClientHash = HashMap<u32, MorayClient>;
 
 // --- Diesel Stuff, TODO This should be refactored --- //
 
@@ -244,6 +245,11 @@ impl FromSql<sql_types::Text, Pg> for EvacuateObjectError {
         let t_str = String::from_utf8_lossy(t.as_bytes());
         Self::from_str(&t_str).map_err(std::convert::Into::into)
     }
+}
+
+enum MetadataClientOption<'a> {
+    Client(&'a mut MorayClient),
+    Hash(&'a mut MorayClientHash),
 }
 
 pub fn create_evacuateobjects_table(
@@ -2720,14 +2726,19 @@ fn get_client_from_hash<'a>(
 // we want to update each object one by one.
 fn metadata_update_one(
     job_action: &Arc<EvacuateJob>,
-    client_hash: &mut HashMap<u32, MorayClient>,
+    client: MetadataClientOption,
     object: &EvacuateObjectValue,
     etag: &str,
     shard: u32,
 ) -> Result<(), Error> {
-    let mclient = get_client_from_hash(job_action, client_hash, shard)?;
-    let now = std::time::Instant::now();
+    let mclient = match client {
+        MetadataClientOption::Client(c) => c,
+        MetadataClientOption::Hash(client_hash) => {
+            get_client_from_hash(job_action, client_hash, shard)?
+        }
+    };
 
+    let now = std::time::Instant::now();
     let ret = moray_client::put_object(mclient, object, etag)
         .map_err(|e| {
             InternalError::new(
@@ -2809,42 +2820,56 @@ fn metadata_update_batch(
             })
         {
             error!("Batch update failed, retrying individually: {}", e);
-
-            for r in requests.into_iter() {
-                let br: BatchPutOp = match r {
-                    BatchRequest::Put(br) => br,
-                    _ => panic!("Unexpected Batch Request"),
-                };
-
-                let etag = br
-                    .options
-                    .etag
-                    .specified_value()
-                    .expect("etag should be specified");
-
-                let o = br.value;
-
-                if let Err(muo_err) = metadata_update_one(
-                    job_action,
-                    client_hash,
-                    &o,
-                    &etag,
-                    shard,
-                ) {
-                    let id = common::get_objectId_from_value(&o)
-                        .expect("cannot get objectId");
-
-                    error!("Error updating object: {}\n{:?}", muo_err, o);
-                    job_action.mark_object_error(&id, muo_err.into());
-
-                    marked_error.push(id);
-
-                    continue;
-                }
-            }
+            retry_batch_update(
+                job_action,
+                requests,
+                shard,
+                mclient,
+                &mut marked_error,
+            );
         }
     }
     marked_error
+}
+
+fn retry_batch_update(
+    job_action: &Arc<EvacuateJob>,
+    requests: Vec<BatchRequest>,
+    shard: u32,
+    client: &mut MorayClient,
+    marked_error: &mut Vec<ObjectId>,
+) {
+    for r in requests.into_iter() {
+        let br: BatchPutOp = match r {
+            BatchRequest::Put(br) => br,
+            _ => panic!("Unexpected Batch Request"),
+        };
+
+        let etag = br
+            .options
+            .etag
+            .specified_value()
+            .expect("etag should be specified");
+
+        let o = br.value;
+
+        if let Err(muo_err) = metadata_update_one(
+            job_action,
+            MetadataClientOption::Client(client),
+            &o,
+            &etag,
+            shard,
+        ) {
+            let id = common::get_objectId_from_value(&o)
+                .expect("cannot get objectId");
+
+            error!("Error updating object: {}\n{:?}", muo_err, o);
+            job_action.mark_object_error(&id, muo_err.into());
+            marked_error.push(id);
+
+            continue;
+        }
+    }
 }
 
 fn batch_add_putobj(
@@ -2932,7 +2957,7 @@ fn metadata_update_assignment(
                     }
                 } else if let Err(e) = metadata_update_one(
                     job_action,
-                    client_hash,
+                    MetadataClientOption::Hash(client_hash),
                     &o,
                     &etag,
                     shard,
