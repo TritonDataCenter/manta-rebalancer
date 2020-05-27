@@ -436,6 +436,7 @@ pub struct EvacuateDestShark {
     pub status: DestSharkStatus,
 }
 
+#[derive(Deserialize)]
 pub enum EvacuateJobUpdateMessage {
     UpdateMetadataThreads(usize),
 }

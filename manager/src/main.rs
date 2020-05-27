@@ -17,6 +17,8 @@ extern crate serde_derive;
 #[macro_use]
 extern crate rebalancer;
 
+mod api_util;
+
 // JEmallocator drastically improves our memory footprint
 use jemallocator::Jemalloc;
 #[global_allocator]
@@ -37,12 +39,13 @@ use std::error::Error;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
+use crate::api_util::JsonBody;
 use clap::{App, Arg, ArgMatches};
 use crossbeam_channel;
 use diesel::query_dsl::{QueryDsl, RunQueryDsl};
 use diesel::PgConnection;
-use futures::{future, Future, Stream};
-use gotham::handler::{Handler, HandlerFuture, IntoHandlerError, NewHandler};
+use futures::{future, Future};
+use gotham::handler::{Handler, HandlerFuture, NewHandler};
 use gotham::helpers::http::response::create_response;
 use gotham::middleware::Middleware;
 use gotham::pipeline::new_pipeline;
@@ -52,6 +55,7 @@ use gotham::router::Router;
 use gotham::state::{FromState, State};
 use hyper::{Body, Response, StatusCode};
 use lazy_static::lazy_static;
+use manager::jobs::evacuate::EvacuateJobUpdateMessage;
 use threadpool::ThreadPool;
 use uuid::Uuid;
 
@@ -108,16 +112,13 @@ fn remove_update_channel(uuid: Uuid) {
     }
 }
 
-fn get_update_channel<U: Into<Uuid>>(
-    uuid: U,
+fn get_update_channel(
+    uuid: Uuid,
 ) -> Result<crossbeam_channel::Sender<JobUpdateMessage>, String> {
-    let uuid = uuid.into();
     let update_chans = UPDATE_CHANS.lock().expect("lock update chans hashmap");
-
-    // TODO error
     let chan = update_chans
         .get(&uuid)
-        .ok_or_else(|| format!("error: {}", uuid))?;
+        .ok_or_else(|| format!("Job Channel not found for: {}", uuid))?;
 
     Ok(chan.clone())
 }
@@ -257,7 +258,13 @@ fn update_job(mut state: State) -> (State, Response<Body>) {
     let update_job_params = UpdateJobParams::take_from(&mut state);
     let uuid =
         Uuid::from_str(update_job_params.uuid.as_str()).expect("uuid from str");
-    let _tx = get_update_channel(uuid);
+    let tx = match get_update_channel(uuid) {
+        Ok(t) => t,
+        Err(e) => {
+            let res = bad_request(&state, e);
+            return (state, res);
+        }
+    };
 
     // TODO error handling
     let job_db_entry: JobDbEntry = jobs_db
@@ -266,23 +273,52 @@ fn update_job(mut state: State) -> (State, Response<Body>) {
         .expect("job_db query");
 
     if job_db_entry.state != JobState::Running {
-        // TODO: return error
+        let res = bad_request(
+            &state,
+            "attempt to update job that is not running".into(),
+        );
+        return (state, res);
     }
 
     #[allow(clippy::single_match)]
-    match job_db_entry.action {
+    let update_message = match job_db_entry.action {
         JobActionDbEntry::Evacuate => {
-            // parse data as evacuate job
-            // here rui
+            let evac_msg =
+                match state.json_body::<EvacuateJobUpdateMessage>().wait() {
+                    Ok(p) => p,
+                    Err(e) => {
+                        let msg = format!(
+                            "Could not parse Evacuate Update \
+                             Message: {}",
+                            e
+                        );
+                        warn!("{}", msg);
+                        let res = create_response(
+                            &state,
+                            StatusCode::UNPROCESSABLE_ENTITY,
+                            mime::APPLICATION_JSON,
+                            msg,
+                        );
+                        return (state, res);
+                    }
+                };
+            JobUpdateMessage::Evacuate(evac_msg)
         }
         _ => {
-            // TODO return error
+            let res = bad_request(&state, "payload action mismatch".into());
+            return (state, res);
         }
-    }
+    };
 
-    // Get JSON body
-    // Generate update message
     // Send update message down channel
+    if let Err(e) = tx.send(update_message) {
+        let res = invalid_server_error(
+            &state,
+            format!("could not communicate with job: {}", e),
+        );
+
+        return (state, res);
+    }
 
     let res = create_response(
         &state,
@@ -325,28 +361,7 @@ impl Handler for JobCreateHandler {
         }
 
         let job_builder = JobBuilder::new(config);
-        let f =
-            Body::take_from(&mut state).concat2().then(
-                move |body| match body {
-                    Ok(valid_body) => {
-                        match serde_json::from_slice::<JobPayload>(
-                            &valid_body.into_bytes(),
-                        ) {
-                            Ok(jp) => future::ok(jp),
-                            Err(e) => {
-                                error!("Error deserializing: {}", &e);
-                                future::err(e.into_handler_error())
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        error!("Body parse error: {}", &e);
-                        future::err(e.into_handler_error())
-                    }
-                },
-            );
-
-        let payload: JobPayload = match f.wait() {
+        let payload = match state.json_body::<JobPayload>().wait() {
             Ok(p) => p,
             Err(e) => {
                 error!("Payload error: {}", &e);

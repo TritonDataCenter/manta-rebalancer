@@ -41,6 +41,7 @@ slog-scope = "4.1.2"
 threadpool = "1.7.1"
 resolve = "0.2.0"
 signal-hook = "0.1.13"
+failure = "0.1.8"
 
 [dev-dependencies]
 # Unfortuantely there is a long standing bug in mustache version 0.9.0 that has
