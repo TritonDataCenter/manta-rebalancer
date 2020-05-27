@@ -63,8 +63,10 @@ pub struct ConfigServer {
     pub host: String,
     // The port that the agent should listen on for incoming connections.
     pub port: u16,
-    // The number of worker threads used to process assignments.
+    // Maximum number of concurrent assignments.
     pub workers: usize,
+    // Maximum number of worker threads per assignment.
+    pub workers_per_assignment: usize,
 }
 
 impl Default for ConfigServer {
@@ -73,6 +75,7 @@ impl Default for ConfigServer {
             host: "0.0.0.0".into(),
             port: 7878,
             workers: 1,
+            workers_per_assignment: 1,
         }
     }
 }
@@ -1080,14 +1083,7 @@ fn process_assignment(
         let m = metrics.clone();
         let c = client.clone();
         pool.execute(move || {
-            process_assignment_impl(
-                a,
-                &id,
-                f,
-                fl,
-                &m,
-                &c
-            );
+            process_assignment_impl(a, &id, f, fl, &m, &c);
         });
     }
     pool.join();
@@ -1134,13 +1130,15 @@ pub fn router(
     build_simple_router(|route| {
         let mut agent_metrics: Option<MetricsMap> = None;
         let mut workers = 1;
+        let mut workers_per_assignment = 1;
 
         if let Some(c) = config {
             agent_metrics = Some(agent_start_metrics_server(&c));
             workers = c.server.workers;
+            workers_per_assignment = c.server.workers_per_assignment;
         }
 
-        assert!(workers > 0);
+        assert!(workers > 0 && workers_per_assignment > 0);
 
         let (w, r): (mpsc::Sender<String>, mpsc::Receiver<String>) =
             mpsc::channel();
@@ -1166,7 +1164,7 @@ pub fn router(
             let assignments = Arc::clone(&agent.assignments);
             let m = agent_metrics.clone();
             let client = reqwest::Client::new();
-            let worker_pool = ThreadPool::new(5);
+            let worker_pool = ThreadPool::new(workers_per_assignment);
 
             pool.execute(move || loop {
                 let uuid = match rx.lock().unwrap().recv() {
