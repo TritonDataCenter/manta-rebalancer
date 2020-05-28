@@ -988,10 +988,18 @@ fn process_assignment_impl(
         let mut t = {
             let tmp = &mut assignment.write().unwrap().tasks;
 
+            // If the status of a task is not equal to `TaskStatus::Pending`
+            // then that means it is either currently being processed or
+            // processing of it has already been complete.  In either case,
+            // skip this task and move on until we either reach the end of the
+            // assignment or we find a task that has not yet been processed.
             if tmp[index].status != TaskStatus::Pending {
                 continue;
             }
 
+            // We found a task that has not been processed yet.  Update its
+            // status to `TaskStatus::Running' so that no other worker attmepts
+            // to process it and run with it.
             tmp[index].set_status(TaskStatus::Running);
             tmp[index].clone()
         };
