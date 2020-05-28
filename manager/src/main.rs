@@ -258,13 +258,7 @@ fn update_job(mut state: State) -> (State, Response<Body>) {
     let update_job_params = UpdateJobParams::take_from(&mut state);
     let uuid =
         Uuid::from_str(update_job_params.uuid.as_str()).expect("uuid from str");
-    let tx = match get_update_channel(uuid) {
-        Ok(t) => t,
-        Err(e) => {
-            let res = bad_request(&state, e);
-            return (state, res);
-        }
-    };
+    let tx: crossbeam_channel::Sender<JobUpdateMessage>;
 
     // TODO error handling
     let job_db_entry: JobDbEntry = jobs_db
@@ -275,10 +269,18 @@ fn update_job(mut state: State) -> (State, Response<Body>) {
     if job_db_entry.state != JobState::Running {
         let res = bad_request(
             &state,
-            "attempt to update job that is not running".into(),
+            "Attempt to update job that is not running".into(),
         );
         return (state, res);
     }
+
+    tx = match get_update_channel(uuid) {
+        Ok(t) => t,
+        Err(e) => {
+            let res = bad_request(&state, e);
+            return (state, res);
+        }
+    };
 
     #[allow(clippy::single_match)]
     let update_message = match job_db_entry.action {
