@@ -42,10 +42,10 @@ FLAGS:
 The following parameters can be tuned in order to adjust the rebalancer agents
 performance:
 
-| Parameter | Description                                            |
-| --------- | ------------------------------------------------------ |
-| REBALANCER_AGENT_WORKERS | Maximum number of assignments that the agent will process concurrently
-| REBALANCER_AGENT_WORKERS_PER_ASSIGNMENT | Maximum number of threads that will be used to process a single assignment |
+| Parameter | Description                                            | Default |
+| --------- | ------------------------------------------------------ | ------- |
+| REBALANCER_AGENT_WORKERS | Maximum number of assignments that the agent will process concurrently | 1 |
+| REBALANCER_AGENT_WORKERS_PER_ASSIGNMENT | Maximum number of threads that will be used to process a single assignment | 1 |
 
 The following example shows how to adjust these values resulting in an agent
 that can process two assignemnts concurrently, where each assignment is
