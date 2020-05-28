@@ -456,6 +456,32 @@ pub enum EvacuateJobUpdateMessage {
     SetMetadataThreads(usize),
 }
 
+impl EvacuateJobUpdateMessage {
+    pub fn validate(&self) -> Result<(), String> {
+        #[allow(clippy::single_match)]
+        match self {
+            EvacuateJobUpdateMessage::SetMetadataThreads(num_threads) => {
+                if *num_threads < 1 {
+                    return Err(String::from(
+                        "Cannot set metadata update threads below 1",
+                    ));
+                }
+
+                // This is completely arbitrary, but intended to prevent the
+                // rebalancer from hammering the metadata tier due to a fat
+                // finger.  It is still possible to set this number higher
+                // but only at the start of a job. See MANTA-5284.
+                if *num_threads > 100 {
+                    return Err(String::from(
+                        "Cannot set metadata update threads above 100",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 enum DyanmicWorkerMsg {
     Data(AssignmentCacheEntry),
     Stop,
@@ -3062,20 +3088,49 @@ fn metadata_update_assignment(
     // TODO: check for DB insert error
 }
 
+fn update_dynamic_metadata_threads(
+    pool: &mut ThreadPool,
+    queue_back: &Arc<Injector<DyanmicWorkerMsg>>,
+    max_thread_count: &mut usize,
+    msg: JobUpdateMessage,
+) {
+    // Currently there is only one valid message here so we
+    // can use this irrefutable pattern.
+    // If we add any additional messages we have to use match
+    // statements.
+    let JobUpdateMessage::Evacuate(eum) = msg;
+    let EvacuateJobUpdateMessage::SetMetadataThreads(worker_count) = eum;
+    let difference: i32 = *max_thread_count as i32 - worker_count as i32;
+
+    // If the difference is negative then we need to
+    // reduce our running thread count, so inject
+    // the appropriate number of Stop messages to
+    // tell active threads to exit.
+    // Otherwise the logic below will handle spinning up
+    // more worker threads if they are needed.
+    for _ in difference..0 {
+        queue_back.push(DyanmicWorkerMsg::Stop);
+    }
+    *max_thread_count = worker_count;
+    pool.set_num_threads(*max_thread_count);
+
+    info!(
+        "Max number of metadata update threads set to: {}",
+        max_thread_count
+    );
+}
+
 /// This thread runs until EvacuateJob Completion.
 /// When it receives a completed Assignment it will enqueue it into a work queue
 /// and then possibly starts worker thread to do the work.  The worker thread
 /// comes from a pool with a tunable size.  If the max number of worker threads
 /// are already running the completed Assignment stays in the queue to be picked
 /// up by the next available and running worker thread.  Worker threads will
-/// exit if the queue is empty when they finish their current work and check the
-/// queue for the next Assignment.
+/// exit if the queue is empty or if they receive a Stop message when they
+/// finish their current work and check the queue for the next Assignment.
 ///
-/// The plan is for this thread pool size to be the main tunable
-/// controlling our load on the Manta Metadata tier.  The thread pool size can
-/// be changed while the job is running with `.set_num_threads()`.
-/// How we communicate with a running job to tell it to alter its tunables is
-/// still TBD.
+/// The number of threads can be adjusted while the job is running.  See
+/// EvacuateJobUpdateMessage.
 ///
 /// One trade off here is whether or not the messages being sent to this
 /// thread are Assignments or individual EvacuateObjects (or
@@ -3113,30 +3168,14 @@ fn metadata_update_broker_dynamic(
         .name(String::from("Metadata Update broker"))
         .spawn(move || {
             loop {
-                // TODO: refactor this
                 if let Ok(msg) = job_action.update_rx.try_recv() {
-                    // Currently there is only one valid message here so we
-                    // can use this irrefutable pattern.
-                    // If we add any additional messages we have to use match
-                    // statements.
-                    let JobUpdateMessage::Evacuate(eum) = msg;
-                    let EvacuateJobUpdateMessage::SetMetadataThreads(
-                        worker_count,
-                    ) = eum;
-                    let difference: i32 =
-                        max_thread_count as i32 - worker_count as i32;
-
-                    // If the difference is negative then we need to
-                    // reduce our running thread count, so inject
-                    // the appropriate number of Stop messages to
-                    // tell active threads to exit.
-                    // Otherwise the logic below will handle spinning up
-                    // more worker threads if they are needed.
-                    for _ in difference..0 {
-                        queue_back.push(DyanmicWorkerMsg::Stop);
-                    }
-                    max_thread_count = worker_count;
-                    pool.set_num_threads(max_thread_count);
+                    debug!("Received metadata update message: {:#?}", msg);
+                    update_dynamic_metadata_threads(
+                        &mut pool,
+                        &queue_back,
+                        &mut max_thread_count,
+                        msg,
+                    );
                 }
                 let ace = match md_update_rx.recv() {
                     Ok(ace) => ace,

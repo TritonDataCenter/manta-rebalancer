@@ -25,6 +25,8 @@ use std::thread::JoinHandle;
 
 static DEFAULT_CONFIG_PATH: &str = "/opt/smartdc/rebalancer/config.json";
 
+// TODO: Determine max and min values for each (MANTA-5284)
+
 // The maximum number of tasks we will send in a single assignment to the agent.
 static DEFAULT_MAX_TASKS_PER_ASSIGNMENT: usize = 50;
 

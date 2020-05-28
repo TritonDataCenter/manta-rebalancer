@@ -93,10 +93,12 @@ fn add_update_channel(
     let mut update_chans =
         UPDATE_CHANS.lock().expect("lock update chans hashmap");
 
+    // This should only happen if we have duplicate UUIDs, so panic is
+    // appropriate.
     if update_chans.insert(uuid, update_tx).is_some() {
         let msg = format!("update_tx for {} already exists", uuid.to_string());
         error!("{}", msg);
-        panic!(msg); // XXX
+        panic!(msg);
     }
 }
 
@@ -250,7 +252,6 @@ fn list_jobs(state: State) -> Box<HandlerFuture> {
     }))
 }
 
-// TODO: just the outline so far
 fn update_job(mut state: State) -> (State, Response<Body>) {
     use crate::jobs::jobs::dsl::jobs as jobs_db;
 
@@ -260,11 +261,17 @@ fn update_job(mut state: State) -> (State, Response<Body>) {
         Uuid::from_str(update_job_params.uuid.as_str()).expect("uuid from str");
     let tx: crossbeam_channel::Sender<JobUpdateMessage>;
 
-    // TODO error handling
-    let job_db_entry: JobDbEntry = jobs_db
+    let job_db_entry: JobDbEntry = match jobs_db
         .find(update_job_params.uuid.as_str())
         .first(&db_conn)
-        .expect("job_db query");
+    {
+        Ok(jdbe) => jdbe,
+        Err(_) => {
+            let msg = format!("Could not find job {}", uuid);
+            let res = bad_request(&state, msg);
+            return (state, res);
+        }
+    };
 
     if job_db_entry.state != JobState::Running {
         let res = bad_request(
@@ -304,6 +311,12 @@ fn update_job(mut state: State) -> (State, Response<Body>) {
                         return (state, res);
                     }
                 };
+
+            if let Err(e) = evac_msg.validate() {
+                let res = bad_request(&state, e);
+                return (state, res);
+            }
+
             JobUpdateMessage::Evacuate(evac_msg)
         }
         _ => {
@@ -322,12 +335,8 @@ fn update_job(mut state: State) -> (State, Response<Body>) {
         return (state, res);
     }
 
-    let res = create_response(
-        &state,
-        StatusCode::OK,
-        mime::APPLICATION_JSON,
-        "", // TODO
-    );
+    let res =
+        create_response(&state, StatusCode::OK, mime::APPLICATION_JSON, "");
 
     (state, res)
 }
@@ -453,8 +462,14 @@ impl Middleware for DBConnMiddleware {
     where
         Chain: FnOnce(State) -> Box<HandlerFuture> + Send + 'static,
     {
-        // TODO: return 500 error to user
-        let db_conn = connect_db(REBALANCER_DB).expect("db connection");
+        let db_conn = match connect_db(REBALANCER_DB) {
+            Ok(dbc) => dbc,
+            Err(e) => {
+                let msg = format!("Could not connect to rebalancer DB: {}", e);
+                let res = invalid_server_error(&state, msg);
+                return Box::new(future::ok((state, res)));
+            }
+        };
 
         state.put(DBConnMiddlewareData { db_conn });
         chain(state)
@@ -474,8 +489,8 @@ fn router(config: Arc<Mutex<Config>>) -> Router {
         pool.execute(move || loop {
             let job = match thread_rx.recv() {
                 Ok(j) => j,
-                Err(_) => {
-                    // TODO Check error
+                Err(e) => {
+                    error!("Error receiving job message: {}", e);
                     return;
                 }
             };
