@@ -436,9 +436,24 @@ pub struct EvacuateDestShark {
     pub status: DestSharkStatus,
 }
 
+///
+/// ```
+/// use serde_json::json;
+/// use manager::jobs::evacuate::EvacuateJobUpdateMessage;
+///
+/// let payload = json!({
+///     "action": "set_metadata_threads",
+///     "params": 30
+/// });
+///
+/// let deserialized: EvacuateJobUpdateMessage = serde_json::from_value(payload).unwrap();
+/// let EvacuateJobUpdateMessage::SetMetadataThreads(thr_count) = deserialized;
+/// assert_eq!(thr_count, 30);
+/// ```
 #[derive(Debug, Deserialize)]
+#[serde(tag = "action", content = "params", rename_all = "snake_case")]
 pub enum EvacuateJobUpdateMessage {
-    UpdateMetadataThreads(usize),
+    SetMetadataThreads(usize),
 }
 
 enum DyanmicWorkerMsg {
@@ -3105,7 +3120,7 @@ fn metadata_update_broker_dynamic(
                     // If we add any additional messages we have to use match
                     // statements.
                     let JobUpdateMessage::Evacuate(eum) = msg;
-                    let EvacuateJobUpdateMessage::UpdateMetadataThreads(
+                    let EvacuateJobUpdateMessage::SetMetadataThreads(
                         worker_count,
                     ) = eum;
                     let difference: i32 =

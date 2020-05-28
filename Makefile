@@ -150,7 +150,10 @@ agenttests:
 rebalancer_adm_tests:
 	RUST_LOG=remora=trace $(CARGO) test rebalancer_adm_tests
 
-test: agenttests jobtests managertests rebalancer_adm_tests
+doc_tests:
+	RUST_LOG=remora=trace $(CARGO) test --doc
+
+test: agenttests jobtests managertests rebalancer_adm_tests doc_tests
 
 #
 # Included target definitions.
