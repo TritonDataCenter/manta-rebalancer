@@ -91,7 +91,6 @@ impl Arbitrary for Task {
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
 pub enum TaskStatus {
     Pending,
-    Running,
     Complete,
     Failed(ObjectSkippedReason),
 }
@@ -107,9 +106,8 @@ impl Arbitrary for TaskStatus {
         let i = g.next_u32() % 4;
         match i {
             0 => TaskStatus::Pending,
-            1 => TaskStatus::Running,
-            2 => TaskStatus::Complete,
-            3 => TaskStatus::Failed(Arbitrary::arbitrary(g)),
+            1 => TaskStatus::Complete,
+            2 => TaskStatus::Failed(Arbitrary::arbitrary(g)),
             _ => panic!(),
         }
     }

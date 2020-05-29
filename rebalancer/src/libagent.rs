@@ -1002,20 +1002,12 @@ fn process_assignment_impl(
             i
         };
 
-        let mut t = {
-            let tmp = &mut assignment.write().unwrap().tasks;
+        let mut t = assignment.read().unwrap().tasks[index].clone();
 
-            // We found a task that has not been processed yet.  Update its
-            // status to `TaskStatus::Running' so that no other worker attmepts
-            // to process it and run with it.
-            tmp[index].set_status(TaskStatus::Running);
-            tmp[index].clone()
-        };
-
-        // Process it.
+        // Process the task.
         f(&mut t, client);
 
-        // Update the total number of objects that have been processes, whether
+        // Update the total number of objects that have been processed, whether
         // successful or not.
         if let Some(m) = metrics.clone() {
             // Note: The rebalncer agent does not currently break down this
@@ -1028,21 +1020,20 @@ fn process_assignment_impl(
         let tmp = &mut assignment.write().unwrap();
 
         // Update our stats.
+        tmp.stats.complete += 1;
+
         match t.status {
-            TaskStatus::Pending => (),
-            TaskStatus::Running => (),
             TaskStatus::Complete => {
                 log_file_stats(&t, &uuid);
-                tmp.stats.complete += 1;
             }
             TaskStatus::Failed(e) => {
                 if let Some(m) = metrics.clone() {
                     counter_vec_inc(&m, ERROR_COUNT, Some(&e.to_string()));
                 }
-                tmp.stats.complete += 1;
                 tmp.stats.failed += 1;
                 failures.lock().unwrap().push(t.clone());
             }
+            _ => (),
         }
 
         // Update the task in the assignment.
