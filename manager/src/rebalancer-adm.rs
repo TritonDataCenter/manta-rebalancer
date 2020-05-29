@@ -196,6 +196,7 @@ fn main() -> Result<(), String> {
 
     let set_threads = SubCommand::with_name("set-threads")
         .about("Set number of metadata update threads")
+        .setting(AppSettings::ArgRequiredElseHelp)
         .arg(
             Arg::with_name("uuid")
                 .required(true)
