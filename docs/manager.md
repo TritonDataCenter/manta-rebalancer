@@ -212,6 +212,15 @@ Create an evacuate job:
 rebalancer-adm job create evacuate --shark=<storage server name> [--max_objects=<maximum number of ojects]
 ```
 
+### Set the number of metadata threads on a running job
+```
+rebalancer-adm job help set-threads
+```
+
+```
+rebalancer-adm job set-threads <uuid> <num_threads>
+```
+
 ## Manager Configuration Parameters
 The rebalancer manager requires certain  service configuration parameters in
 `etc/config.json`.  This file is populated by the config-agent using
