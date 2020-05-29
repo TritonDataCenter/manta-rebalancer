@@ -657,6 +657,43 @@ mod tests {
         (config, test_server)
     }
 
+    fn put_update(
+        test_server: &TestServer,
+        uuid: &Uuid,
+        update_msg: &EvacuateJobUpdateMessage,
+    ) -> TestResponse {
+        let put_url =
+            format!("http://localhost:8888/jobs/{}", uuid.to_string());
+        let update_msg = serde_json::to_string(update_msg).unwrap();
+        test_server
+            .client()
+            .put(put_url, update_msg, mime::APPLICATION_JSON)
+            .perform()
+            .expect("put update")
+    }
+
+    fn create_job(test_server: &TestServer, job_payload: JobPayload) -> String {
+        let payload = serde_json::to_string(&job_payload)
+            .expect("serde serialize payload");
+        let response = test_server
+            .client()
+            .post(
+                "http://localhost:8888/jobs",
+                payload,
+                mime::APPLICATION_JSON,
+            )
+            .perform()
+            .expect("client post");
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let ret = response.read_utf8_body().expect("response body");
+        let ret = ret.trim_end();
+        assert!(Uuid::parse_str(ret).is_ok());
+
+        ret.to_string()
+    }
+
     #[test]
     fn basic() {
         unit_test_init();
@@ -692,28 +729,6 @@ mod tests {
         println!("{:#?}", pretty_response);
     }
 
-    fn create_job(test_server: &TestServer, job_payload: JobPayload) -> String {
-        let payload = serde_json::to_string(&job_payload)
-            .expect("serde serialize payload");
-        let response = test_server
-            .client()
-            .post(
-                "http://localhost:8888/jobs",
-                payload,
-                mime::APPLICATION_JSON,
-            )
-            .perform()
-            .expect("client post");
-
-        assert_eq!(response.status(), StatusCode::OK);
-
-        let ret = response.read_utf8_body().expect("response body");
-        let ret = ret.trim_end();
-        assert!(Uuid::parse_str(ret).is_ok());
-
-        ret.to_string()
-    }
-
     #[test]
     fn post_test() {
         unit_test_init();
@@ -725,21 +740,6 @@ mod tests {
 
         let job_id = create_job(&test_server, job_payload);
         println!("{}", job_id);
-    }
-
-    fn put_update(
-        test_server: &TestServer,
-        uuid: &Uuid,
-        update_msg: &EvacuateJobUpdateMessage,
-    ) -> TestResponse {
-        let put_url =
-            format!("http://localhost:8888/jobs/{}", uuid.to_string());
-        let update_msg = serde_json::to_string(update_msg).unwrap();
-        test_server
-            .client()
-            .put(put_url, update_msg, mime::APPLICATION_JSON)
-            .perform()
-            .expect("put update")
     }
 
     #[test]

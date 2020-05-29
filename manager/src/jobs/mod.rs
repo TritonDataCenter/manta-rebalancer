@@ -167,19 +167,6 @@ impl JobBuilder {
             }
         };
 
-        /*
-        let update_tx = match self.update_tx {
-            Some(tx) => tx,
-            None => {
-                return Err(InternalError::new(
-                    Some(InternalErrorCode::JobBuilderError),
-                    "Missing job update channel",
-                )
-                .into());
-            }
-        };
-         */
-
         let job = Job {
             id: self.id,
             action,
