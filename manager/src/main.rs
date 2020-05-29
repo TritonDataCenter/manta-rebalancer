@@ -17,7 +17,7 @@ extern crate serde_derive;
 #[macro_use]
 extern crate rebalancer;
 
-mod api_util;
+mod gotham_json_util;
 
 // JEmallocator drastically improves our memory footprint
 use jemallocator::Jemalloc;
@@ -39,7 +39,7 @@ use std::error::Error;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
-use crate::api_util::JsonBody;
+use crate::gotham_json_util::JsonBody;
 use clap::{App, Arg, ArgMatches};
 use crossbeam_channel;
 use diesel::query_dsl::{QueryDsl, RunQueryDsl};
