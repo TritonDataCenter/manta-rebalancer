@@ -67,7 +67,7 @@ pub struct Job {
     action: JobAction,
     state: JobState,
     config: Config,
-    pub update_tx: crossbeam_channel::Sender<JobUpdateMessage>,
+    pub update_tx: Option<crossbeam_channel::Sender<JobUpdateMessage>>,
 }
 
 // JobBuilder allows us to build a job before commiting its configuration and
@@ -98,7 +98,25 @@ impl JobBuilder {
         domain_name: &str,
         max_objects: Option<u32>,
     ) -> JobBuilder {
-        let (tx, rx) = crossbeam_channel::unbounded();
+        // A better approach here would be to create a thread in each job
+        // that would listen for the job update messages and then based on
+        // the message action would send the appropriate messages to the
+        // appropriate threads specific to that job and the update action.
+        // In the future if we expand this feature, our current
+        // implementation does not preclude this approach.  But that adds
+        // complexity (which increases risk) where it is really not needed.
+        // Instead, for now, we only create the channel if the job supports the
+        // one update action implemented.  An update_tx of 'None' signifies
+        // to the main.rs(server) that this job does not support dynamic
+        // configuration updates, and will return an error to the user if an
+        // update is attempted on this job.
+        let (tx, rx) = if self.config.options.use_static_md_update_threads {
+            (None, None)
+        } else {
+            let (tx, rx) = crossbeam_channel::unbounded();
+            (Some(tx), Some(rx))
+        };
+
         match EvacuateJob::new(
             from_shark,
             domain_name,
@@ -110,7 +128,7 @@ impl JobBuilder {
             Ok(j) => {
                 let action = JobAction::Evacuate(Box::new(j));
                 self.action = Some(action);
-                self.update_tx = Some(tx);
+                self.update_tx = tx;
             }
             Err(e) => {
                 error!("Failed to initialize evacuate job: {}", e);
@@ -149,6 +167,7 @@ impl JobBuilder {
             }
         };
 
+        /*
         let update_tx = match self.update_tx {
             Some(tx) => tx,
             None => {
@@ -159,13 +178,14 @@ impl JobBuilder {
                 .into());
             }
         };
+         */
 
         let job = Job {
             id: self.id,
             action,
             state: JobState::Setup,
             config: self.config,
-            update_tx,
+            update_tx: self.update_tx,
         };
 
         job.insert_into_db()?;

@@ -520,7 +520,7 @@ pub struct EvacuateJob {
 
     pub md_update_time: AtomicU64,
 
-    pub update_rx: crossbeam_channel::Receiver<JobUpdateMessage>,
+    pub update_rx: Option<crossbeam_channel::Receiver<JobUpdateMessage>>,
 
     /// TESTING ONLY
     pub max_objects: Option<u32>,
@@ -534,7 +534,7 @@ impl EvacuateJob {
         domain_name: &str,
         db_name: &str,
         options: ConfigOptions,
-        update_rx: crossbeam_channel::Receiver<JobUpdateMessage>,
+        update_rx: Option<crossbeam_channel::Receiver<JobUpdateMessage>>,
         max_objects: Option<u32>,
     ) -> Result<Self, Error> {
         let mut from_shark = MantaObjectShark::default();
@@ -3163,12 +3163,18 @@ fn metadata_update_broker_dynamic(
     );
     let queue = Arc::new(Injector::<DyanmicWorkerMsg>::new());
     let queue_back = Arc::clone(&queue);
+    let update_rx = match &job_action.update_rx {
+        Some(urx) => urx.clone(),
+        None => panic!(
+            "Missing update_rx channel for job with dynamic update threads"
+        ),
+    };
 
     thread::Builder::new()
         .name(String::from("Metadata Update broker"))
         .spawn(move || {
             loop {
-                if let Ok(msg) = job_action.update_rx.try_recv() {
+                if let Ok(msg) = update_rx.try_recv() {
                     debug!("Received metadata update message: {:#?}", msg);
                     update_dynamic_metadata_threads(
                         &mut pool,
@@ -3492,7 +3498,7 @@ mod tests {
             "fakedomain.us",
             &Uuid::new_v4().to_string(),
             ConfigOptions::default(),
-            update_rx,
+            Some(update_rx),
             Some(100),
         )
         .expect("initialize evacuate job");
@@ -3685,7 +3691,7 @@ mod tests {
             "fakedomain.us",
             &Uuid::new_v4().to_string(),
             ConfigOptions::default(),
-            update_rx,
+            Some(update_rx),
             None,
         )
         .expect("initialize evacuate job");
@@ -3818,7 +3824,7 @@ mod tests {
             "fakedomain.us",
             &Uuid::new_v4().to_string(),
             ConfigOptions::default(),
-            update_rx,
+            Some(update_rx),
             None,
         )
         .expect("initialize evacuate job");
@@ -3951,7 +3957,7 @@ mod tests {
             "region.fakedomain.us",
             &Uuid::new_v4().to_string(),
             ConfigOptions::default(),
-            update_rx,
+            Some(update_rx),
             None,
         )
         .expect("initialize evacuate job");

@@ -118,9 +118,12 @@ fn get_update_channel(
     uuid: Uuid,
 ) -> Result<crossbeam_channel::Sender<JobUpdateMessage>, String> {
     let update_chans = UPDATE_CHANS.lock().expect("lock update chans hashmap");
-    let chan = update_chans
-        .get(&uuid)
-        .ok_or_else(|| format!("Job Channel not found for: {}", uuid))?;
+    let chan = update_chans.get(&uuid).ok_or_else(|| {
+        format!(
+            "Job ({}) does not support dynamic configuration updates",
+            uuid
+        )
+    })?;
 
     Ok(chan.clone())
 }
@@ -418,7 +421,9 @@ impl Handler for JobCreateHandler {
                 let job_uuid = job.get_id();
                 let uuid_response = format!("{}\n", &job_uuid);
 
-                add_update_channel(job_uuid, job.update_tx.clone());
+                if let Some(update_tx) = &job.update_tx {
+                    add_update_channel(job_uuid, update_tx.clone());
+                }
 
                 if let Err(e) = self.tx.send(job) {
                     panic!("Tx error: {}", e);

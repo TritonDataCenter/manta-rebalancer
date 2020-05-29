@@ -76,7 +76,7 @@ impl Default for ConfigOptions {
             max_tasks_per_assignment: DEFAULT_MAX_TASKS_PER_ASSIGNMENT,
             max_metadata_update_threads: DEFAULT_MAX_METADATA_UPDATE_THREADS,
             max_sharks: DEFAULT_MAX_SHARKS,
-            use_static_md_update_threads: true,
+            use_static_md_update_threads: false,
             static_queue_depth: DEFAULT_STATIC_QUEUE_DEPTH,
             max_assignment_age: DEFAULT_MAX_ASSIGNMENT_AGE,
             use_batched_updates: true,
