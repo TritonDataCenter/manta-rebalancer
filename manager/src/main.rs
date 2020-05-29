@@ -597,7 +597,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gotham::test::TestServer;
+    use gotham::test::{TestResponse, TestServer};
     use lazy_static::lazy_static;
     use manager::jobs::{EvacuateJobPayload, JobPayload};
     use rebalancer::error::{Error, InternalError};
@@ -692,14 +692,7 @@ mod tests {
         println!("{:#?}", pretty_response);
     }
 
-    #[test]
-    fn post_test() {
-        unit_test_init();
-        let (_, test_server) = test_server_init();
-        let job_payload = JobPayload::Evacuate(EvacuateJobPayload {
-            from_shark: String::from("fake_storage_id"),
-            max_objects: Some(10),
-        });
+    fn create_job(test_server: &TestServer, job_payload: JobPayload) -> String {
         let payload = serde_json::to_string(&job_payload)
             .expect("serde serialize payload");
         let response = test_server
@@ -718,6 +711,104 @@ mod tests {
         let ret = ret.trim_end();
         assert!(Uuid::parse_str(ret).is_ok());
 
-        println!("{:#?}", ret);
+        ret.to_string()
+    }
+
+    #[test]
+    fn post_test() {
+        unit_test_init();
+        let (_, test_server) = test_server_init();
+        let job_payload = JobPayload::Evacuate(EvacuateJobPayload {
+            from_shark: String::from("fake_storage_id"),
+            max_objects: Some(10),
+        });
+
+        let job_id = create_job(&test_server, job_payload);
+        println!("{}", job_id);
+    }
+
+    fn put_update(
+        test_server: &TestServer,
+        uuid: &Uuid,
+        update_msg: &EvacuateJobUpdateMessage,
+    ) -> TestResponse {
+        let put_url =
+            format!("http://localhost:8888/jobs/{}", uuid.to_string());
+        let update_msg = serde_json::to_string(update_msg).unwrap();
+        test_server
+            .client()
+            .put(put_url, update_msg, mime::APPLICATION_JSON)
+            .perform()
+            .expect("put update")
+    }
+
+    #[test]
+    fn job_dynamic_update() {
+        unit_test_init();
+        let update_msg = EvacuateJobUpdateMessage::SetMetadataThreads(1);
+        let (tx, _) = crossbeam_channel::unbounded();
+        let uuid = Uuid::new_v4();
+        let (config, test_server) = test_server_init();
+
+        let config = { config.lock().unwrap().clone() };
+        assert!(!config.options.use_static_md_update_threads);
+
+        add_update_channel(uuid, tx);
+        assert!(get_update_channel(uuid).is_ok());
+
+        // We just manually put the channel in the UPDATE_CHANS hash, so
+        // didn't actually create a job so we don't expect the job lookup to
+        // succeed.
+        let expected_body = format!("Could not find job {}", uuid);
+        let res = put_update(&test_server, &uuid, &update_msg);
+        let res_body = res.read_utf8_body().unwrap();
+
+        assert_eq!(expected_body, res_body);
+
+        remove_update_channel(uuid);
+        assert!(get_update_channel(uuid).is_err());
+
+        // Now we actually start a job and wait for it to fail, then assert
+        // that we get the correct error message.  We could try to race with
+        // the job creation and see if we get a 200 back, but that is error
+        // prone.  Some testing will need to be done with this deployed in an
+        // actual environment.
+        let job_payload = JobPayload::Evacuate(EvacuateJobPayload {
+            from_shark: String::from("fake_storage_id"),
+            max_objects: Some(10),
+        });
+        let job_id = create_job(&test_server, job_payload);
+        let mut count = 0;
+
+        // This job will eventually fail, unless this is being run in a
+        // legitimate manta deployment.  But all other tests assume they are
+        // being run outside of manta.
+        loop {
+            if count > 50 {
+                assert!(false, "Job stalled");
+            }
+
+            let job_list = get_job_list(&test_server).expect("get job list");
+            let job = job_list
+                .into_iter()
+                .find(|j| j.id == job_id)
+                .expect("missing job");
+
+            if job.state != JobState::Failed {
+                thread::sleep(std::time::Duration::from_millis(500));
+                count += 1;
+                continue;
+            }
+            break;
+        }
+
+        let expected_body =
+            format!("Attempt to update job that is not running");
+
+        let job_uuid = Uuid::parse_str(&job_id).unwrap();
+        let res = put_update(&test_server, &job_uuid, &update_msg);
+        let res_body = res.read_utf8_body().unwrap();
+
+        assert_eq!(res_body, expected_body);
     }
 }

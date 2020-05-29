@@ -56,7 +56,7 @@ use quickcheck::{Arbitrary, Gen};
 use quickcheck_helpers::random::string as random_string;
 use rand::seq::SliceRandom;
 use reqwest;
-use serde::{self, Deserialize};
+use serde::{self, Deserialize, Serialize};
 use serde_json::Value;
 use strum::IntoEnumIterator;
 use threadpool::ThreadPool;
@@ -450,7 +450,7 @@ pub struct EvacuateDestShark {
 /// let EvacuateJobUpdateMessage::SetMetadataThreads(thr_count) = deserialized;
 /// assert_eq!(thr_count, 30);
 /// ```
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "action", content = "params", rename_all = "snake_case")]
 pub enum EvacuateJobUpdateMessage {
     SetMetadataThreads(usize),
