@@ -20,8 +20,10 @@ SMF_MANIFESTS =     smf/manifests/rebalancer.xml \
                     smf/manifests/rebalancer-agent.xml
 
 AGENT_TARBALL       := $(NAME)-agent-$(STAMP).tar.gz
+AGENT_MANIFEST      := $(NAME)-agent-$(STAMP).manifest
 RELEASE_TARBALL     := $(NAME)-pkg-$(STAMP).tar.gz
 RELSTAGEDIR         := /tmp/$(NAME)-$(STAMP)
+RELSTAGEDIR_AGENT   := /tmp/$(NAME)-agent-$(STAMP)
 
 # This image is triton-origin-x86_64-19.4.0
 BASE_IMAGE_UUID = 59ba2e5e-976f-4e09-8aac-a4a7ef0395f5
@@ -35,7 +37,7 @@ BUILDIMAGE_PKGSRC = postgresql11-server-11.6 postgresql11-client-11.6
 
 ENGBLD_USE_BUILDIMAGE   = true
 
-CLEAN_FILES += rebalancer-agent-*.tar.gz
+CLEAN_FILES += rebalancer-agent-*.tar.gz rebalancer-agent-*.manifest
 
 ifeq ($(shell uname -s),SunOS)
     include ./deps/eng/tools/mk/Makefile.agent_prebuilt.defs
@@ -82,9 +84,11 @@ release: all deps/manta-scripts/.git $(SMF_MANIFESTS)
 	@rm -rf $(RELSTAGEDIR)
 
 .PHONY: publish
-publish: release
+publish: release pkg_agent
 	mkdir -p $(ENGBLD_BITS_DIR)/$(NAME)
 	cp $(TOP)/$(RELEASE_TARBALL) $(ENGBLD_BITS_DIR)/$(NAME)/$(RELEASE_TARBALL)
+	cp $(TOP)/$(AGENT_TARBALL) $(ENGBLD_BITS_DIR)/$(NAME)/$(AGENT_TARBALL)
+	cp $(TOP)/$(AGENT_MANIFEST) $(ENGBLD_BITS_DIR)/$(NAME)/$(AGENT_MANIFEST)
 
 doc:
 	$(CARGO) doc
@@ -104,21 +108,32 @@ manager:
 pkg_agent:
 	@echo "Building $(AGENT_TARBALL)"
 	# agent dir
-	@mkdir -p $(RELSTAGEDIR)/root/opt/smartdc/$(NAME)-agent/etc
-	@mkdir -p $(RELSTAGEDIR)/root/opt/smartdc/$(NAME)-agent/bin
-	@mkdir -p $(RELSTAGEDIR)/root/opt/smartdc/$(NAME)-agent/smf/manifests
-	@mkdir -p $(RELSTAGEDIR)/root/opt/smartdc/$(NAME)-agent/sapi_manifests
+	@mkdir -p $(RELSTAGEDIR_AGENT)/root/opt/smartdc/$(NAME)-agent/etc
+	@mkdir -p $(RELSTAGEDIR_AGENT)/root/opt/smartdc/$(NAME)-agent/bin
+	@mkdir -p $(RELSTAGEDIR_AGENT)/root/opt/smartdc/$(NAME)-agent/smf/manifests
+	@mkdir -p $(RELSTAGEDIR_AGENT)/root/opt/smartdc/$(NAME)-agent/sapi_manifests
 	cp -R \
 	    $(TOP)/smf/manifests/rebalancer-agent.xml \
-	    $(RELSTAGEDIR)/root/opt/smartdc/$(NAME)-agent/smf/manifests/
+	    $(RELSTAGEDIR_AGENT)/root/opt/smartdc/$(NAME)-agent/smf/manifests/
 	cp \
 	    target/release/rebalancer-agent \
-	    $(RELSTAGEDIR)/root/opt/smartdc/$(NAME)-agent/bin/
+	    $(RELSTAGEDIR_AGENT)/root/opt/smartdc/$(NAME)-agent/bin/
 	cp -R $(TOP)/sapi_manifests/agent \
-	    $(RELSTAGEDIR)/root/opt/smartdc/$(NAME)-agent/sapi_manifests/
+	    $(RELSTAGEDIR_AGENT)/root/opt/smartdc/$(NAME)-agent/sapi_manifests/
 	# package it up
-	cd $(RELSTAGEDIR) && $(TAR) -I pigz -cf $(TOP)/$(AGENT_TARBALL) root
-	@rm -rf $(RELSTAGEDIR)
+	cd $(RELSTAGEDIR_AGENT) && $(TAR) -I pigz -cf $(TOP)/$(AGENT_TARBALL) root
+	uuid -v4 > $(RELSTAGEDIR_AGENT)/image_uuid
+	cat $(TOP)/agent-manifest.tmpl | sed \
+	    -e "s/UUID/$$(cat $(RELSTAGEDIR_AGENT)/image_uuid)/" \
+	    -e "s/NAME/$(BUILDIMAGE_NAME)-agent/" \
+	    -e "s/VERSION/$(STAMP)/" \
+	    -e "s/DESCRIPTION/$(BUILDIMAGE_DESC) Agent/" \
+	    -e "s/BUILDSTAMP/$(STAMP)/" \
+	    -e "s/SIZE/$$(stat --printf="%s" $(TOP)/$(AGENT_TARBALL))/" \
+	    -e "s/SHA/$$(openssl sha1 $(TOP)/$(AGENT_TARBALL) \
+	    | cut -d ' ' -f2)/" \
+	    > $(TOP)/$(AGENT_MANIFEST) \
+	@rm -rf $(RELSTAGEDIR_AGENT)
 
 clippy-deps:
 	rustup component add clippy

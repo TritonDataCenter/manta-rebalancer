@@ -2,6 +2,7 @@
 /bits
 /rebalancer-pkg-*.tar.gz
 /rebalancer-agent-*.tar.gz
+/rebalancer-agent-*.manifest
 /make_stamps
 /target
 **/*.rs.bk
