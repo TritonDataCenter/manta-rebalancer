@@ -132,7 +132,7 @@ pkg_agent:
 	    -e "s/SIZE/$$(stat --printf="%s" $(TOP)/$(AGENT_TARBALL))/" \
 	    -e "s/SHA/$$(openssl sha1 $(TOP)/$(AGENT_TARBALL) \
 	    | cut -d ' ' -f2)/" \
-	    > $(TOP)/$(AGENT_MANIFEST) \
+	    > $(TOP)/$(AGENT_MANIFEST)
 	@rm -rf $(RELSTAGEDIR_AGENT)
 
 clippy-deps:
