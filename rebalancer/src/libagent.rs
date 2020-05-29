@@ -981,21 +981,29 @@ fn process_assignment_impl(
     failures: Arc<Mutex<Vec<Task>>>,
     metrics: &Option<MetricsMap>,
     client: &Client,
+    next: Arc<Mutex<usize>>,
 ) {
     let len = assignment.read().unwrap().tasks.len();
 
-    for index in 0..len {
+    loop {
+        // Obtain the index of the next unprocessed task in the vector.  This
+        // will allow multiple workers to find the next available task in
+        // constant time without having to perform the practically negligible
+        // but tedious operation(s) of checking the status of a few before
+        // finally arriving at one that has not yet been processed.
+        let index: usize = {
+            let mut guard = next.lock().unwrap();
+            if *guard == len {
+                break;
+            }
+
+            let i = *guard;
+            *guard += 1;
+            i
+        };
+
         let mut t = {
             let tmp = &mut assignment.write().unwrap().tasks;
-
-            // If the status of a task is not equal to `TaskStatus::Pending`
-            // then that means it is either currently being processed or
-            // processing of it has already been complete.  In either case,
-            // skip this task and move on until we either reach the end of the
-            // assignment or we find a task that has not yet been processed.
-            if tmp[index].status != TaskStatus::Pending {
-                continue;
-            }
 
             // We found a task that has not been processed yet.  Update its
             // status to `TaskStatus::Running' so that no other worker attmepts
@@ -1059,6 +1067,7 @@ fn process_assignment_impl(
 // intention of modifying it and further, the same thread invoking this function
 // is the only one that will clean up the assignment when we have finished
 // processing it, by calling `assignment_complete()'.
+#[allow(clippy::mutex_atomic)]
 fn process_assignment(
     assignments: Arc<Mutex<Assignments>>,
     uuid: String,
@@ -1077,6 +1086,7 @@ fn process_assignment(
     let assignment = assignment_get(&assignments, &uuid).unwrap();
     let len = assignment.read().unwrap().tasks.len();
     let failures = Arc::new(Mutex::new(Vec::new()));
+    let next = Arc::new(Mutex::new(0));
 
     assignment.write().unwrap().stats.state = AgentAssignmentState::Running;
 
@@ -1085,13 +1095,14 @@ fn process_assignment(
     let active_workers = min(len, pool.max_count());
 
     for _ in 0..active_workers {
-        let a = Arc::clone(&assignment);
+        let asn = Arc::clone(&assignment);
         let fl = Arc::clone(&failures);
         let id = uuid.clone();
-        let m = metrics.clone();
-        let c = client.clone();
+        let me = metrics.clone();
+        let cl = client.clone();
+        let ne = Arc::clone(&next);
         pool.execute(move || {
-            process_assignment_impl(a, &id, f, fl, &m, &c);
+            process_assignment_impl(asn, &id, f, fl, &me, &cl, ne);
         });
     }
     pool.join();
