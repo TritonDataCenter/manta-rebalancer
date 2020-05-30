@@ -33,7 +33,7 @@ use diesel::pg::{Pg, PgValue};
 use diesel::serialize::{self, IsNull, Output, ToSql};
 
 use diesel::sql_types;
-use strum::IntoEnumIterator;
+use strum::{EnumCount, IntoEnumIterator};
 
 pub type HttpStatusCode = u16;
 pub type ObjectId = String; // UUID
@@ -88,10 +88,9 @@ impl Arbitrary for Task {
 
 // Note: if you change or add any of the fields here be sure to update the
 // Arbitrary implementation.
-#[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, EnumCount)]
 pub enum TaskStatus {
     Pending,
-    Running,
     Complete,
     Failed(ObjectSkippedReason),
 }
@@ -104,12 +103,11 @@ impl Default for TaskStatus {
 
 impl Arbitrary for TaskStatus {
     fn arbitrary<G: Gen>(g: &mut G) -> TaskStatus {
-        let i = g.next_u32() % 4;
+        let i = g.next_u32() % (TaskStatus::count() as u32);
         match i {
             0 => TaskStatus::Pending,
-            1 => TaskStatus::Running,
-            2 => TaskStatus::Complete,
-            3 => TaskStatus::Failed(Arbitrary::arbitrary(g)),
+            1 => TaskStatus::Complete,
+            2 => TaskStatus::Failed(Arbitrary::arbitrary(g)),
             _ => panic!(),
         }
     }
