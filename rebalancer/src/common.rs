@@ -22,7 +22,6 @@ use quickcheck_helpers::random::string as random_string;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
-use variant_count::VariantCount;
 
 #[cfg(feature = "postgres")]
 use diesel::deserialize::{self, FromSql};
@@ -34,7 +33,7 @@ use diesel::pg::{Pg, PgValue};
 use diesel::serialize::{self, IsNull, Output, ToSql};
 
 use diesel::sql_types;
-use strum::IntoEnumIterator;
+use strum::{EnumCount, IntoEnumIterator};
 
 pub type HttpStatusCode = u16;
 pub type ObjectId = String; // UUID
@@ -89,7 +88,7 @@ impl Arbitrary for Task {
 
 // Note: if you change or add any of the fields here be sure to update the
 // Arbitrary implementation.
-#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, VariantCount)]
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, EnumCount)]
 pub enum TaskStatus {
     Pending,
     Complete,
@@ -104,7 +103,7 @@ impl Default for TaskStatus {
 
 impl Arbitrary for TaskStatus {
     fn arbitrary<G: Gen>(g: &mut G) -> TaskStatus {
-        let i = g.next_u32() % (TaskStatus::VARIANT_COUNT as u32);
+        let i = g.next_u32() % (TaskStatus::count() as u32);
         match i {
             0 => TaskStatus::Pending,
             1 => TaskStatus::Complete,
