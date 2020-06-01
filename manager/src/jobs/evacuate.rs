@@ -54,7 +54,6 @@ use moray::objects::{
 };
 use quickcheck::{Arbitrary, Gen};
 use quickcheck_helpers::random::string as random_string;
-use rand::seq::SliceRandom;
 use reqwest;
 use serde::{self, Deserialize};
 use serde_json::Value;
@@ -797,7 +796,9 @@ impl EvacuateJob {
                 dest_shark_list.get_mut(sn.manta_storage_id.as_str())
             {
                 if dest_shark.status == DestSharkStatus::Ready {
-                    dest_shark.shark.available_mb = sn.available_mb;
+                    // XXX TODO check negative
+                    dest_shark.shark.available_mb =
+                        sn.available_mb - dest_shark.assigned_mb;
                 }
             } else {
                 // create new dest shark and add it to the hash
@@ -1237,7 +1238,7 @@ impl EvacuateJob {
     fn mark_dest_shark_ready(
         &self,
         dest_shark: &StorageId,
-        size_used: i64,
+        size_used: u64,
     ) {
         self.mark_dest_shark(
             dest_shark,
@@ -1291,6 +1292,7 @@ fn assignment_post_success(
                 );
             }
 
+            // XXX TODO: remove?
             evac_dest_shark.shark.available_mb -= assignment.total_size;
         }
         None => {
@@ -1551,6 +1553,7 @@ impl ProcessAssignment for EvacuateJob {
             &agent_assignment.stats.state
         );
 
+        let mut total_size = 0;
         match agent_assignment.stats.state {
             AgentAssignmentState::Scheduled | AgentAssignmentState::Running => {
                 warn!(
@@ -1569,19 +1572,20 @@ impl ProcessAssignment for EvacuateJob {
                     EvacuateObjectStatus::PostProcessing,
                 );
                 ace.state = AssignmentState::AgentComplete;
+                total_size = ace.total_size;
             }
             AgentAssignmentState::Complete(Some(failed_tasks)) => {
+                let objects = self.load_assignment_objects(
+                    &ace.id,
+                    EvacuateObjectStatus::Assigned,
+                );
+
                 info!(
                     "Assignment {} resulted in {} failed tasks.",
                     &ace.id,
                     failed_tasks.len()
                 );
                 trace!("{:#?}", &failed_tasks);
-
-                let objects = self.load_assignment_objects(
-                    &ace.id,
-                    EvacuateObjectStatus::Assigned,
-                );
 
                 // failed_tasks: Vec<Task>
                 // objects: Vec<EvacuateObject>
@@ -1590,7 +1594,11 @@ impl ProcessAssignment for EvacuateJob {
                 // in the failed_tasks Vec.
                 let successful_tasks: Vec<ObjectId> = objects
                     .iter()
-                    .map(|obj| obj.id.clone())
+                    .map(|obj| {
+                        assert!(obj.size >= 0);
+                        total_size += obj.size as u64;
+                        obj.id.clone()
+                    })
                     .filter(|obj_id| {
                         !failed_tasks.iter().any(|ft| &ft.object_id == obj_id)
                     })
@@ -1605,6 +1613,9 @@ impl ProcessAssignment for EvacuateJob {
                 ace.state = AssignmentState::AgentComplete;
             }
         }
+        self.mark_dest_shark_ready(
+            &ace.dest_shark.manta_storage_id,
+            total_size);
 
         Ok(())
     }
@@ -3584,10 +3595,12 @@ mod tests {
                 let mut assignment_count = 0;
                 let mut task_count = 0;
                 while let Ok(assignment) = full_assignment_rx.recv() {
-                    assignment_count += 1;
-                    task_count += assignment.tasks.len();
                     let dest_shark =
                         assignment.dest_shark.manta_storage_id;
+
+                    assignment_count += 1;
+                    task_count += assignment.tasks.len();
+
                     for (tid, _) in assignment.tasks {
                         let obj = verification_objects
                             .get(&tid)
@@ -3604,12 +3617,15 @@ mod tests {
                             false
                         );
                     }
-                    verif_job_action.mark_dest_shark_ready(&dest_shark);
+
+                    verif_job_action.mark_dest_shark_ready(
+                        &dest_shark,
+                        assignment.total_size);
+
                     println!("Task COUNT {}", task_count);
                 }
-            }
 
-        use self::evacuateobjects::dsl::{evacuateobjects, status};
+                use self::evacuateobjects::dsl::{evacuateobjects, status};
                 let locked_conn =
                     verif_job_action.conn.lock().expect("DB conn");
                 let records: Vec<EvacuateObject> = evacuateobjects
@@ -3627,8 +3643,8 @@ mod tests {
                 );
                 println!("Num Objects: {}", num_objects);
                 assert_eq!(task_count + skip_count, num_objects);
-            })
-            .expect("verification thread");
+
+            }).expect("verification thread");
 
         verification_thread.join().expect("verification join TODO");
         obj_generator_th.join().expect("obj_gen thr join TODO");
@@ -3678,7 +3694,8 @@ mod tests {
         // Create some EvacuateObjects
         for _ in 0..100 {
             let mobj = MantaObject::arbitrary(&mut g);
-            let size = mobj.content_length / (1024 * 1024);
+            let size = _get_size_from_content_length(mobj.content_length)
+                .unwrap_or(0);
             let mobj_value = serde_json::to_value(mobj).expect("mobj_value");
             let shard = 1;
             let etag = random_string(&mut g, 10);
