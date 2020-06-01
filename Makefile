@@ -128,7 +128,6 @@ pkg_agent:
 	    -e "s/NAME/$(BUILDIMAGE_NAME)-agent/" \
 	    -e "s/VERSION/$(STAMP)/" \
 	    -e "s/DESCRIPTION/$(BUILDIMAGE_DESC) Agent/" \
-	    -e "s/BUILDSTAMP/$(STAMP)/" \
 	    -e "s/SIZE/$$(stat --printf="%s" $(TOP)/$(AGENT_TARBALL))/" \
 	    -e "s/SHA/$$(openssl sha1 $(TOP)/$(AGENT_TARBALL) \
 	    | cut -d ' ' -f2)/" \
