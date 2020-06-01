@@ -76,12 +76,13 @@ use diesel::sql_types;
 // Note: The ordering of the fields in this table must match the ordering of
 // the fields in 'struct EvacuateObject'
 table! {
-    use diesel::sql_types::{Text, Integer, Nullable, Jsonb};
+    use diesel::sql_types::{BigInt, Text, Integer, Nullable, Jsonb};
     evacuateobjects (id) {
         id -> Text,
         assignment_id -> Text,
         object -> Jsonb,
         shard -> Integer,
+        size -> BigInt,
         dest_shark -> Text,
         etag -> Text,
         status -> Text,
@@ -301,6 +302,7 @@ pub fn create_evacuateobjects_table(
                 assignment_id TEXT,
                 object Jsonb,
                 shard Integer,
+                size BIGINT,
                 dest_shark TEXT,
                 etag TEXT,
                 status TEXT CHECK(status IN ({})) NOT NULL,
@@ -356,6 +358,7 @@ pub struct EvacuateObject {
 
     pub object: Value, // The MantaObject being rebalanced
     pub shard: i32,    // shard number of metadata object record
+    pub size: i64,     // Due to PG limitations, this is actually 0 - i64::MAX
     pub dest_shark: String,
     pub etag: String, // Moray object "_etag"
     pub status: EvacuateObjectStatus,
@@ -379,6 +382,7 @@ impl Arbitrary for EvacuateObject {
         let mut skipped_reason = None;
         let mut error = None;
         let shard = g.next_u32() as i32 % 100;
+        let size: i64 = (g.next_u64() as i64 % std::i64::MAX).abs();
         let dest_shark = random_string(g, 100);
 
         match status {
@@ -397,6 +401,7 @@ impl Arbitrary for EvacuateObject {
             object: manta_value,
             shard,
             etag: manta_object.etag, // This is a different etag
+            size,
             dest_shark,
             status,
             skipped_reason,
@@ -409,6 +414,7 @@ impl EvacuateObject {
     fn from_parts(
         manta_object: Value,
         id: ObjectId,
+        size: i64,
         etag: String,
         shard: i32,
     ) -> Self {
@@ -416,6 +422,7 @@ impl EvacuateObject {
             assignment_id: String::new(),
             id,
             object: manta_object,
+            size,
             shard,
             etag,
             ..Default::default()
@@ -434,7 +441,7 @@ pub enum DestSharkStatus {
 pub struct EvacuateDestShark {
     pub shark: StorageNode,
     pub status: DestSharkStatus,
-    pub assignment_count: u32,
+    pub assigned_mb: u64,
 }
 
 ///
@@ -861,7 +868,7 @@ impl EvacuateJob {
                 let new_shark = EvacuateDestShark {
                     shark: sn.to_owned(),
                     status: DestSharkStatus::Init,
-                    assignment_count: 0,
+                    assigned_mb: 0,
                 };
                 debug!("Adding new destination shark {:?} ", new_shark);
                 dest_shark_list.insert(sn.manta_storage_id.clone(), new_shark);
@@ -1257,7 +1264,7 @@ impl EvacuateJob {
         status: DestSharkStatus,
         post_fn: Option<F>,
     ) where
-        F: Fn(&mut EvacuateDestShark) -> ()
+        F: Fn(&mut EvacuateDestShark) -> (),
     {
         if let Some(shark) = self
             .dest_shark_list
@@ -1276,24 +1283,32 @@ impl EvacuateJob {
     }
 
     #[allow(clippy::ptr_arg)]
-    fn mark_dest_shark_assigned(&self, dest_shark: &StorageId) {
+    fn mark_dest_shark_assigned(
+        &self,
+        dest_shark: &StorageId,
+        assignment: &Assignment,
+    ) {
         self.mark_dest_shark(
             dest_shark,
             DestSharkStatus::Assigned,
             Some(|shark: &mut EvacuateDestShark| {
-                shark.assignment_count += 1;
+                shark.assigned_mb += assignment.total_size;
             }),
         )
     }
 
     #[allow(clippy::ptr_arg)]
-    fn mark_dest_shark_ready(&self, dest_shark: &StorageId) {
+    fn mark_dest_shark_ready(
+        &self,
+        dest_shark: &StorageId,
+        size_used: i64,
+    ) {
         self.mark_dest_shark(
             dest_shark,
             DestSharkStatus::Ready,
             Some(|shark: &mut EvacuateDestShark| {
-                shark.assignment_count -= 1;
-
+                // XXX: TODO, not technically correct.
+                shark.assigned_mb -= size_used;
             }),
         )
     }
@@ -1678,6 +1693,36 @@ fn _insert_bad_moray_object(
         .expect("Error inserting bad EvacuateObject into DB");
 }
 
+fn _insert_bad_manta_object(
+    job_action: &EvacuateJob,
+    object: Value,
+    id: ObjectId,
+) {
+    error!("Moray value missing etag {:#?}", object);
+    let eobj = EvacuateObject {
+        id,
+        object,
+        status: EvacuateObjectStatus::Error,
+        error: Some(EvacuateObjectError::BadMantaObject),
+        ..Default::default()
+    };
+
+    job_action
+        .insert_into_db(&eobj)
+        .expect("Error inserting bad EvacuateObject into DB");
+}
+
+fn _get_size_from_content_length(content_length: u64) -> Result<i64, String> {
+    let size = content_length / (1024 * 1024);
+    size.try_into().map_err(|e| {
+        format!(
+            "Sorry... objects larger than 9000 zetabytes are not \
+             supported: {}",
+            e,
+        )
+    })
+}
+
 /// Start the sharkspotter thread and feed the objects into the assignment
 /// thread.  If the assignment thread (the rx side of the channel) exits
 /// prematurely the sender.send() method will return a SenderError and that
@@ -1723,7 +1768,7 @@ fn start_sharkspotter(
                 // For now we consider a poorly formatted moray object or a
                 // missing objectId to be critical failures.  We cannot
                 // insert an evacuate object without an objectId.
-                let manta_object =
+                let manta_object_value =
                     match sharkspotter::manta_obj_from_moray_obj(&moray_object)
                     {
                         Ok(o) => o,
@@ -1735,12 +1780,33 @@ fn start_sharkspotter(
                         }
                     };
 
-                let id = match common::get_objectId_from_value(&manta_object) {
+                let id = match common::get_objectId_from_value(
+                    &manta_object_value,
+                ) {
                     Ok(id_str) => id_str,
                     Err(e) => {
                         return Err(std::io::Error::new(ErrorKind::Other, e));
                     }
                 };
+
+                let manta_object: MantaObjectEssential =
+                    match serde_json::from_value(manta_object_value.clone()) {
+                        Ok(mo) => mo,
+                        Err(e) => {
+                            error!(
+                                "Unable to get essential values from \
+                                 manta object: {} ({})",
+                                id, e
+                            );
+                            _insert_bad_manta_object(
+                                &job_action,
+                                manta_object_value,
+                                id,
+                            );
+
+                            return Ok(());
+                        }
+                    };
 
                 // If we fail to get the etag then we can't rebalance this
                 // object, but we return Ok(()) because we want to keep
@@ -1752,14 +1818,30 @@ fn start_sharkspotter(
                             error!("Cannot convert etag to string: {}", e);
                             _insert_bad_moray_object(
                                 &job_action,
-                                manta_object,
+                                manta_object_value,
                                 id,
                             );
                             return Ok(());
                         }
                     },
                     None => {
-                        _insert_bad_moray_object(&job_action, manta_object, id);
+                        _insert_bad_moray_object(&job_action,
+                                                 manta_object_value, id);
+                        return Ok(());
+                    }
+                };
+
+                let size = match _get_size_from_content_length(
+                    manta_object.content_length,
+                ) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        error!("Could not get object size for {}: {}", id, e);
+                        _insert_bad_manta_object(
+                            &job_action,
+                            manta_object_value,
+                            id,
+                        );
                         return Ok(());
                     }
                 };
@@ -1770,8 +1852,9 @@ fn start_sharkspotter(
 
                     let eobj = EvacuateObject {
                         id,
-                        object: manta_object,
+                        object: manta_object_value,
                         status: EvacuateObjectStatus::Error,
+                        size,
                         error: Some(EvacuateObjectError::BadShardNumber),
                         etag,
                         ..Default::default()
@@ -1788,8 +1871,9 @@ fn start_sharkspotter(
                 }
 
                 let eobj = EvacuateObject::from_parts(
-                    manta_object,
+                    manta_object_value,
                     id.clone(),
+                    size,
                     etag,
                     shard as i32,
                 );
@@ -2003,21 +2087,17 @@ where
                 */
 
                 // New hotness
-                shark_list.sort_by_key(|es| es.assignment_count);
+                shark_list.sort_by_key(|es| es.assigned_mb);
 
-                let shark_list:Vec<StorageNode> = shark_list
-                    .into_iter()
-                    .map(|s| s.shark)
-                    .collect();
+                let shark_list: Vec<StorageNode> =
+                    shark_list.into_iter().map(|s| s.shark).collect();
 
                 // For any active sharks that are not in the list remove them
                 // from the hash, send the stop command, join the associated
                 // threads.
                 let mut remove_keys = vec![];
                 for (key, _) in shark_hash.iter() {
-                    if shark_list
-                        .iter()
-                        .any(|s| &s.manta_storage_id == key) {
+                    if shark_list.iter().any(|s| &s.manta_storage_id == key) {
                         continue;
                     }
                     remove_keys.push(key.clone());
@@ -2235,7 +2315,8 @@ fn shark_assignment_generator(
                     // without doing this and we have an active assignment,
                     // this will clean that up before exiting.
                     job_action
-                        .mark_dest_shark_assigned(&shark.manta_storage_id);
+                        .mark_dest_shark_assigned(&shark.manta_storage_id,
+                                                  &assignment);
 
                     job_action
                         .insert_assignment_into_db(&assignment.id, &eobj_vec)?;
@@ -2365,7 +2446,8 @@ fn shark_assignment_generator(
 
                 flush = false;
 
-                job_action.mark_dest_shark_assigned(&shark.manta_storage_id);
+                job_action.mark_dest_shark_assigned(&shark.manta_storage_id,
+                                                    &assignment);
 
                 job_action
                     .insert_assignment_into_db(&assignment.id, &eobj_vec)?;
@@ -2657,11 +2739,6 @@ fn start_assignment_checker(
                     }
 
                     found_assignment_count += 1;
-
-                    // Mark the shark associated with this assignment as Ready
-                    job_action.mark_dest_shark_ready(
-                        &ace.dest_shark.manta_storage_id,
-                    );
 
                     match md_update_tx.send(ace.to_owned()) {
                         Ok(()) => (),
@@ -3599,6 +3676,8 @@ mod tests {
             .name(String::from("no skip object_generator_test"))
             .spawn(move || {
                 for (id, o) in test_objects_copy.into_iter() {
+                    let size = _get_size_from_content_length(o.content_length)
+                        .unwrap_or(0);
                     let shard = 1;
                     let etag = String::from("Fake_etag");
                     let mobj_value =
@@ -3607,6 +3686,7 @@ mod tests {
                     let eobj = EvacuateObject::from_parts(
                         mobj_value,
                         id.clone(),
+                        size,
                         etag,
                         shard,
                     );
@@ -3634,48 +3714,33 @@ mod tests {
                 debug!("Starting verification thread");
                 let mut assignment_count = 0;
                 let mut task_count = 0;
-                loop {
-                    match full_assignment_rx.recv() {
-                        Ok(assignment) => {
-                            assignment_count += 1;
-                            task_count += assignment.tasks.len();
-                            let dest_shark =
-                                assignment.dest_shark.manta_storage_id;
-                            for (tid, _) in assignment.tasks {
-                                match verification_objects.get(&tid) {
-                                    Some(obj) => {
-                                        println!(
-                                            "Checking that {:#?} is not in \
-                                             {:#?}",
-                                            dest_shark, obj.sharks
-                                        );
+                while let Ok(assignment) = full_assignment_rx.recv() {
+                    assignment_count += 1;
+                    task_count += assignment.tasks.len();
+                    let dest_shark =
+                        assignment.dest_shark.manta_storage_id;
+                    for (tid, _) in assignment.tasks {
+                        let obj = verification_objects
+                            .get(&tid)
+                            .expect ("missing object");
 
-                                        assert_eq!(
-                                            obj.sharks.iter().any(|shark| {
-                                                shark.manta_storage_id
-                                                    == dest_shark
-                                            }),
-                                            false
-                                        );
-                                    }
-                                    None => {
-                                        assert!(false, "test error");
-                                    }
-                                }
-                            }
-                            verif_job_action.mark_dest_shark_ready(&dest_shark);
-                            println!("Task COUNT {}", task_count);
-                        }
-                        Err(_) => {
-                            info!(
-                                "Verification Thread: Channel closed, exiting."
-                            );
-                            break;
-                        }
+                        println!("Checking that {:#?} is not in {:#?}",
+                            dest_shark, obj.sharks
+                        );
+
+                        assert_eq!(
+                            obj.sharks.iter().any(|shark| {
+                                shark.manta_storage_id == dest_shark
+                            }),
+                            false
+                        );
                     }
+                    verif_job_action.mark_dest_shark_ready(&dest_shark);
+                    println!("Task COUNT {}", task_count);
                 }
+            }
 
-                use self::evacuateobjects::dsl::{evacuateobjects, status};
+        use self::evacuateobjects::dsl::{evacuateobjects, status};
                 let locked_conn =
                     verif_job_action.conn.lock().expect("DB conn");
                 let records: Vec<EvacuateObject> = evacuateobjects
@@ -3746,6 +3811,7 @@ mod tests {
         // Create some EvacuateObjects
         for _ in 0..100 {
             let mobj = MantaObject::arbitrary(&mut g);
+            let size = mobj.content_length / (1024 * 1024);
             let mobj_value = serde_json::to_value(mobj).expect("mobj_value");
             let shard = 1;
             let etag = random_string(&mut g, 10);
@@ -3753,7 +3819,7 @@ mod tests {
                 common::get_objectId_from_value(&mobj_value).expect("objectId");
 
             let mut eobj =
-                EvacuateObject::from_parts(mobj_value, id, etag, shard);
+                EvacuateObject::from_parts(mobj_value, id, size, etag, shard);
 
             eobj.assignment_id = uuid.clone();
             eobjs.push(eobj);
@@ -4020,6 +4086,8 @@ mod tests {
             .spawn(move || {
                 for o in test_objects_copy.into_iter() {
                     let shard = 1;
+                    let size = _get_size_from_content_length(o.content_length)
+                        .unwrap_or(0);
                     let etag = String::from("Fake_etag");
                     let mobj_value =
                         serde_json::to_value(o.clone()).expect("mobj value");
@@ -4028,6 +4096,7 @@ mod tests {
                     let eobj = EvacuateObject::from_parts(
                         mobj_value,
                         id.clone(),
+                        size,
                         etag,
                         shard,
                     );
