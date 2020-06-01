@@ -34,6 +34,7 @@ use crate::storinfo::{self as mod_storinfo, SharkSource, StorageNode};
 
 use std::collections::hash_map::Entry::{Occupied, Vacant};
 use std::collections::HashMap;
+use std::convert::TryInto;
 use std::error::Error as _Error;
 use std::io::{ErrorKind, Write};
 use std::str::FromStr;
@@ -466,6 +467,8 @@ pub struct EvacuateJob {
 
     pub bytes_transferred: AtomicU64,
 
+    pub md_update_time: AtomicU64,
+
     /// TESTING ONLY
     pub max_objects: Option<u32>,
 }
@@ -504,6 +507,7 @@ impl EvacuateJob {
             post_client: reqwest::Client::new(),
             get_client: reqwest::Client::new(),
             bytes_transferred: AtomicU64::new(0),
+            md_update_time: AtomicU64::new(0),
         })
     }
 
@@ -646,6 +650,12 @@ impl EvacuateJob {
             "Evacuate Job transferred {} bytes",
             job_action.bytes_transferred.load(Ordering::SeqCst)
         );
+
+        debug!(
+            "Evacuate Job total metadata update time: {}us",
+            job_action.md_update_time.load(Ordering::SeqCst)
+        );
+
         ret
     }
 
@@ -2754,7 +2764,12 @@ fn metadata_update_one(
             now.elapsed().as_micros()
         );
     } else {
-        debug!("Updated 1 object in {}us", now.elapsed().as_micros());
+        let md_update_time = now.elapsed().as_micros();
+        job_action.md_update_time.fetch_add(
+            md_update_time.try_into().expect("try u128 into u64"),
+            Ordering::SeqCst,
+        );
+        debug!("Updated 1 object in {}us", md_update_time);
     }
 
     ret
@@ -2811,10 +2826,17 @@ fn metadata_update_batch(
         let now = std::time::Instant::now();
         if let Err(e) =
             mclient.batch(&requests, &ObjectMethodOptions::default(), |_| {
+                // elapsed() gives us a u128, but unfortunately AtomicU128 is
+                // nightly only.
+                let md_update_time = now.elapsed().as_micros();
+                job_action.md_update_time.fetch_add(
+                    md_update_time.try_into().expect("try u128 into u64"),
+                    Ordering::SeqCst,
+                );
+
                 info!(
                     "Batch updated {} objects in {}us",
-                    num_reqs,
-                    now.elapsed().as_micros()
+                    num_reqs, md_update_time
                 );
                 Ok(())
             })
