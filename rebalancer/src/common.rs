@@ -227,9 +227,6 @@ impl ObjectSkippedReason {
 impl Arbitrary for ObjectSkippedReason {
     fn arbitrary<G: Gen>(g: &mut G) -> ObjectSkippedReason {
         let i: usize = g.next_u32() as usize % Self::iter().count();
-        // XXX
-        // This is down right absurd.  Need to figure out why I cant use
-        // gen_range() even though I have the rand::Rng trait in scope.
         let status_code: u16 = (g.next_u32() as u16 % 500) + 100;
         let reason = Self::iter().nth(i).unwrap();
         match reason {
