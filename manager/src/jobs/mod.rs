@@ -372,6 +372,7 @@ pub type AssignmentCache = HashMap<AssignmentId, AssignmentCacheEntry>;
 pub struct AssignmentCacheEntry {
     id: AssignmentId,
     dest_shark: StorageNode,
+    total_size: u64,
     state: AssignmentState,
 }
 
@@ -380,6 +381,7 @@ impl From<Assignment> for AssignmentCacheEntry {
         AssignmentCacheEntry {
             id: assignment.id,
             dest_shark: assignment.dest_shark,
+            total_size: assignment.total_size,
             state: assignment.state,
         }
     }
