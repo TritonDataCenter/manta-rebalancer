@@ -33,7 +33,7 @@ use diesel::pg::{Pg, PgValue};
 use diesel::serialize::{self, IsNull, Output, ToSql};
 
 use diesel::sql_types;
-use strum::IntoEnumIterator;
+use strum::{EnumCount, IntoEnumIterator};
 
 pub type HttpStatusCode = u16;
 pub type ObjectId = String; // UUID
@@ -88,10 +88,9 @@ impl Arbitrary for Task {
 
 // Note: if you change or add any of the fields here be sure to update the
 // Arbitrary implementation.
-#[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, EnumCount)]
 pub enum TaskStatus {
     Pending,
-    Running,
     Complete,
     Failed(ObjectSkippedReason),
 }
@@ -104,12 +103,11 @@ impl Default for TaskStatus {
 
 impl Arbitrary for TaskStatus {
     fn arbitrary<G: Gen>(g: &mut G) -> TaskStatus {
-        let i = g.next_u32() % 4;
+        let i = g.next_u32() % (TaskStatus::count() as u32);
         match i {
             0 => TaskStatus::Pending,
-            1 => TaskStatus::Running,
-            2 => TaskStatus::Complete,
-            3 => TaskStatus::Failed(Arbitrary::arbitrary(g)),
+            1 => TaskStatus::Complete,
+            2 => TaskStatus::Failed(Arbitrary::arbitrary(g)),
             _ => panic!(),
         }
     }
@@ -311,4 +309,33 @@ pub fn get_objectId_from_value(
     };
 
     Ok(id)
+}
+
+pub fn get_key_from_object_value(object: &Value) -> Result<String, Error> {
+    let key = match object.get("key") {
+        Some(k) => match serde_json::to_string(k) {
+            Ok(ky) => ky.replace("\"", ""),
+            Err(e) => {
+                error!(
+                    "Could not parse key field in object {:#?} ({})",
+                    object, e
+                );
+                return Err(InternalError::new(
+                    Some(InternalErrorCode::BadMantaObject),
+                    "Could not parse Manta Object Key",
+                )
+                .into());
+            }
+        },
+        None => {
+            error!("Missing key field in object {:#?}", object);
+            return Err(InternalError::new(
+                Some(InternalErrorCode::BadMantaObject),
+                "Missing Manta Object Key",
+            )
+            .into());
+        }
+    };
+
+    Ok(key)
 }

@@ -5,7 +5,7 @@
 -->
 
 <!--
-    Copyright 2019, Joyent, Inc.
+    Copyright 2020 Joyent, Inc.
 -->
 
 # Agent
@@ -39,7 +39,47 @@ FLAGS:
 ```
 
 ## Configuration Parameters
-Currently, the rebalancer agent does not require any configuration parameters.
+The following parameters can be tuned in order to adjust the rebalancer agents
+performance:
+
+| Parameter | Description                                            | Default |
+| --------- | ------------------------------------------------------ | ------- |
+| REBALANCER_AGENT_WORKERS | Maximum number of assignments that the agent will process concurrently | 1 |
+| REBALANCER_AGENT_WORKERS_PER_ASSIGNMENT | Maximum number of threads that will be used to process a single assignment | 1 |
+
+The following example shows how to adjust these values resulting in an agent
+that can process two assignemnts concurrently, where each assignment is
+processed using a maximum of five threads.  In other words, for each assignment,
+the agent can be downloading as many as five objects at once.
+
+```
+MANTA_APP=$(sdc-sapi /applications?name=manta | json -Ha uuid)
+echo '{ "metadata": {"REBALANCER_AGENT_WORKERS": 2 } }' | sapiadm update $MANTA_APP
+echo '{ "metadata": {"REBALANCER_AGENT_WORKERS_PER_ASSIGNMENT": 5 } }' | sapiadm update $MANTA_APP
+```
+
+Note: In the example above, the only reason why the agent might use a number of
+threads less than five to process a given assignment is if the assignment itself
+had fewer than five tasks (i.e. objects to download).
+
+After an adjustment has been made to a service parameter, the agent should be
+restarted on all systems and the new parameters will be reloaded using the
+following command:
+
+```
+manta-oneach -s storage 'svcadm restart rebalancer-agent'
+```
+
+It is also worth mentioning that in case of an emergency where the processing
+of all assignments must be immediately halted, this can be done as such:
+
+```
+manta-oneach -s storage 'svcadm disable rebalancer-agent'
+```
+
+Future work will likely involve a more graceful means of performing a task
+like this, but while crude, this will enable an operator to halt rebalancing
+until further action is taken.
 
 ## Development
 

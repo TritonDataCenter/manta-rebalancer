@@ -7,6 +7,7 @@
 /*
  * Copyright 2020 Joyent, Inc.
  */
+use std::cmp::min;
 use std::collections::{HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fs;
@@ -62,8 +63,10 @@ pub struct ConfigServer {
     pub host: String,
     // The port that the agent should listen on for incoming connections.
     pub port: u16,
-    // The number of worker threads used to process assignments.
+    // Maximum number of concurrent assignments.
     pub workers: usize,
+    // Maximum number of worker threads per assignment.
+    pub workers_per_assignment: usize,
 }
 
 impl Default for ConfigServer {
@@ -72,6 +75,7 @@ impl Default for ConfigServer {
             host: "0.0.0.0".into(),
             port: 7878,
             workers: 1,
+            workers_per_assignment: 1,
         }
     }
 }
@@ -970,6 +974,73 @@ fn log_file_stats(task: &Task, uuid: &str) {
     );
 }
 
+fn process_assignment_impl(
+    assignment: Arc<RwLock<Assignment>>,
+    uuid: &str,
+    f: fn(&mut Task, &Client),
+    failures: Arc<Mutex<Vec<Task>>>,
+    metrics: &Option<MetricsMap>,
+    client: &Client,
+    next: Arc<Mutex<usize>>,
+) {
+    let len = assignment.read().unwrap().tasks.len();
+
+    loop {
+        // Obtain the index of the next unprocessed task in the vector.  This
+        // will allow multiple workers to find the next available task in
+        // constant time without having to perform the practically negligible
+        // but tedious operation(s) of checking the status of a few before
+        // finally arriving at one that has not yet been processed.
+        let index: usize = {
+            let mut guard = next.lock().unwrap();
+            if *guard == len {
+                break;
+            }
+
+            let i = *guard;
+            *guard += 1;
+            i
+        };
+
+        let mut t = assignment.read().unwrap().tasks[index].clone();
+
+        // Process the task.
+        f(&mut t, client);
+
+        // Update the total number of objects that have been processed, whether
+        // successful or not.
+        if let Some(m) = metrics.clone() {
+            // Note: The rebalncer agent does not currently break down this
+            // metric by anything meaningful, so we don't supply a bucket.
+            // That is, the only thing we track here is the total number of
+            // objects processed.
+            counter_vec_inc(&m, OBJECT_COUNT, None);
+        }
+
+        let tmp = &mut assignment.write().unwrap();
+
+        // Update our stats.
+        tmp.stats.complete += 1;
+
+        match t.status {
+            TaskStatus::Complete => {
+                log_file_stats(&t, &uuid);
+            }
+            TaskStatus::Failed(e) => {
+                if let Some(m) = metrics.clone() {
+                    counter_vec_inc(&m, ERROR_COUNT, Some(&e.to_string()));
+                }
+                tmp.stats.failed += 1;
+                failures.lock().unwrap().push(t.clone());
+            }
+            _ => (),
+        }
+
+        // Update the task in the assignment.
+        tmp.tasks[index] = t;
+    }
+}
+
 // Invoked by the worker thread, this function receives a caller-supplied
 // HashMap and a uuid that it uses as a key to find the assignment within
 // it.  Once it has obtained it, it processes each task in the assignment
@@ -987,12 +1058,14 @@ fn log_file_stats(task: &Task, uuid: &str) {
 // intention of modifying it and further, the same thread invoking this function
 // is the only one that will clean up the assignment when we have finished
 // processing it, by calling `assignment_complete()'.
+#[allow(clippy::mutex_atomic)]
 fn process_assignment(
     assignments: Arc<Mutex<Assignments>>,
     uuid: String,
     f: fn(&mut Task, &Client),
     metrics: Option<MetricsMap>,
     client: &Client,
+    pool: &ThreadPool,
 ) {
     // If we are unsuccessful in loading the assignment from disk, there is
     // nothing left to do here, other than return.
@@ -1003,72 +1076,32 @@ fn process_assignment(
 
     let assignment = assignment_get(&assignments, &uuid).unwrap();
     let len = assignment.read().unwrap().tasks.len();
-    let mut failures = Vec::new();
+    let failures = Arc::new(Mutex::new(Vec::new()));
+    let next = Arc::new(Mutex::new(0));
 
     assignment.write().unwrap().stats.state = AgentAssignmentState::Running;
 
     info!("Begin processing assignment {}.", &uuid);
 
-    for i in 0..len {
-        let assn = assignment.clone();
+    let active_workers = min(len, pool.max_count());
 
-        // Obtain a copy of the current task from our task list.  We
-        // will update the state information of the task and write it
-        // back in to the vector.  We want to retain ownership of the
-        // write-lock on the vector for as little as possible, so we
-        // perform this operation inside of a new scope -- as soon as
-        // it ends, the lock will be dropped along with the reference
-        // to the task list which is why we obtain a copy of the task
-        // as opposed to a reference to it.
-        let mut t = {
-            let tmp = &mut assn.write().unwrap().tasks;
-            tmp[i].set_status(TaskStatus::Running);
-            tmp[i].clone()
-        };
-
-        // Process it.
-        f(&mut t, client);
-
-        // Grab the write lock on the assignment.  It will only be held until
-        // the end of the loop (which is not for very long).
-        let tmp = &mut assn.write().unwrap();
-
-        // Update the total number of objects that have been processes, whether
-        // successful or not.
-        if let Some(m) = metrics.clone() {
-            // Note: The rebalncer agent does not currently break down this
-            // metric by anything meaningful, so we don't supply a bucket.
-            // That is, the only thing we track here is the total number of
-            // objects processed.
-            counter_vec_inc(&m, OBJECT_COUNT, None);
-        }
-
-        // Update our stats.
-        match t.status {
-            TaskStatus::Pending => (),
-            TaskStatus::Running => (),
-            TaskStatus::Complete => {
-                log_file_stats(&t, &uuid);
-                tmp.stats.complete += 1;
-            }
-            TaskStatus::Failed(e) => {
-                if let Some(m) = metrics.clone() {
-                    counter_vec_inc(&m, ERROR_COUNT, Some(&e.to_string()));
-                }
-                tmp.stats.complete += 1;
-                tmp.stats.failed += 1;
-                failures.push(t.clone());
-            }
-        }
-
-        // Update the task in the vector.
-        tmp.tasks[i] = t;
+    for _ in 0..active_workers {
+        let asn = Arc::clone(&assignment);
+        let fl = Arc::clone(&failures);
+        let id = uuid.clone();
+        let me = metrics.clone();
+        let cl = client.clone();
+        let ne = Arc::clone(&next);
+        pool.execute(move || {
+            process_assignment_impl(asn, &id, f, fl, &me, &cl, ne);
+        });
     }
+    pool.join();
 
-    let failed = if failures.is_empty() {
+    let failed = if failures.lock().unwrap().is_empty() {
         None
     } else {
-        Some(failures)
+        Some(failures.lock().unwrap().clone())
     };
 
     assignment.write().unwrap().stats.state =
@@ -1107,13 +1140,15 @@ pub fn router(
     build_simple_router(|route| {
         let mut agent_metrics: Option<MetricsMap> = None;
         let mut workers = 1;
+        let mut workers_per_assignment = 1;
 
         if let Some(c) = config {
             agent_metrics = Some(agent_start_metrics_server(&c));
             workers = c.server.workers;
+            workers_per_assignment = c.server.workers_per_assignment;
         }
 
-        assert!(workers > 0);
+        assert!(workers > 0 && workers_per_assignment > 0);
 
         let (w, r): (mpsc::Sender<String>, mpsc::Receiver<String>) =
             mpsc::channel();
@@ -1139,6 +1174,7 @@ pub fn router(
             let assignments = Arc::clone(&agent.assignments);
             let m = agent_metrics.clone();
             let client = reqwest::Client::new();
+            let worker_pool = ThreadPool::new(workers_per_assignment);
 
             pool.execute(move || loop {
                 let uuid = match rx.lock().unwrap().recv() {
@@ -1154,6 +1190,7 @@ pub fn router(
                     f,
                     m.clone(),
                     &client,
+                    &worker_pool,
                 );
             });
         }
