@@ -15,8 +15,26 @@ use std::env;
 use rebalancer::libagent::Agent;
 use rebalancer::util;
 
+pub fn print_version() {
+    let version = env!("CARGO_PKG_VERSION");
+    let name = env!("CARGO_PKG_NAME");
+
+    // Attempt to obtain the information associated with this build (i.e. the
+    // build stamp).  If one does not exist, then it means that it was built
+    // without using Makefile targets.  In such a case, indicate that with the
+    // marker "no-STAMP" which intended to be unique enough to easily grep from
+    // the log file(s).
+    let buildstamp = match option_env!("STAMP") {
+        Some(s) => s.to_owned(),
+        None => "no-STAMP".to_owned(),
+    };
+
+    println!("rebalancer-{} {} ({})", name, version, buildstamp);
+    //info!("rebalancer-{} {} ({})", name, version, buildstamp);
+}
+
 fn usage() {
-    util::print_version();
+    print_version();
     println!("Usage:");
     println!(" The options are:");
     println!("  -h, --help       Display this information");
@@ -36,7 +54,7 @@ fn main() {
                 return;
             }
             "-V" | "--version" => {
-                util::print_version();
+                print_version();
                 return;
             }
             _ => {
@@ -46,6 +64,8 @@ fn main() {
             }
         }
     }
+
+    print_version();
 
     // We should only be using 0.0.0.0 (INADDR_ANY) temporarily.  In production
     // we will be supply an ip address that is obtained from the config file
