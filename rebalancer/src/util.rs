@@ -106,5 +106,10 @@ pub fn shard_host2num(shard_host: &str) -> u32 {
 pub fn print_version() {
     let version = env!("CARGO_PKG_VERSION");
     let name = env!("CARGO_PKG_NAME");
-    println!("{} {}", name, version);
+    let buildstamp = match option_env!("STAMP") {
+        Some(s) => s.to_owned(),
+        None => "Debug".to_owned(),
+    };
+
+    println!("{} {} ({})", name, version, buildstamp);
 }
