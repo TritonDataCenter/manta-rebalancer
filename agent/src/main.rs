@@ -30,7 +30,6 @@ pub fn print_version() {
     };
 
     println!("rebalancer-{} {} ({})", name, version, buildstamp);
-    //info!("rebalancer-{} {} ({})", name, version, buildstamp);
 }
 
 fn usage() {
