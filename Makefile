@@ -98,7 +98,7 @@ clean::
 
 .PHONY: agent
 agent:
-	$(CARGO) build --manifest-path=agent/Cargo.toml --release
+	STAMP=$(STAMP) $(CARGO) build --manifest-path=agent/Cargo.toml --release
 
 .PHONY: manager
 manager:
