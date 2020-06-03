@@ -99,29 +99,34 @@ pub struct Config {
 }
 
 impl Config {
-    // TODO: there's a bug here that 1 will always be the min shard number
     pub fn min_shard_num(&self) -> u32 {
-        self.shards.iter().fold(1, |res, elem| {
-            let shard_num = util::shard_host2num(elem.host.as_str());
+        let min_shard = self
+            .shards
+            .iter()
+            .min_by(|s, t| {
+                let s_num = util::shard_host2num(s.host.as_str());
+                let t_num = util::shard_host2num(t.host.as_str());
 
-            if res < shard_num {
-                return res;
-            }
+                s_num.cmp(&t_num)
+            })
+            .expect("missing shard minimum");
 
-            shard_num
-        })
+        util::shard_host2num(min_shard.host.as_str())
     }
 
     pub fn max_shard_num(&self) -> u32 {
-        self.shards.iter().fold(1, |res, elem| {
-            let shard_num = util::shard_host2num(&elem.host);
+        let max_shard = self
+            .shards
+            .iter()
+            .max_by(|s, t| {
+                let s_num = util::shard_host2num(s.host.as_str());
+                let t_num = util::shard_host2num(t.host.as_str());
 
-            if res > shard_num {
-                return res;
-            }
+                s_num.cmp(&t_num)
+            })
+            .expect("missing shard maximum");
 
-            shard_num
-        })
+        util::shard_host2num(max_shard.host.as_str())
     }
 
     fn default_port() -> u16 {
@@ -350,6 +355,34 @@ mod tests {
     fn config_fini() {
         std::fs::remove_file(TEST_CONFIG_FILE)
             .expect("attempt to delete missing file")
+    }
+
+    #[test]
+    fn min_max_shards() {
+        unit_test_init();
+        let mut config = Config::default();
+        let shards = vec![
+            Shard {
+                host: "10.shard".to_string(),
+            },
+            Shard {
+                host: "3.shard".to_string(),
+            },
+            Shard {
+                host: "10.shard".to_string(),
+            },
+            Shard {
+                host: "10000.shard".to_string(),
+            },
+            Shard {
+                host: "999.shard".to_string(),
+            },
+        ];
+
+        config.shards = shards;
+
+        assert_eq!(config.min_shard_num(), 3);
+        assert_eq!(config.max_shard_num(), 10000);
     }
 
     #[test]
