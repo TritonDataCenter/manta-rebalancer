@@ -104,6 +104,9 @@ pub struct Config {
 
     #[serde(default = "Config::default_port")]
     pub listen_port: u16,
+
+    #[serde(default = "Config::default_max_fill_percentage")]
+    pub max_fill_percentage: u32,
 }
 
 impl Config {
@@ -119,6 +122,10 @@ impl Config {
 
     fn default_port() -> u16 {
         80
+    }
+
+    fn default_max_fill_percentage() -> u32 {
+        100
     }
 
     pub fn parse_config(config_path: &Option<String>) -> Result<Config, Error> {
