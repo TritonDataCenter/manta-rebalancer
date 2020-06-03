@@ -89,15 +89,14 @@ impl JobBuilder {
     // job's action field.
     pub fn evacuate(
         mut self,
+        config: &Config,
         from_shark: String,
-        domain_name: &str,
         max_objects: Option<u32>,
     ) -> JobBuilder {
         match EvacuateJob::new(
             from_shark,
-            domain_name,
+            config,
             &self.id.to_string(),
-            self.config.options,
             max_objects,
         ) {
             Ok(j) => {
@@ -380,7 +379,7 @@ impl Job {
 
         let result = match self.action {
             JobAction::Evacuate(job_action) => {
-                match job_action.run(&self.config) {
+                match job_action.run() {
                     Ok(()) => {
                         info!(
                             "Job {} completed in {} seconds",
@@ -566,7 +565,7 @@ mod test {
         assert_eq!(builder.state, JobState::Init);
 
         let from_shark = String::from("1.stor.domain");
-        let builder = builder.evacuate(from_shark, "fakedomain.us", Some(1));
+        let builder = builder.evacuate(&config, from_shark,Some(1));
         assert_eq!(builder.state, JobState::Init);
 
         let job = builder.commit().expect("failed to create job");

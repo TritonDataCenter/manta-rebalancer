@@ -23,7 +23,7 @@ use rebalancer::libagent::{
 };
 use rebalancer::util::{MAX_HTTP_STATUS_CODE, MIN_HTTP_STATUS_CODE};
 
-use crate::config::{Config, ConfigOptions};
+use crate::config::Config;
 use crate::jobs::{
     assignment_cache_usage, Assignment, AssignmentCacheEntry, AssignmentId,
     AssignmentState, StorageId,
@@ -446,6 +446,8 @@ pub struct EvacuateDestShark {
 
 /// Evacuate a given shark
 pub struct EvacuateJob {
+    pub config: Config,
+
     /// Hash of destination sharks that may change during the job execution.
     pub dest_shark_hash: RwLock<HashMap<StorageId, EvacuateDestShark>>,
 
@@ -455,19 +457,11 @@ pub struct EvacuateJob {
     /// The shark to evacuate.
     pub from_shark: MantaObjectShark,
 
+    // TODO: remove this?
     /// The minimum available space for a shark to be considered a destination.
     pub min_avail_mb: Option<u64>,
 
-    // TODO: Maximum total size of objects to include in a single assignment.
-
-    // TODO: max number of shark threads
     pub conn: Mutex<PgConnection>,
-
-    /// domain_name of manta deployment
-    pub domain_name: String,
-
-    /// Tunable options
-    pub options: ConfigOptions,
 
     pub post_client: reqwest::Client,
 
@@ -484,9 +478,8 @@ impl EvacuateJob {
     /// As part of this initialization also create a new PgConnection.
     pub fn new(
         storage_id: String,
-        domain_name: &str,
+        config: &Config,
         db_name: &str,
-        options: ConfigOptions,
         max_objects: Option<u32>,
     ) -> Result<Self, Error> {
         let mut from_shark = MantaObjectShark::default();
@@ -502,13 +495,12 @@ impl EvacuateJob {
         from_shark.manta_storage_id = storage_id;
 
         Ok(Self {
+            config: config.to_owned(),
             min_avail_mb: Some(1000), // TODO: config
             dest_shark_hash: RwLock::new(HashMap::new()),
             assignments: RwLock::new(HashMap::new()),
             from_shark,
             conn: Mutex::new(conn),
-            domain_name: domain_name.to_string(),
-            options,
             max_objects,
             post_client: reqwest::Client::new(),
             get_client: reqwest::Client::new(),
@@ -526,7 +518,7 @@ impl EvacuateJob {
     fn validate(&mut self) -> Result<(), Error> {
         let from_shark = moray_client::get_manta_object_shark(
             &self.from_shark.manta_storage_id,
-            &self.domain_name,
+            &self.config.domain_name,
         )?;
 
         self.from_shark = from_shark;
@@ -534,7 +526,7 @@ impl EvacuateJob {
         Ok(())
     }
 
-    pub fn run(mut self, config: &Config) -> Result<(), Error> {
+    pub fn run(mut self) -> Result<(), Error> {
         self.validate()?;
 
         let mut ret = Ok(());
@@ -543,9 +535,9 @@ impl EvacuateJob {
         let job_action = Arc::new(self);
 
         // get what the evacuate job needs from the config structure
-        let domain = &config.domain_name;
-        let min_shard = config.min_shard_num();
-        let max_shard = config.max_shard_num();
+        let domain = &job_action.config.domain_name;
+        let min_shard = job_action.config.min_shard_num();
+        let max_shard = job_action.config.max_shard_num();
 
         // TODO: How big should each channel be?
         // Set up channels for thread to communicate.
@@ -799,7 +791,7 @@ impl EvacuateJob {
             .read()
             .expect("get_shark_available_mb read lock");
 
-        let dest_shark = dest_shark_hash.get(shark)
+        dest_shark_hash.get(shark)
             .ok_or_else(|| {
                 let msg = format!(
                     "Could not find dest_shark ({}) in hash",
@@ -809,10 +801,13 @@ impl EvacuateJob {
                     Some(InternalErrorCode::SharkNotFound),
                     msg,
                 )
-            })?;
-
-        // XXX TODO, multiply by SAPI_MAX_FILL percentage
-        Ok(dest_shark.shark.available_mb - dest_shark.assigned_mb)
+            })
+            .and_then(|dest_shark| {
+                // XXX Multiply by sapi max fill percentage
+                Ok(dest_shark.shark.available_mb - dest_shark
+                    .assigned_mb)
+            })
+            .map_err(Error::from)
     }
 
     /// Iterate over a new set of storage nodes and update our destination
@@ -838,15 +833,6 @@ impl EvacuateJob {
                 // this along with dest_shark.assigned_mb to calculate the
                 // available storage space in get_shark_available_mb()
                 dest_shark.shark.available_mb = sn.available_mb;
-
-            /*
-            XXX
-
-            // dont do this here... just track the available_mb and ONLY
-            do the math in get_shark_available_mb()
-            dest_shark.shark.available_mb =
-                sn.available_mb - dest_shark.assigned_mb;
-             */
             } else {
                 // create new dest shark and add it to the hash
                 let new_shark = EvacuateDestShark {
@@ -1268,25 +1254,39 @@ impl EvacuateJob {
     fn mark_dest_shark_assigned(
         &self,
         dest_shark: &StorageId,
-        assignment_size: u64,
+        size: u64,
     ) {
         self.mark_dest_shark(
             dest_shark,
             DestSharkStatus::Assigned,
             Some(|shark: &mut EvacuateDestShark| {
-                shark.assigned_mb += assignment_size;
+                shark.assigned_mb = match shark.assigned_mb.checked_add(size) {
+                    Some(s) => s,
+                    None => {
+                        warn!("Detected overflow on assigned_mb, setting to \
+                        u64::MAX");
+                        std::u64::MAX
+                    }
+                };
             }),
         )
     }
 
     #[allow(clippy::ptr_arg)]
-    fn mark_dest_shark_ready(&self, dest_shark: &StorageId, size_used: u64) {
+    fn mark_dest_shark_ready(&self, dest_shark: &StorageId, size: u64) {
         self.mark_dest_shark(
             dest_shark,
             DestSharkStatus::Ready,
             Some(|shark: &mut EvacuateDestShark| {
-                // XXX: TODO, not technically correct.
-                shark.assigned_mb -= size_used;
+                shark.assigned_mb = match shark.assigned_mb.checked_sub(size) {
+                    Some(s) => s,
+                    None => {
+                        warn!(
+                            "Detected underflow on assigned_mb, setting to 0"
+                        );
+                        0
+                    }
+                };
             }),
         )
     }
@@ -1313,54 +1313,11 @@ impl EvacuateJob {
 /// 1. Set AssignmentState to Assigned.
 /// 2. Update assignment that has been successfully posted to the Agent into the
 ///    EvacauteJob's assignment cache.
-/// 3. XXX Update shark available_mb.
 /// 4. Implicitly drop (free) the Assignment on return.
 fn assignment_post_success(
     job_action: &EvacuateJob,
     mut assignment: Assignment,
 ) {
-    /*  XXX not here because this is async... instead only update on failure
-    job_action.mark_dest_shark_assigned(
-        &assignment.dest_shark.manta_storage_id,
-        &assignment
-    );
-     */
-
-    match job_action
-        .dest_shark_hash
-        .write()
-        .expect("desk_shark_list")
-        .get_mut(&assignment.dest_shark.manta_storage_id)
-    {
-        Some(evac_dest_shark) => {
-            if assignment.total_size > evac_dest_shark.shark.available_mb {
-                warn!(
-                    "Attempting to set available space on destination shark \
-                     to a negative value.  Setting to 0 instead."
-                );
-            }
-
-            // XXX TODO: remove?
-            /*
-            evac_dest_shark.shark.available_mb -= assignment.total_size;
-             */
-        }
-        None => {
-            // This could happen in the event that while this assignment was
-            // being filled out by the assignment generator thread and being
-            // posted to the agent, the assignment manager might have
-            // received an updated list of sharks from the storinfo service and
-            // as a result removed this one from it's active hash.  Regardless
-            // the assignment has been posted and is actively running on the
-            // shark's rebalancer agent at this point.
-            warn!(
-                "Could not find destination shark ({}) to update available \
-                 MB.",
-                &assignment.dest_shark.manta_storage_id
-            );
-        }
-    }
-
     assignment.state = AssignmentState::Assigned;
     let mut assignments = job_action
         .assignments
@@ -2067,9 +2024,9 @@ where
 {
     move || {
         let mut done = false;
-        let max_sharks = job_action.options.max_sharks;
+        let max_sharks = job_action.config.options.max_sharks;
         let max_tasks_per_assignment =
-            job_action.options.max_tasks_per_assignment;
+            job_action.config.options.max_tasks_per_assignment;
 
         let algo = mod_storinfo::DefaultChooseAlgorithm {
             min_avail_mb: job_action.min_avail_mb,
@@ -2334,8 +2291,8 @@ fn shark_assignment_generator(
     full_assignment_tx: crossbeam::Sender<Assignment>,
 ) -> impl Fn() -> Result<(), Error> {
     move || {
-        let max_tasks = job_action.options.max_tasks_per_assignment;
-        let max_age = job_action.options.max_assignment_age;
+        let max_tasks = job_action.config.options.max_tasks_per_assignment;
+        let max_age = job_action.config.options.max_assignment_age;
         let from_shark_host = job_action.from_shark.manta_storage_id.clone();
         let mut assignment_birth_time = std::time::Instant::now();
         let mut flush = false;
@@ -2948,7 +2905,7 @@ fn get_client_from_hash<'a>(
             debug!("Client for shard {} does not exist, creating.", shard);
             let client = match moray_client::create_client(
                 shard,
-                &job_action.domain_name,
+                &job_action.config.domain_name,
             ) {
                 Ok(client) => client,
                 Err(e) => {
@@ -3189,7 +3146,7 @@ fn metadata_update_assignment(
         // sharks, and then returns the updated Manta metadata object.
         match job_action.update_object_shark(mobj, dest_shark) {
             Ok(o) => {
-                if job_action.options.use_batched_updates {
+                if job_action.config.options.use_batched_updates {
                     if let Err(e) =
                         batch_add_putobj(&mut batched_reqs, o, shard, etag)
                     {
@@ -3231,7 +3188,7 @@ fn metadata_update_assignment(
         updated_objects.push(eobj);
     }
 
-    if job_action.options.use_batched_updates {
+    if job_action.config.options.use_batched_updates {
         let marked_error =
             metadata_update_batch(job_action, client_hash, batched_reqs);
 
@@ -3289,7 +3246,7 @@ fn metadata_update_broker_dynamic(
 ) -> Result<thread::JoinHandle<Result<(), Error>>, Error> {
     let pool = ThreadPool::with_name(
         "Dyn_MD_Update".into(),
-        job_action.options.max_metadata_update_threads,
+        job_action.config.options.max_metadata_update_threads,
     );
     let queue = Arc::new(Injector::<AssignmentCacheEntry>::new());
     let queue_back = Arc::clone(&queue);
@@ -3362,8 +3319,8 @@ fn _update_broker_static(
     job_action: Arc<EvacuateJob>,
     md_update_rx: crossbeam::Receiver<AssignmentCacheEntry>,
 ) -> Result<(), Error> {
-    let num_threads = job_action.options.max_metadata_update_threads;
-    let queue_depth = job_action.options.static_queue_depth;
+    let num_threads = job_action.config.options.max_metadata_update_threads;
+    let queue_depth = job_action.config.options.static_queue_depth;
     let (static_tx, static_rx) = crossbeam_channel::bounded(queue_depth);
     let mut thread_handles = vec![];
 
@@ -3433,7 +3390,7 @@ fn start_metadata_update_broker(
     job_action: Arc<EvacuateJob>,
     md_update_rx: crossbeam::Receiver<AssignmentCacheEntry>,
 ) -> Result<thread::JoinHandle<Result<(), Error>>, Error> {
-    if job_action.options.use_static_md_update_threads {
+    if job_action.config.options.use_static_md_update_threads {
         metadata_update_broker_static(job_action, md_update_rx)
     } else {
         metadata_update_broker_dynamic(job_action, md_update_rx)
@@ -3609,9 +3566,8 @@ mod tests {
         let from_shark = String::from("1.stor.domain");
         let job_action = EvacuateJob::new(
             from_shark,
-            "fakedomain.us",
+            Config::default().as_ref(),
             &Uuid::new_v4().to_string(),
-            ConfigOptions::default(),
             Some(100),
         )
         .expect("initialize evacuate job");
@@ -3794,9 +3750,8 @@ mod tests {
         let mut g = StdThreadGen::new(10);
         let job_action = EvacuateJob::new(
             String::new(),
-            "fakedomain.us",
+            Config::default().as_ref(),
             &Uuid::new_v4().to_string(),
-            ConfigOptions::default(),
             None,
         )
         .expect("initialize evacuate job");
@@ -3927,9 +3882,8 @@ mod tests {
         // host/domain name is valid here.
         let job_action = EvacuateJob::new(
             String::new(),
-            "fakedomain.us",
+            Config::default().as_ref(),
             &Uuid::new_v4().to_string(),
-            ConfigOptions::default(),
             None,
         )
         .expect("initialize evacuate job");
@@ -4058,9 +4012,8 @@ mod tests {
         // host/domain name is valid here.
         let job_action = EvacuateJob::new(
             String::new(),
-            "region.fakedomain.us",
+            Config::default().as_ref(),
             &Uuid::new_v4().to_string(),
-            ConfigOptions::default(),
             None,
         )
         .expect("initialize evacuate job");
