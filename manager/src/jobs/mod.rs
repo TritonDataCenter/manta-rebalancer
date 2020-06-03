@@ -314,7 +314,7 @@ impl fmt::Debug for Job {
                  from_shark: {:#?}, \
                  min_avail_mb: {:#?}, \
                  }}",
-                ej.dest_shark_list,
+                ej.dest_shark_hash,
                 ej.assignments,
                 ej.from_shark,
                 ej.min_avail_mb,
@@ -353,12 +353,10 @@ pub struct Assignment {
 
 impl Assignment {
     fn new(dest_shark: StorageNode) -> Self {
-        let max_size = dest_shark.available_mb / 2;
-
         Self {
             id: Uuid::new_v4().to_string(),
             dest_shark,
-            max_size,
+            max_size: 0,
             total_size: 0,
             tasks: HashMap::new(),
             state: AssignmentState::Init,
