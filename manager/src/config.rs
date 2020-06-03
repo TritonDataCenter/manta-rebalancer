@@ -51,6 +51,8 @@ static DEFAULT_STATIC_QUEUE_DEPTH: usize = 10;
 // destination sharks.
 static DEFAULT_MAX_ASSIGNMENT_AGE: u64 = 600;
 
+pub const MAX_TUNABLE_MD_UPDATE_THREADS: usize = 100;
+
 #[derive(Deserialize, Default, Debug, Clone)]
 pub struct Shard {
     pub host: String,

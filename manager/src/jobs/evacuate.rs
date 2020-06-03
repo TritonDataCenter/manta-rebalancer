@@ -23,7 +23,7 @@ use rebalancer::libagent::{
 };
 use rebalancer::util::{MAX_HTTP_STATUS_CODE, MIN_HTTP_STATUS_CODE};
 
-use crate::config::{Config, ConfigOptions};
+use crate::config::{Config, ConfigOptions, MAX_TUNABLE_MD_UPDATE_THREADS};
 use crate::jobs::{
     assignment_cache_usage, Assignment, AssignmentCacheEntry, AssignmentId,
     AssignmentState, JobUpdateMessage, StorageId,
@@ -471,7 +471,7 @@ impl EvacuateJobUpdateMessage {
                 // rebalancer from hammering the metadata tier due to a fat
                 // finger.  It is still possible to set this number higher
                 // but only at the start of a job. See MANTA-5284.
-                if *num_threads > 100 {
+                if *num_threads > MAX_TUNABLE_MD_UPDATE_THREADS {
                     return Err(String::from(
                         "Cannot set metadata update threads above 100",
                     ));
