@@ -1333,16 +1333,17 @@ impl EvacuateJob {
             dest_shark,
             DestSharkStatus::Assigned,
             Some(|shark: &mut EvacuateDestShark| {
-                shark.assigned_mb = match shark.assigned_mb.checked_add(size) {
-                    Some(s) => s,
-                    None => {
+                shark.assigned_mb = shark
+                    .assigned_mb
+                    .checked_add(size)
+                    .ok_or_else(|| {
                         warn!(
                             "Detected overflow on assigned_mb, setting to \
                              u64::MAX"
                         );
                         std::u64::MAX
-                    }
-                };
+                    })
+                    .expect("shark assigned");
             }),
         )
     }
@@ -1353,15 +1354,16 @@ impl EvacuateJob {
             dest_shark,
             DestSharkStatus::Ready,
             Some(|shark: &mut EvacuateDestShark| {
-                shark.assigned_mb = match shark.assigned_mb.checked_sub(size) {
-                    Some(s) => s,
-                    None => {
+                shark.assigned_mb = shark
+                    .assigned_mb
+                    .checked_sub(size)
+                    .ok_or_else(|| {
                         warn!(
                             "Detected underflow on assigned_mb, setting to 0"
                         );
                         0
-                    }
-                };
+                    })
+                    .expect("shark ready");
             }),
         )
     }
