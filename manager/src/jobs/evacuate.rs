@@ -777,35 +777,48 @@ impl EvacuateJob {
 
     fn new_assignment(&self, shark: StorageNode) -> Result<Assignment, Error> {
         let mut assignment = Assignment::new(shark);
-        let available_mb =
-            self.get_shark_available_mb(&assignment.dest_shark.manta_storage_id)?;
+        let available_mb = self
+            .get_shark_available_mb(&assignment.dest_shark.manta_storage_id)?;
 
         assignment.max_size = available_mb;
         Ok(assignment)
     }
 
     // Source of truth for available storage space on a shark.
+    #[allow(clippy::ptr_arg)]
     fn get_shark_available_mb(&self, shark: &StorageId) -> Result<u64, Error> {
         let dest_shark_hash = self
             .dest_shark_hash
             .read()
             .expect("get_shark_available_mb read lock");
 
-        dest_shark_hash.get(shark)
+        dest_shark_hash
+            .get(shark)
             .ok_or_else(|| {
-                let msg = format!(
-                    "Could not find dest_shark ({}) in hash",
-                    shark
-                );
-                InternalError::new(
-                    Some(InternalErrorCode::SharkNotFound),
-                    msg,
-                )
+                let msg =
+                    format!("Could not find dest_shark ({}) in hash", shark);
+                InternalError::new(Some(InternalErrorCode::SharkNotFound), msg)
             })
             .and_then(|dest_shark| {
-                // XXX Multiply by sapi max fill percentage
-                Ok(dest_shark.shark.available_mb - dest_shark
-                    .assigned_mb)
+                let available_mb = dest_shark.shark.available_mb;
+                let assigned_mb = dest_shark.assigned_mb;
+                let percent = self.config.max_fill_percentage as f64 / 100.0;
+
+                match available_mb.checked_sub(assigned_mb) {
+                    Some(space) => {
+                        // 'as u64' will auto floor for us, but I want to be
+                        // explicit here for future readers.
+                        Ok((space as f64 * percent).floor() as u64)
+                    }
+                    None => {
+                        warn!(
+                            "Detected underflow, returning 0 available_mb \
+                             for {}",
+                            dest_shark.shark.manta_storage_id
+                        );
+                        Ok(0)
+                    }
+                }
             })
             .map_err(Error::from)
     }
@@ -1251,11 +1264,7 @@ impl EvacuateJob {
     }
 
     #[allow(clippy::ptr_arg)]
-    fn mark_dest_shark_assigned(
-        &self,
-        dest_shark: &StorageId,
-        size: u64,
-    ) {
+    fn mark_dest_shark_assigned(&self, dest_shark: &StorageId, size: u64) {
         self.mark_dest_shark(
             dest_shark,
             DestSharkStatus::Assigned,
@@ -1263,8 +1272,10 @@ impl EvacuateJob {
                 shark.assigned_mb = match shark.assigned_mb.checked_add(size) {
                     Some(s) => s,
                     None => {
-                        warn!("Detected overflow on assigned_mb, setting to \
-                        u64::MAX");
+                        warn!(
+                            "Detected overflow on assigned_mb, setting to \
+                             u64::MAX"
+                        );
                         std::u64::MAX
                     }
                 };
@@ -3566,7 +3577,7 @@ mod tests {
         let from_shark = String::from("1.stor.domain");
         let job_action = EvacuateJob::new(
             from_shark,
-            Config::default().as_ref(),
+            &Config::default(),
             &Uuid::new_v4().to_string(),
             Some(100),
         )
@@ -3750,7 +3761,7 @@ mod tests {
         let mut g = StdThreadGen::new(10);
         let job_action = EvacuateJob::new(
             String::new(),
-            Config::default().as_ref(),
+            &Config::default(),
             &Uuid::new_v4().to_string(),
             None,
         )
@@ -3882,7 +3893,7 @@ mod tests {
         // host/domain name is valid here.
         let job_action = EvacuateJob::new(
             String::new(),
-            Config::default().as_ref(),
+            &Config::default(),
             &Uuid::new_v4().to_string(),
             None,
         )
@@ -4012,7 +4023,7 @@ mod tests {
         // host/domain name is valid here.
         let job_action = EvacuateJob::new(
             String::new(),
-            Config::default().as_ref(),
+            &Config::default(),
             &Uuid::new_v4().to_string(),
             None,
         )
