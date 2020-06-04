@@ -363,7 +363,6 @@ impl Handler for JobCreateHandler {
         info!("Post Job Request");
 
         let config = self.config.lock().expect("config lock").clone();
-        let domain_name = config.domain_name.clone();
 
         // If snaplinks are still in play then we immediately return failure.
         if config.snaplink_cleanup_required {
@@ -401,11 +400,7 @@ impl Handler for JobCreateHandler {
                 };
 
                 let job = match job_builder
-                    .evacuate(
-                        evac_payload.from_shark,
-                        &domain_name,
-                        max_objects,
-                    )
+                    .evacuate(evac_payload.from_shark, max_objects)
                     .commit()
                 {
                     Ok(j) => j,
@@ -705,7 +700,7 @@ mod tests {
         let config = config.lock().expect("lock config").clone();
         let job_builder = JobBuilder::new(config);
         let job = job_builder
-            .evacuate(String::from("fake_storage_id"), "fake.joyent.us", None)
+            .evacuate(String::from("fake_storage_id"), None)
             .commit()
             .expect("Failed to create job");
         let job_id = job.get_id().to_string();
