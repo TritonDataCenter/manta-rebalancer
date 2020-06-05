@@ -847,7 +847,7 @@ fn download(
         Ok(resp) => resp,
         Err(e) => {
             error!("Request failed: {}", &e);
-            return Err(ObjectSkippedReason::NetworkError);
+            return Err(ObjectSkippedReason::SourceOtherError);
         }
     };
 
