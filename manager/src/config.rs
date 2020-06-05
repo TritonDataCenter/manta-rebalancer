@@ -86,7 +86,11 @@ impl Default for ConfigOptions {
 pub struct Config {
     pub domain_name: String,
 
-    pub shards: Vec<Shard>,
+    /// The `parse_config()` method sorts these shards by shard number.  If
+    /// this struct is created ad-hoc without parsing the config file directly
+    /// the `min_shard_num()` and `max_shard_num()` functions will not return
+    /// accurate values, so this field must remain private.
+    shards: Vec<Shard>,
 
     #[serde(default)]
     pub snaplink_cleanup_required: bool,
@@ -99,34 +103,14 @@ pub struct Config {
 }
 
 impl Config {
+    /// This method assumes the `shards: Vec<Shard>` is sorted.
     pub fn min_shard_num(&self) -> u32 {
-        let min_shard = self
-            .shards
-            .iter()
-            .min_by(|s, t| {
-                let s_num = util::shard_host2num(s.host.as_str());
-                let t_num = util::shard_host2num(t.host.as_str());
-
-                s_num.cmp(&t_num)
-            })
-            .expect("missing shard minimum");
-
-        util::shard_host2num(min_shard.host.as_str())
+        util::shard_host2num(self.shards.first().expect("first").host.as_str())
     }
 
+    /// This method assumes the `shards: Vec<Shard>` is sorted.
     pub fn max_shard_num(&self) -> u32 {
-        let max_shard = self
-            .shards
-            .iter()
-            .max_by(|s, t| {
-                let s_num = util::shard_host2num(s.host.as_str());
-                let t_num = util::shard_host2num(t.host.as_str());
-
-                s_num.cmp(&t_num)
-            })
-            .expect("missing shard maximum");
-
-        util::shard_host2num(max_shard.host.as_str())
+        util::shard_host2num(self.shards.last().expect("last").host.as_str())
     }
 
     fn default_port() -> u16 {
@@ -139,7 +123,14 @@ impl Config {
             .unwrap_or_else(|| DEFAULT_CONFIG_PATH.to_string());
         let file = File::open(config_path)?;
         let reader = BufReader::new(file);
-        let config: Config = serde_json::from_reader(reader)?;
+        let mut config: Config = serde_json::from_reader(reader)?;
+
+        // Both min_shard_num() and max_shard_num() depend on this vector
+        // being sorted.  Do not change or remove this line without making a
+        // complementary change to those two functions.
+        config.shards.sort_by_key(|s| {
+            util::shard_host2num(s.host.as_str())
+        });
 
         Ok(config)
     }
@@ -346,8 +337,7 @@ mod tests {
                     bld.insert_str("host", "1.fake.joyent.us")
                         .insert_bool("last", true)
                 })
-            })
-            .build();
+            }).build();
 
         update_test_config_with_vars(&vars)
     }
@@ -360,29 +350,52 @@ mod tests {
     #[test]
     fn min_max_shards() {
         unit_test_init();
-        let mut config = Config::default();
-        let shards = vec![
-            Shard {
-                host: "10.shard".to_string(),
-            },
-            Shard {
-                host: "3.shard".to_string(),
-            },
-            Shard {
-                host: "10.shard".to_string(),
-            },
-            Shard {
-                host: "10000.shard".to_string(),
-            },
-            Shard {
-                host: "999.shard".to_string(),
-            },
-        ];
+        std::fs::remove_file(TEST_CONFIG_FILE).unwrap_or(());
 
-        config.shards = shards;
+        let vars = MapBuilder::new()
+            .insert_str("DOMAIN_NAME", "fake.joyent.us")
+            .insert_bool("SNAPLINK_CLEANUP_REQUIRED", true)
+            .insert_vec("INDEX_MORAY_SHARDS", |builder| {
+                builder.push_map(|bld| {
+                    bld.insert_str("host", "3.fake.joyent.us")
+                        .insert_bool("last", true)
+                })
+            }).build();
+        let config = update_test_config_with_vars(&vars);
 
         assert_eq!(config.min_shard_num(), 3);
-        assert_eq!(config.max_shard_num(), 10000);
+        assert_eq!(config.max_shard_num(), 3);
+
+        let vars = MapBuilder::new()
+            .insert_str("DOMAIN_NAME", "fake.joyent.us")
+            .insert_bool("SNAPLINK_CLEANUP_REQUIRED", true)
+            .insert_vec("INDEX_MORAY_SHARDS", |builder| {
+                builder
+                    .push_map(|bld| {
+                        bld.insert_str("host", "99.fake.joyent.us")
+                    })
+                    .push_map(|bld| {
+                        bld.insert_str("host", "1000.fake.joyent.us")
+                    })
+                    .push_map(|bld| {
+                        bld.insert_str("host", "200.fake.joyent.us")
+                    })
+                    .push_map(|bld| {
+                        bld.insert_str("host", "100.fake.joyent.us")
+                    })
+                    .push_map(|bld| {
+                        bld
+                            .insert_str("host", "2.fake.joyent.us")
+                            .insert_bool("last", true)
+                    })
+            }).build();
+
+        let config = update_test_config_with_vars(&vars);
+
+        assert_eq!(config.min_shard_num(), 2);
+        assert_eq!(config.max_shard_num(), 1000);
+
+        config_fini();
     }
 
     #[test]
