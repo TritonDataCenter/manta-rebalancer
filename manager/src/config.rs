@@ -381,11 +381,11 @@ mod tests {
                         bld.insert_str("host", "200.fake.joyent.us")
                     })
                     .push_map(|bld| {
-                        bld.insert_str("host", "100.fake.joyent.us")
+                           bld.insert_str("host", "2.fake.joyent.us")
                     })
                     .push_map(|bld| {
                         bld
-                            .insert_str("host", "2.fake.joyent.us")
+                            .insert_str("host", "100.fake.joyent.us")
                             .insert_bool("last", true)
                     })
             }).build();
