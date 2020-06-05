@@ -866,13 +866,22 @@ impl EvacuateJob {
             .and_then(|dest_shark| {
                 let available_mb = dest_shark.shark.available_mb;
                 let assigned_mb = dest_shark.assigned_mb;
-                let percent = self.config.max_fill_percentage as f64 / 100.0;
+                let max_percent = self.config.max_fill_percentage as f64 /
+                    100.0;
+                let percent_used = dest_shark.shark.percent_used as f64 / 100.0;
+
+                assert!(percent_used <= 1 as f64);
+                assert!(max_percent <= 1 as f64);
+
+                let total_space = available_mb / (1 - percent_used);
+
+
 
                 match available_mb.checked_sub(assigned_mb) {
                     Some(space) => {
                         // 'as u64' will auto floor for us, but I want to be
                         // explicit here for future readers.
-                        Ok((space as f64 * percent).floor() as u64)
+                        Ok((space as f64 * max_percent).floor() as u64)
                     }
                     None => {
                         warn!(
