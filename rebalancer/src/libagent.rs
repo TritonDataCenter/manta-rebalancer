@@ -34,8 +34,8 @@ use libmanta::moray::MantaObjectShark;
 use crate::common::{AssignmentPayload, ObjectSkippedReason, Task, TaskStatus};
 use crate::metrics;
 use crate::metrics::{
-    counter_vec_inc, ConfigMetrics, MetricsMap, ERROR_COUNT, OBJECT_COUNT,
-    REQUEST_COUNT,
+    counter_inc_by, counter_vec_inc, ConfigMetrics, MetricsMap, BYTES_COUNT,
+    ERROR_COUNT, OBJECT_COUNT, REQUEST_COUNT,
 };
 
 use reqwest::{Client, StatusCode};
@@ -949,7 +949,7 @@ fn assignment_get(
     }
 }
 
-fn log_file_stats(task: &Task, uuid: &str) {
+fn log_file_stats(task: &Task, uuid: &str, metrics: &Option<MetricsMap>) {
     let path = manta_file_path(&task.owner, &task.object_id);
 
     // If this does not work for some unknown reason, it's not important
@@ -964,6 +964,10 @@ fn log_file_stats(task: &Task, uuid: &str) {
             return;
         }
     };
+
+    if let Some(m) = metrics.clone() {
+        counter_inc_by(&m, BYTES_COUNT, metadata.len());
+    }
 
     info!(
         "assignment: {}, owner: {}, object: {}, bytes: {}",
@@ -1010,7 +1014,7 @@ fn process_assignment_impl(
         // Update the total number of objects that have been processed, whether
         // successful or not.
         if let Some(m) = metrics.clone() {
-            // Note: The rebalncer agent does not currently break down this
+            // Note: The rebalancer agent does not currently break down this
             // metric by anything meaningful, so we don't supply a bucket.
             // That is, the only thing we track here is the total number of
             // objects processed.
@@ -1024,7 +1028,7 @@ fn process_assignment_impl(
 
         match t.status {
             TaskStatus::Complete => {
-                log_file_stats(&t, &uuid);
+                log_file_stats(&t, &uuid, &metrics);
             }
             TaskStatus::Failed(e) => {
                 if let Some(m) = metrics.clone() {

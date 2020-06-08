@@ -14,7 +14,8 @@ use hyper::StatusCode;
 use hyper::{Request, Response};
 use lazy_static::lazy_static;
 use prometheus::{
-    opts, register_counter_vec, CounterVec, Encoder, TextEncoder,
+    opts, register_counter, register_counter_vec, Counter, CounterVec, Encoder,
+    TextEncoder,
 };
 use serde_derive::Deserialize;
 use slog::{error, info, Logger};
@@ -24,6 +25,7 @@ pub type MetricsMap = HashMap<&'static str, Metrics>;
 pub static OBJECT_COUNT: &str = "object_count";
 pub static ERROR_COUNT: &str = "error_count";
 pub static REQUEST_COUNT: &str = "request_count";
+pub static BYTES_COUNT: &str = "bytes_count";
 
 #[derive(Clone, Deserialize)]
 pub struct ConfigMetrics {
@@ -55,6 +57,7 @@ impl Default for ConfigMetrics {
 #[derive(Clone)]
 pub enum Metrics {
     MetricsCounterVec(CounterVec),
+    MetricsCounter(Counter),
 }
 
 lazy_static! {
@@ -91,6 +94,23 @@ pub fn counter_vec_inc_by<S: ::std::hash::BuildHasher>(
                 if let Some(b) = bucket {
                     c.with_label_values(&[b]).inc_by(num);
                 }
+            }
+        }
+        None => error!(slog_scope::logger(), "Invalid metric: {}", key),
+    }
+}
+
+#[allow(irrefutable_let_patterns)]
+pub fn counter_inc_by<S: ::std::hash::BuildHasher>(
+    metrics: &HashMap<&'static str, Metrics, S>,
+    key: &str,
+    val: u64,
+) {
+    let num = val as f64;
+    match metrics.get(key) {
+        Some(metric) => {
+            if let Metrics::MetricsCounter(c) = metric {
+                c.inc_by(num);
             }
         }
         None => error!(slog_scope::logger(), "Invalid metric: {}", key),
@@ -154,12 +174,22 @@ pub fn register_metrics(labels: &ConfigMetrics) -> MetricsMap {
     // encounter and in the event that there are too many possibilities, only
     // track certain error types and maintain the rest in a generic bucket.
     let error_counter = register_counter_vec!(
-        opts!(ERROR_COUNT, "Errors encountered.").const_labels(const_labels),
+        opts!(ERROR_COUNT, "Errors encountered.")
+            .const_labels(const_labels.clone()),
         &["error"]
     )
     .expect("failed to register error_count counter");
 
     metrics.insert(ERROR_COUNT, Metrics::MetricsCounterVec(error_counter));
+
+    // Track total number of bytes transferred.
+    let bytes_counter =
+        register_counter!(
+            opts!(BYTES_COUNT, "Bytes transferred.").const_labels(const_labels)
+        )
+        .expect("failed to register bytes_count counter");
+
+    metrics.insert(BYTES_COUNT, Metrics::MetricsCounter(bytes_counter));
 
     metrics
 }
