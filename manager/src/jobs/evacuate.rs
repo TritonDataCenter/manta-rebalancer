@@ -953,11 +953,14 @@ impl EvacuateJob {
                 self.update_dest_sharks(&valid_sharks);
             }
 
+            // Turn the shark hash into a list, and filter out any
+            // unavailable sharks.
             shark_list = self
                 .dest_shark_hash
                 .read()
                 .expect("dest_shark_hash read lock")
                 .values()
+                .filter(|v| v.status != DestSharkStatus::Unavailable)
                 .map(|v| v.to_owned())
                 .collect();
 
@@ -1813,8 +1816,8 @@ fn _calculate_available_mb(
         .checked_sub(used_mb.floor() as u64)
         .unwrap_or_else(|| {
             let msg = format!(
-                "used_mb({}) > max_fill_mb({}) for {:#?}",
-                used_mb, max_fill_mb, dest_shark
+                "used_mb({}) > max_fill_mb({}) for max_fill({}): {:#?}",
+                used_mb, max_fill_mb, max_percent, dest_shark
             );
             panic!(msg);
         });
@@ -3747,11 +3750,13 @@ mod tests {
         task.set_status(TaskStatus::Complete);
     }
 
+    // TODO: need some more reasonable ranges here.  We will panic in the
+    // event that we hit objects above 1000 zetabytes
     fn generate_storage_node(local: bool) -> StorageNode {
         let mut rng = rand::thread_rng();
         let mut g = StdThreadGen::new(100);
         let available_mb: u64 = rng.gen();
-        let percent_used: u8 = rng.gen_range(0, 101);
+        let percent_used: u8 = rng.gen_range(0, 50);
         let filesystem = random_string(&mut g, rng.gen_range(1, 20));
         let datacenter = random_string(&mut g, rng.gen_range(1, 20));
         let manta_storage_id = match local {
@@ -3784,7 +3789,7 @@ mod tests {
         test_objects: HashMap<String, MantaObject>,
     ) -> thread::JoinHandle<()> {
         thread::Builder::new()
-            .name(String::from("no skip object_generator_test"))
+            .name(String::from("test object generator thread"))
             .spawn(move || {
                 for (id, o) in test_objects.into_iter() {
                     let size = _get_size_from_content_length(o.content_length)
@@ -4057,9 +4062,12 @@ mod tests {
 
         let (_, update_rx) = crossbeam_channel::unbounded();
         let from_shark = String::from("1.stor.domain");
+        let mut config = Config::default();
+        config.max_fill_percentage = 100;
+
         let job_action = EvacuateJob::new(
             from_shark,
-            &Config::default(),
+            &config,
             &Uuid::new_v4().to_string(),
             Some(update_rx),
             Some(100),
@@ -4120,39 +4128,8 @@ mod tests {
         )
         .expect("start assignment manager");
 
-        let builder = thread::Builder::new();
-        let obj_generator_th = builder
-            .name(String::from("no skip object_generator_test"))
-            .spawn(move || {
-                for (id, o) in test_objects_copy.into_iter() {
-                    let size = _get_size_from_content_length(o.content_length)
-                        .unwrap_or(0);
-                    let shard = 1;
-                    let etag = String::from("Fake_etag");
-                    let mobj_value =
-                        serde_json::to_value(o.clone()).expect("mobj value");
-
-                    let eobj = EvacuateObject::from_parts(
-                        mobj_value,
-                        id.clone(),
-                        size,
-                        etag,
-                        shard,
-                    );
-                    match obj_tx.send(eobj) {
-                        Ok(()) => (),
-                        Err(e) => {
-                            error!(
-                                "Could not send object.  Assignment \
-                                 generator must have shutdown {}.",
-                                e
-                            );
-                            break;
-                        }
-                    }
-                }
-            })
-            .expect("failed to build object generator thread");
+        let generator_thread_handle =
+            start_test_obj_generator_thread(obj_tx, test_objects_copy);
 
         let verification_objects = test_objects.clone();
         let builder = thread::Builder::new();
@@ -4211,8 +4188,12 @@ mod tests {
             })
             .expect("verification thread");
 
-        verification_thread.join().expect("verification join TODO");
-        obj_generator_th.join().expect("obj_gen thr join TODO");
+        verification_thread
+            .join()
+            .expect("verification join");
+        generator_thread_handle
+            .join()
+            .expect("obj_gen thr join");
 
         // mark all assignments as post processed so that the checker thread
         // can exit.
