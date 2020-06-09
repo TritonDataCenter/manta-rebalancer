@@ -32,11 +32,7 @@ use joyent_rust_utils::file::calculate_md5;
 use libmanta::moray::MantaObjectShark;
 
 use crate::common::{AssignmentPayload, ObjectSkippedReason, Task, TaskStatus};
-use crate::metrics;
-use crate::metrics::{
-    counter_inc_by, counter_vec_inc, ConfigMetrics, MetricsMap, BYTES_COUNT,
-    ERROR_COUNT, OBJECT_COUNT, REQUEST_COUNT,
-};
+use crate::metrics::{self, *};
 
 use reqwest::{Client, StatusCode};
 use rusqlite;
@@ -965,9 +961,7 @@ fn log_file_stats(task: &Task, uuid: &str, metrics: &Option<MetricsMap>) {
         }
     };
 
-    if let Some(m) = metrics.clone() {
-        counter_inc_by(&m, BYTES_COUNT, metadata.len());
-    }
+    agent_counter_inc_by(&metrics, BYTES_COUNT, metadata.len());
 
     info!(
         "assignment: {}, owner: {}, object: {}, bytes: {}",
@@ -1225,4 +1219,25 @@ fn create_dir(dirname: &str) {
     if let Err(e) = fs::create_dir_all(dirname) {
         panic!("Error creating directory {}", e);
     }
+}
+
+// The rebalancer agent has a unique feature where it can be started without
+// metrics.  That is, metrics are optional.  This is largely due to the fact
+// that it is not necessary to have metrics when running the agent as a thread
+// within the rebalancer manager unit test code.  To avoid the tedious
+// scaffolding of checking whether we have metrics or not before incrementing a
+// counter, we wrap it in this function which does it for us.
+pub fn agent_counter_inc_by<S: ::std::hash::BuildHasher>(
+    metrics: &Option<HashMap<&'static str, Metrics, S>>,
+    key: &str,
+    val: u64,
+) {
+    let map = match metrics {
+        Some(m) => m,
+        None => {
+            return;
+        }
+    };
+
+    counter_inc_by(&map, key, val);
 }
