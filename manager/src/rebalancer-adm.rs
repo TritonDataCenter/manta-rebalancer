@@ -8,13 +8,10 @@
  * Copyright 2020 Joyent, Inc.
  */
 
-use clap::{App, AppSettings, Arg, ArgMatches, SubCommand};
-use failure::_core::num::ParseIntError;
+use clap::{App, AppSettings, Arg, ArgMatches};
 use manager::jobs::{EvacuateJobPayload, JobPayload};
 use reqwest;
-use serde::Serialize;
 use serde_json::Value;
-use std::error::Error;
 use std::result::Result;
 
 pub static JOBS_URL: &str = "http://localhost/jobs";
@@ -118,47 +115,6 @@ fn job_create_evacuate(matches: &ArgMatches) -> Result<(), String> {
     Ok(())
 }
 
-#[derive(Serialize)]
-struct SetMetadataThreadsGeneric {
-    action: String,
-    params: usize,
-}
-
-impl SetMetadataThreadsGeneric {
-    fn new(num_threads: usize) -> Self {
-        Self {
-            action: "set_metadata_threads".into(),
-            params: num_threads,
-        }
-    }
-}
-
-fn job_set_threads(matches: &ArgMatches) -> Result<(), String> {
-    let num_threads = matches
-        .value_of("num_threads")
-        .ok_or_else(|| "missing num_threads")?
-        .parse()
-        .map_err(|e: ParseIntError| e.description().to_string())?;
-    let uuid = matches.value_of("uuid").ok_or_else(|| "missing uuid")?;
-    let put_url = format!("{}/{}", JOBS_URL, uuid);
-    let payload =
-        serde_json::to_string(&SetMetadataThreadsGeneric::new(num_threads))
-            .expect("serialize payload");
-
-    let client = reqwest::Client::new();
-    let response = match client.put(put_url.as_str()).body(payload).send() {
-        Ok(resp) => resp,
-        Err(e) => return Err(format!("Failed to post job: {}", &e)),
-    };
-
-    // Flag failure if we get a status code of anything other than 200.
-    if !response.status().is_success() {
-        return Err(format!("Server response: {}", response.status()));
-    }
-
-    Ok(())
-}
-
 // The `job' subcommand currently requires one of three different primary
 // arguments.  While there are other arguments that might accompany the
 // ones listed below, those are parsed separately depending on which of
@@ -168,9 +124,6 @@ fn process_subcmd_job(job_matches: &ArgMatches) -> Result<(), String> {
         ("get", Some(get_matches)) => job_get(get_matches),
         ("list", Some(_)) => get_common(JOBS_URL),
         ("create", Some(create_matches)) => job_create(create_matches),
-        ("set-threads", Some(set_threads_matches)) => {
-            job_set_threads(set_threads_matches)
-        }
         _ => unreachable!(),
     }
 }
@@ -194,20 +147,6 @@ fn main() -> Result<(), String> {
                 .help("Maximum number of objects allowed in the job"),
         );
 
-    let set_threads = SubCommand::with_name("set-threads")
-        .about("Set number of metadata update threads")
-        .setting(AppSettings::ArgRequiredElseHelp)
-        .arg(
-            Arg::with_name("uuid")
-                .required(true)
-                .help("number of metadata update threads"),
-        )
-        .arg(
-            Arg::with_name("num_threads")
-                .required(true)
-                .help("number of metadata update threads"),
-        );
-
     let matches = App::new("rebalancer-adm")
         .setting(AppSettings::SubcommandRequiredElseHelp)
         .version("0.1.0")
@@ -216,7 +155,6 @@ fn main() -> Result<(), String> {
             App::new("job")
                 .setting(AppSettings::SubcommandRequiredElseHelp)
                 .about("Job operations")
-                .subcommand(set_threads)
                 // Get subcommand
                 .subcommand(
                     App::new("get")
