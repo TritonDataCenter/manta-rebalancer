@@ -20,7 +20,7 @@ use std::sync::{
 use std::thread::JoinHandle;
 use std::{thread, time};
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Default, Serialize, Deserialize, Clone)]
 pub struct StorageNode {
     #[serde(alias = "availableMB")]
     pub available_mb: u64,
