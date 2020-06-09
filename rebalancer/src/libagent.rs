@@ -1227,11 +1227,7 @@ fn create_dir(dirname: &str) {
 // within the rebalancer manager unit test code.  To avoid the tedious
 // scaffolding of checking whether we have metrics or not before incrementing a
 // counter, we wrap it in this function which does it for us.
-pub fn agent_counter_inc_by<S: ::std::hash::BuildHasher>(
-    metrics: &Option<HashMap<&'static str, Metrics, S>>,
-    key: &str,
-    val: u64,
-) {
+pub fn agent_counter_inc_by(metrics: &Option<MetricsMap>, key: &str, val: u64) {
     let map = match metrics {
         Some(m) => m,
         None => {
