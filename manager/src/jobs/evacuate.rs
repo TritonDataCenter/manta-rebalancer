@@ -3162,7 +3162,6 @@ fn metadata_update_broker_dynamic(
         job_action.options.max_metadata_update_threads,
     );
     let queue = Arc::new(Injector::<DyanmicWorkerMsg>::new());
-    let queue_back = Arc::clone(&queue);
     let update_rx = match &job_action.update_rx {
         Some(urx) => urx.clone(),
         None => panic!(
@@ -3178,7 +3177,7 @@ fn metadata_update_broker_dynamic(
                     debug!("Received metadata update message: {:#?}", msg);
                     update_dynamic_metadata_threads(
                         &mut pool,
-                        &queue_back,
+                        &queue,
                         &mut max_thread_count,
                         msg,
                     );
@@ -3188,7 +3187,7 @@ fn metadata_update_broker_dynamic(
                     Err(e) => {
                         // If the queue is empty and there are no active or
                         // queued threads, kick one off to drain the queue.
-                        if !queue_back.is_empty()
+                        if !queue.is_empty()
                             && pool.active_count() == 0
                             && pool.queued_count() == 0
                         {
@@ -3208,7 +3207,7 @@ fn metadata_update_broker_dynamic(
                     }
                 };
 
-                queue_back.push(DyanmicWorkerMsg::Data(ace));
+                queue.push(DyanmicWorkerMsg::Data(ace));
 
                 // If all the pools threads are devoted to workers there's
                 // really no reason to queue up a new worker.
