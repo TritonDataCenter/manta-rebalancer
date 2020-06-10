@@ -66,7 +66,6 @@ type MorayClientHash = HashMap<u32, MorayClient>;
 
 // --- Diesel Stuff, TODO This should be refactored --- //
 
-use crate::jobs::evacuate::AssignmentAddObjectError::BadMantaObject;
 use diesel::deserialize::{self, FromSql};
 use diesel::pg::{Pg, PgConnection, PgValue};
 use diesel::prelude::*;
@@ -2459,7 +2458,7 @@ fn add_object_to_assignment(
                     &eobj.id,
                     EvacuateObjectError::BadMantaObject,
                 );
-                return Err(BadMantaObject);
+                return Err(AssignmentAddObjectError::BadMantaObject);
             }
         };
 
