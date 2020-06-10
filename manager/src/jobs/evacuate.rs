@@ -54,6 +54,7 @@ use moray::objects::{
 };
 use quickcheck::{Arbitrary, Gen};
 use quickcheck_helpers::random::string as random_string;
+use rand::seq::SliceRandom;
 use reqwest;
 use serde::{self, Deserialize, Serialize};
 use serde_json::Value;
@@ -2183,14 +2184,8 @@ where
             // shark.  In such a case, if we dont shuffle, the evacuate
             // job could take much longer as every object would go to a
             // single shark.
-
-            /* Old and busted
             let mut rng = rand::thread_rng();
             shark_list.as_mut_slice().shuffle(&mut rng);
-            */
-
-            // New hotness
-            shark_list.sort_by_key(|es| es.assigned_mb);
 
             let shark_list: Vec<StorageNode> =
                 shark_list.into_iter().map(|s| s.shark).collect();
@@ -2578,7 +2573,6 @@ fn shark_assignment_generator(
         // TODO: get any objects from the DB that were previously supposed to
         // be assigned to this shark but the shark was busy at that time.
 
-        // TODO: refactor this
         while !stop {
             // An assignment message is either:
             // Stop
