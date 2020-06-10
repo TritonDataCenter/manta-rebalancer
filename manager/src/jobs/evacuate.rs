@@ -1649,7 +1649,6 @@ impl ProcessAssignment for EvacuateJob {
             &agent_assignment.stats.state
         );
 
-        let mut total_size = 0;
         match agent_assignment.stats.state {
             AgentAssignmentState::Scheduled | AgentAssignmentState::Running => {
                 warn!(
@@ -1668,8 +1667,8 @@ impl ProcessAssignment for EvacuateJob {
                     EvacuateObjectStatus::PostProcessing,
                 );
                 ace.state = AssignmentState::AgentComplete;
-                total_size = ace.total_size;
             }
+
             AgentAssignmentState::Complete(Some(failed_tasks)) => {
                 let objects = self.load_assignment_objects(
                     &ace.id,
@@ -1694,8 +1693,6 @@ impl ProcessAssignment for EvacuateJob {
                         !failed_tasks.iter().any(|ft| ft.object_id == obj.id)
                     })
                     .map(|obj| {
-                        assert!(obj.size >= 0);
-                        total_size += obj.size as u64;
                         obj.id.clone()
                     })
                     .collect();
@@ -1711,7 +1708,7 @@ impl ProcessAssignment for EvacuateJob {
         }
         self.mark_dest_shark_ready(
             &ace.dest_shark.manta_storage_id,
-            total_size,
+            ace.total_size,
         );
 
         Ok(())
