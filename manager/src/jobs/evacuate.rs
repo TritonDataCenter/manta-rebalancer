@@ -432,7 +432,7 @@ impl EvacuateObject {
 #[derive(Clone, Debug, PartialEq)]
 pub enum DestSharkStatus {
     Init,
-    Assigned, // Can we remove this?
+    Assigned,
     Ready,
     Unavailable,
 }
@@ -875,8 +875,7 @@ impl EvacuateJob {
     }
 
     /// Iterate over a new set of storage nodes and update our destination
-    /// shark list accordingly.  This may need to change so that we update
-    /// available_mb more judiciously (i.e. based on timestamp).
+    /// shark hash accordingly.
     fn update_dest_sharks(&self, new_sharks: &[StorageNode]) {
         let mut dest_shark_hash = self
             .dest_shark_hash
