@@ -3753,17 +3753,29 @@ mod tests {
     // TODO: need some more reasonable ranges here.  We will panic in the
     // event that we hit objects above 1000 zetabytes
     fn generate_storage_node(local: bool) -> StorageNode {
+        // Init rand
         let mut rng = rand::thread_rng();
         let mut g = StdThreadGen::new(100);
-        let available_mb: u64 = rng.gen();
-        let percent_used: u8 = rng.gen_range(0, 50);
+
+        // calculate random fields
+        let timestamp: u64 = rng.gen();
         let filesystem = random_string(&mut g, rng.gen_range(1, 20));
         let datacenter = random_string(&mut g, rng.gen_range(1, 20));
         let manta_storage_id = match local {
             true => String::from("localhost"),
             false => format!("{}.stor.joyent.us", rng.gen_range(1, 100)),
         };
-        let timestamp: u64 = rng.gen();
+
+        // We set available_mb to a max of u64::MAX/100 because we calculate
+        // the total storage space by available_mb / (1 - percent_used), and
+        // if available_mb gets randomly set to something very close to
+        // std::u64::MAX, we don't want to divide by a (1 - percent_used)
+        // that is less than 1 (i.e. percent_used == 0), or else we will
+        // overflow u64.  In the code we will panic if this happens, which is
+        // the right thing to do because std::u64::MAX MB works out to be
+        // > 18,000 Zetabytes... on a single storage node.
+        let available_mb: u64 = rng.gen_range(0, std::u64::MAX / 100);
+        let percent_used: u8 = rng.gen_range(0, 100);
 
         StorageNode {
             available_mb,
@@ -3782,6 +3794,31 @@ mod tests {
             ret.push(generate_storage_node(local_only));
         }
         ret
+    }
+
+    fn create_test_evacuate_job() -> EvacuateJob {
+        let mut config = Config::default();
+        let from_shark = String::from("1.stor.domain");
+
+        config.max_fill_percentage = 100;
+
+        let (_, update_rx) = crossbeam_channel::unbounded();
+        let mut job_action = EvacuateJob::new(
+            from_shark,
+            &config,
+            &Uuid::new_v4().to_string(),
+            Some(update_rx),
+            Some(100),
+        ).expect("initialize evacuate job");
+
+        // Manually set the datacenter so that our destination validation
+        // allows for same DC transfer.  This is normally done in
+        // EvacuateJob::validate(), but that calls into moray to get the DC
+        // name.
+        job_action.from_shark.datacenter = "dc1".into();
+        assert!(job_action.create_table().is_ok());
+
+        job_action
     }
 
     fn start_test_obj_generator_thread(
@@ -3899,25 +3936,9 @@ mod tests {
         let storinfo = MockStorinfo::new();
         let storinfo = Arc::new(storinfo);
 
-        // config
-        let mut config = Config::default();
-        config.max_fill_percentage = 90;
+        let mut job_action = create_test_evacuate_job();
+        job_action.config.max_fill_percentage = 90;
 
-        // Job action
-        let from_shark = String::from("1.stor.domain");
-        let mut job_action = EvacuateJob::new(
-            from_shark,
-            &config,
-            &Uuid::new_v4().to_string(),
-            Some(100),
-        )
-        .expect("initialize evacuate job");
-
-        // Manually set the datacenter so that our destination validation
-        // allows for same DC transfer.  This is normally done in
-        // EvacuateJob::validate().
-        job_action.from_shark.datacenter = "dc1".into();
-        assert!(job_action.create_table().is_ok());
         let job_action = Arc::new(job_action);
 
         // Generate 100 x 1MiB objects for a total of 100MiB.
@@ -4051,7 +4072,7 @@ mod tests {
                         let str_len = rand::thread_rng().gen_range(1, 50);
                         shark.datacenter = random_string(&mut g, str_len);
                     } else {
-                        shark.datacenter = String::from("foo");
+                        shark.datacenter = String::from("dc1");
                     }
 
                     sharks.push(shark);
@@ -4060,25 +4081,12 @@ mod tests {
             }
         }
 
-        let (_, update_rx) = crossbeam_channel::unbounded();
-        let from_shark = String::from("1.stor.domain");
-        let mut config = Config::default();
-        config.max_fill_percentage = 100;
+        let job_action = Arc::new(create_test_evacuate_job());
 
-        let job_action = EvacuateJob::new(
-            from_shark,
-            &config,
-            &Uuid::new_v4().to_string(),
-            Some(update_rx),
-            Some(100),
-        )
-        .expect("initialize evacuate job");
-        assert!(job_action.create_table().is_ok());
-
-        let job_action = Arc::new(job_action);
         let storinfo = NoSkipStorinfo::new();
         let storinfo = Arc::new(storinfo);
 
+        let (_, update_rx) = crossbeam_channel::unbounded();
         let (full_assignment_tx, full_assignment_rx) = crossbeam::bounded(5);
         let (obj_tx, obj_rx) = crossbeam::bounded(5);
         let (checker_fini_tx, checker_fini_rx) = crossbeam::bounded(1);
@@ -4101,7 +4109,7 @@ mod tests {
                 let shark_num = rng.gen_range(1 + i * 2, 3 + i * 2);
 
                 let shark = MantaObjectShark {
-                    datacenter: String::from("foo"), //todo
+                    datacenter: String::from("dc1"), //todo
                     manta_storage_id: format!("{}.stor.domain", shark_num),
                 };
                 sharks.push(shark);
@@ -4167,23 +4175,40 @@ mod tests {
                     println!("Task COUNT {}", task_count);
                 }
 
-                use self::evacuateobjects::dsl::{evacuateobjects, status};
+                use self::evacuateobjects::dsl::{evacuateobjects, status, skipped_reason};
                 let locked_conn =
                     verif_job_action.conn.lock().expect("DB conn");
-                let records: Vec<EvacuateObject> = evacuateobjects
+
+                let skipped: Vec<EvacuateObject> = evacuateobjects
                     .filter(status.eq(EvacuateObjectStatus::Skipped))
                     .load::<EvacuateObject>(&*locked_conn)
                     .expect("getting skipped objects");
-                let skip_count = records.len();
 
+                let insufficient_space: Vec<EvacuateObject> = evacuateobjects
+                    .filter(skipped_reason.eq(ObjectSkippedReason::DestinationInsufficientSpace))
+                    .load::<EvacuateObject>(&*locked_conn)
+                    .expect("getting skipped objects");
+
+                let skip_count = skipped.len();
+                let insufficient_space_skips = insufficient_space.len();
+
+                // Because we are using random sizes for objects and storage
+                // node available MB we will hit many destination
+                // insufficient space skips.  In production, that shouldn't
+                // happen that often as we should rarely be in a situation
+                // where all of our destination storage nodes are so close
+                // to full.
+                println!("Num Objects: {}", num_objects);
                 println!("Assignment Count: {}", assignment_count);
                 println!("Task Count: {}", task_count);
+                println!("Total skips: {}", skip_count);
+                println!("Insufficient space skips: {}",
+                         insufficient_space_skips);
                 println!(
-                    "Skip Count: {} (this should be a fairly small \
+                    "Other Skip Count: {} (this should be a fairly small \
                      percentage of Num Objects)",
-                    skip_count
+                    skip_count - insufficient_space_skips
                 );
-                println!("Num Objects: {}", num_objects);
                 assert_eq!(task_count + skip_count, num_objects);
             })
             .expect("verification thread");
@@ -4214,19 +4239,9 @@ mod tests {
     fn assignment_processing_test() {
         unit_test_init();
         let mut g = StdThreadGen::new(10);
+
         let (_, update_rx) = crossbeam_channel::unbounded();
-        let job_action = EvacuateJob::new(
-            String::new(),
-            &Config::default(),
-            &Uuid::new_v4().to_string(),
-            Some(update_rx),
-            None,
-        )
-        .expect("initialize evacuate job");
-
-        // Create the database table
-        assert!(job_action.create_table().is_ok());
-
+        let job_action = create_test_evacuate_job();
         // Create a vector to hold the evacuate objects and a new assignment.
         let mut eobjs = vec![];
         let mut assignment = Assignment::new(StorageNode::arbitrary(&mut g));
@@ -4347,17 +4362,7 @@ mod tests {
         let (_, obj_rx) = crossbeam::bounded(5);
         let (_, update_rx) = crossbeam_channel::unbounded();
 
-        // These tests are run locally and don't go out over the network so any properly formatted
-        // host/domain name is valid here.
-        let job_action = EvacuateJob::new(
-            String::new(),
-            &Config::default(),
-            &Uuid::new_v4().to_string(),
-            Some(update_rx),
-            None,
-        )
-        .expect("initialize evacuate job");
-        let job_action = Arc::new(job_action);
+        let job_action = Arc::new(create_test_evacuate_job());
 
         let assignment_manager_handle = match start_assignment_manager(
             full_assignment_tx,
@@ -4492,30 +4497,22 @@ mod tests {
         }
 
         let now = std::time::Instant::now();
+
+        // Storinfo
         let storinfo = MockStorinfo::new();
         let storinfo = Arc::new(storinfo);
 
+        // Channels
         let (full_assignment_tx, full_assignment_rx) = crossbeam::bounded(5);
         let (obj_tx, obj_rx) = crossbeam::bounded(5);
         let (md_update_tx, md_update_rx) = crossbeam::bounded(5);
         let (checker_fini_tx, checker_fini_rx) = crossbeam::bounded(1);
         let (_, update_rx) = crossbeam_channel::unbounded();
 
-        // These tests are run locally and don't go out over the network so any properly formatted
-        // host/domain name is valid here.
-        let job_action = EvacuateJob::new(
-            String::new(),
-            &Config::default(),
-            &Uuid::new_v4().to_string(),
-            Some(update_rx),
-            None,
-        )
-        .expect("initialize evacuate job");
+        // Job Action
+        let job_action = Arc::new(create_test_evacuate_job());
 
-        // Create the database table
-        assert!(job_action.create_table().is_ok());
-
-        let job_action = Arc::new(job_action);
+        // Test Objects
         let mut test_objects = HashMap::new();
         let mut g = StdThreadGen::new(10);
         let num_objects = 100;
@@ -4525,6 +4522,7 @@ mod tests {
             test_objects.insert(mobj.object_id.clone(), mobj);
         }
 
+        // Threads
         let obj_generator_th =
             start_test_obj_generator_thread(obj_tx, test_objects.clone());
 
