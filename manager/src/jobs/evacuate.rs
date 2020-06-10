@@ -1693,9 +1693,7 @@ impl ProcessAssignment for EvacuateJob {
                     .filter(|obj| {
                         !failed_tasks.iter().any(|ft| ft.object_id == obj.id)
                     })
-                    .map(|obj| {
-                        obj.id.clone()
-                    })
+                    .map(|obj| obj.id.clone())
                     .collect();
 
                 self.mark_many_task_objects_skipped(failed_tasks);
@@ -2635,10 +2633,10 @@ fn shark_assignment_generator(
                         Err(e) => match e {
                             AssignmentAddObjectError::BadMantaObject |
                             AssignmentAddObjectError::SouceIsEvacShark => {
-                                // We either skipped or errored and object
-                                // but it was the objects fault so we should
+                                // We either skipped or errored on an object,
+                                // but it was the object's fault so we should
                                 // continue trying to add other objects to this
-                                // shark
+                                // assignment, for this shark.
 
                                 continue;
                             }
@@ -3798,7 +3796,8 @@ mod tests {
             &Uuid::new_v4().to_string(),
             Some(update_rx),
             Some(100),
-        ).expect("initialize evacuate job");
+        )
+        .expect("initialize evacuate job");
 
         // Manually set the datacenter so that our destination validation
         // allows for same DC transfer.  This is normally done in
@@ -4164,7 +4163,9 @@ mod tests {
                     println!("Task COUNT {}", task_count);
                 }
 
-                use self::evacuateobjects::dsl::{evacuateobjects, status, skipped_reason};
+                use self::evacuateobjects::dsl::{
+                    evacuateobjects, skipped_reason, status,
+                };
                 let locked_conn =
                     verif_job_action.conn.lock().expect("DB conn");
 
@@ -4173,10 +4174,13 @@ mod tests {
                     .load::<EvacuateObject>(&*locked_conn)
                     .expect("getting skipped objects");
 
-                let insufficient_space: Vec<EvacuateObject> = evacuateobjects
-                    .filter(skipped_reason.eq(ObjectSkippedReason::DestinationInsufficientSpace))
-                    .load::<EvacuateObject>(&*locked_conn)
-                    .expect("getting skipped objects");
+                let insufficient_space: Vec<EvacuateObject> =
+                    evacuateobjects
+                        .filter(skipped_reason.eq(
+                            ObjectSkippedReason::DestinationInsufficientSpace,
+                        ))
+                        .load::<EvacuateObject>(&*locked_conn)
+                        .expect("getting skipped objects");
 
                 let skip_count = skipped.len();
                 let insufficient_space_skips = insufficient_space.len();
@@ -4191,8 +4195,10 @@ mod tests {
                 println!("Assignment Count: {}", assignment_count);
                 println!("Task Count: {}", task_count);
                 println!("Total skips: {}", skip_count);
-                println!("Insufficient space skips: {}",
-                         insufficient_space_skips);
+                println!(
+                    "Insufficient space skips: {}",
+                    insufficient_space_skips
+                );
                 println!(
                     "Other Skip Count: {} (this should be a fairly small \
                      percentage of Num Objects)",
