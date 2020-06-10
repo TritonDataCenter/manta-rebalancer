@@ -4188,12 +4188,8 @@ mod tests {
             })
             .expect("verification thread");
 
-        verification_thread
-            .join()
-            .expect("verification join");
-        generator_thread_handle
-            .join()
-            .expect("obj_gen thr join");
+        verification_thread.join().expect("verification join");
+        generator_thread_handle.join().expect("obj_gen thr join");
 
         // mark all assignments as post processed so that the checker thread
         // can exit.
@@ -4520,51 +4516,17 @@ mod tests {
         assert!(job_action.create_table().is_ok());
 
         let job_action = Arc::new(job_action);
-        let mut test_objects = vec![];
+        let mut test_objects = HashMap::new();
         let mut g = StdThreadGen::new(10);
         let num_objects = 100;
 
         for _ in 0..num_objects {
             let mobj = MantaObject::arbitrary(&mut g);
-            test_objects.push(mobj);
+            test_objects.insert(mobj.object_id.clone(), mobj);
         }
 
-        let test_objects_copy = test_objects.clone();
-
-        let builder = thread::Builder::new();
-        let obj_generator_th = builder
-            .name(String::from("object_generator_test"))
-            .spawn(move || {
-                for o in test_objects_copy.into_iter() {
-                    let shard = 1;
-                    let size = _get_size_from_content_length(o.content_length)
-                        .unwrap_or(0);
-                    let etag = String::from("Fake_etag");
-                    let mobj_value =
-                        serde_json::to_value(o.clone()).expect("mobj value");
-
-                    let id = o.object_id;
-                    let eobj = EvacuateObject::from_parts(
-                        mobj_value,
-                        id.clone(),
-                        size,
-                        etag,
-                        shard,
-                    );
-                    match obj_tx.send(eobj) {
-                        Ok(()) => (),
-                        Err(e) => {
-                            error!(
-                                "Could not send object.  Assignment \
-                                 generator must have shutdown {}.",
-                                e
-                            );
-                            break;
-                        }
-                    }
-                }
-            })
-            .expect("failed to build object generator thread");
+        let obj_generator_th =
+            start_test_obj_generator_thread(obj_tx, test_objects.clone());
 
         let metadata_update_thread =
             start_metadata_update_broker(Arc::clone(&job_action), md_update_rx)
