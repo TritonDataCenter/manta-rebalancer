@@ -838,8 +838,7 @@ fn download(
     object: &str,
     csum: &str,
     client: &Client,
-    metrics: &Option<MetricsMap>,
-) -> Result<(), ObjectSkippedReason> {
+) -> Result<(u64), ObjectSkippedReason> {
     let mut response = match client.get(uri).send() {
         Ok(resp) => resp,
         Err(e) => {
@@ -860,13 +859,8 @@ fn download(
     let tmp_path = manta_tmp_path(owner, object);
     let mut file = file_create(&tmp_path);
 
-    match std::io::copy(&mut response, &mut file) {
-        Ok(bytes) => {
-            if let Some(m) = metrics.clone() {
-                counter_inc_by(&m, BYTES_COUNT, bytes);
-            }
-            info!("owner: {}, object: {}, bytes: {}", owner, object, bytes);
-        }
+    let bytes = match std::io::copy(&mut response, &mut file) {
+        Ok(b) => b,
         Err(e) => {
             error!("Failed to complete object download: {}:{}", uri, e);
             return Err(ObjectSkippedReason::AgentFSError);
@@ -874,7 +868,7 @@ fn download(
     };
 
     if calculate_md5(&tmp_path) == csum {
-        Ok(())
+        Ok(bytes)
     } else {
         error!("Checksum failed for {}/{}.", owner, object);
         Err(ObjectSkippedReason::MD5Mismatch)
@@ -919,9 +913,17 @@ pub fn process_task(
         &task.object_id,
         &task.md5sum,
         client,
-        &metrics,
     ) {
-        Ok(_) => {
+        Ok(bytes) => {
+            if let Some(m) = metrics.clone() {
+                counter_inc_by(&m, BYTES_COUNT, bytes);
+            }
+
+            info!(
+                "owner: {}, object: {}, bytes: {}",
+                &task.owner, &task.object_id, bytes
+            );
+
             // Upon successful download, move the temprorary object to its
             // rightful location (i.e. /manta/account/object).
             let manta_path = manta_file_path(&task.owner, &task.object_id);
@@ -956,31 +958,6 @@ fn assignment_get(
     }
 }
 
-fn log_file_stats(task: &Task, uuid: &str) {
-    let path = manta_file_path(&task.owner, &task.object_id);
-
-    // If this does not work for some unknown reason, it's not important
-    // enough to stop everything.  Log the failure and move on.
-    let metadata = match fs::metadata(&path) {
-        Ok(md) => md,
-        Err(e) => {
-            error!(
-                "Failed to get object metadata for {}/{}: {}",
-                task.owner, task.object_id, e
-            );
-            return;
-        }
-    };
-
-    info!(
-        "assignment: {}, owner: {}, object: {}, bytes: {}",
-        uuid,
-        task.owner,
-        task.object_id,
-        metadata.len()
-    );
-}
-
 fn process_assignment_impl(
     assignment: Arc<RwLock<Assignment>>,
     uuid: &str,
@@ -1011,6 +988,13 @@ fn process_assignment_impl(
 
         let mut t = assignment.read().unwrap().tasks[index].clone();
 
+        trace!(
+            "Processing assignment: {}, owner: {}, object: {}",
+            &uuid,
+            &t.owner,
+            &t.object_id
+        );
+
         // Process the task.
         f(&mut t, client, &metrics);
 
@@ -1029,18 +1013,12 @@ fn process_assignment_impl(
         // Update our stats.
         tmp.stats.complete += 1;
 
-        match t.status {
-            TaskStatus::Complete => {
-                log_file_stats(&t, &uuid);
+        if let TaskStatus::Failed(e) = t.status {
+            if let Some(m) = metrics.clone() {
+                counter_vec_inc(&m, ERROR_COUNT, Some(&e.to_string()));
             }
-            TaskStatus::Failed(e) => {
-                if let Some(m) = metrics.clone() {
-                    counter_vec_inc(&m, ERROR_COUNT, Some(&e.to_string()));
-                }
-                tmp.stats.failed += 1;
-                failures.lock().unwrap().push(t.clone());
-            }
-            _ => (),
+            tmp.stats.failed += 1;
+            failures.lock().unwrap().push(t.clone());
         }
 
         // Update the task in the assignment.

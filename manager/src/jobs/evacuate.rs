@@ -3241,6 +3241,7 @@ mod tests {
     use quickcheck_helpers::random::string as random_string;
     use rand::Rng;
     use rebalancer::libagent::{router as agent_router, AgentAssignmentStats};
+    use rebalancer::metrics::MetricsMap;
     use rebalancer::util;
     use reqwest::Client;
 
