@@ -599,12 +599,9 @@ fn post_assignment_handler(
                             StatusCode::BAD_REQUEST,
                         );
 
-                        agent_counter_vec_inc(
-                            &agent.metrics.lock().unwrap(),
-                            ERROR_COUNT,
-                            Some(&e),
-                        );
-
+                        if let Some(m) = agent.metrics.lock().unwrap().clone() {
+                            counter_vec_inc(&m, ERROR_COUNT, Some(&e));
+                        }
                         return future::ok((state, res));
                     }
                 };
@@ -616,11 +613,9 @@ fn post_assignment_handler(
                     let res =
                         create_empty_response(&state, StatusCode::CONFLICT);
 
-                    agent_counter_vec_inc(
-                        &agent.metrics.lock().unwrap(),
-                        ERROR_COUNT,
-                        Some("conflict"),
-                    );
+                    if let Some(m) = agent.metrics.lock().unwrap().clone() {
+                        counter_vec_inc(&m, ERROR_COUNT, Some("conflict"));
+                    }
 
                     return future::ok((state, res));
                 }
@@ -656,11 +651,9 @@ fn post_assignment_handler(
             }
 
             Err(e) => {
-                agent_counter_vec_inc(
-                    &agent.metrics.lock().unwrap(),
-                    ERROR_COUNT,
-                    Some(&e.to_string()),
-                );
+                if let Some(m) = agent.metrics.lock().unwrap().clone() {
+                    counter_vec_inc(&m, ERROR_COUNT, Some(&e.to_string()));
+                }
 
                 future::err((state, e.into_handler_error()))
             }
@@ -767,11 +760,9 @@ impl Handler for Agent {
     fn handle(self, state: State) -> Box<HandlerFuture> {
         let method = Method::borrow_from(&state);
 
-        agent_counter_vec_inc(
-            &self.metrics.lock().unwrap(),
-            REQUEST_COUNT,
-            Some(method.as_str()),
-        );
+        if let Some(m) = self.metrics.lock().unwrap().clone() {
+            counter_vec_inc(&m, REQUEST_COUNT, Some(method.as_str()));
+        }
 
         // If we are here, then the method must either be
         // POST or GET.  It can not be anything else.
@@ -847,6 +838,7 @@ fn download(
     object: &str,
     csum: &str,
     client: &Client,
+    metrics: &Option<MetricsMap>,
 ) -> Result<(), ObjectSkippedReason> {
     let mut response = match client.get(uri).send() {
         Ok(resp) => resp,
@@ -869,7 +861,12 @@ fn download(
     let mut file = file_create(&tmp_path);
 
     match std::io::copy(&mut response, &mut file) {
-        Ok(_) => (),
+        Ok(bytes) => {
+            if let Some(m) = metrics.clone() {
+                counter_inc_by(&m, BYTES_COUNT, bytes);
+            }
+            info!("owner: {}, object: {}, bytes: {}", owner, object, bytes);
+        }
         Err(e) => {
             error!("Failed to complete object download: {}:{}", uri, e);
             return Err(ObjectSkippedReason::AgentFSError);
@@ -884,7 +881,11 @@ fn download(
     }
 }
 
-pub fn process_task(task: &mut Task, client: &Client) {
+pub fn process_task(
+    task: &mut Task,
+    client: &Client,
+    metrics: &Option<MetricsMap>,
+) {
     let file_path = manta_file_path(&task.owner, &task.object_id);
     let path = Path::new(&file_path);
 
@@ -918,6 +919,7 @@ pub fn process_task(task: &mut Task, client: &Client) {
         &task.object_id,
         &task.md5sum,
         client,
+        &metrics,
     ) {
         Ok(_) => {
             // Upon successful download, move the temprorary object to its
@@ -954,7 +956,7 @@ fn assignment_get(
     }
 }
 
-fn log_file_stats(task: &Task, uuid: &str, metrics: &Option<MetricsMap>) {
+fn log_file_stats(task: &Task, uuid: &str) {
     let path = manta_file_path(&task.owner, &task.object_id);
 
     // If this does not work for some unknown reason, it's not important
@@ -970,8 +972,6 @@ fn log_file_stats(task: &Task, uuid: &str, metrics: &Option<MetricsMap>) {
         }
     };
 
-    agent_counter_inc_by(&metrics, BYTES_COUNT, metadata.len());
-
     info!(
         "assignment: {}, owner: {}, object: {}, bytes: {}",
         uuid,
@@ -984,7 +984,7 @@ fn log_file_stats(task: &Task, uuid: &str, metrics: &Option<MetricsMap>) {
 fn process_assignment_impl(
     assignment: Arc<RwLock<Assignment>>,
     uuid: &str,
-    f: fn(&mut Task, &Client),
+    f: fn(&mut Task, &Client, &Option<MetricsMap>),
     failures: Arc<Mutex<Vec<Task>>>,
     metrics: &Option<MetricsMap>,
     client: &Client,
@@ -1012,11 +1012,17 @@ fn process_assignment_impl(
         let mut t = assignment.read().unwrap().tasks[index].clone();
 
         // Process the task.
-        f(&mut t, client);
+        f(&mut t, client, &metrics);
 
         // Update the total number of objects that have been processed, whether
         // successful or not.
-        agent_counter_vec_inc(&metrics, OBJECT_COUNT, None);
+        if let Some(m) = metrics.clone() {
+            // Note: The rebalncer agent does not currently break down this
+            // metric by anything meaningful, so we don't supply a bucket.
+            // That is, the only thing we track here is the total number of
+            // objects processed.
+            counter_vec_inc(&m, OBJECT_COUNT, None);
+        }
 
         let tmp = &mut assignment.write().unwrap();
 
@@ -1025,14 +1031,12 @@ fn process_assignment_impl(
 
         match t.status {
             TaskStatus::Complete => {
-                log_file_stats(&t, &uuid, &metrics);
+                log_file_stats(&t, &uuid);
             }
             TaskStatus::Failed(e) => {
-                agent_counter_vec_inc(
-                    &metrics,
-                    ERROR_COUNT,
-                    Some(&e.to_string()),
-                );
+                if let Some(m) = metrics.clone() {
+                    counter_vec_inc(&m, ERROR_COUNT, Some(&e.to_string()));
+                }
                 tmp.stats.failed += 1;
                 failures.lock().unwrap().push(t.clone());
             }
@@ -1065,7 +1069,7 @@ fn process_assignment_impl(
 fn process_assignment(
     assignments: Arc<Mutex<Assignments>>,
     uuid: String,
-    f: fn(&mut Task, &Client),
+    f: fn(&mut Task, &Client, &Option<MetricsMap>),
     metrics: Option<MetricsMap>,
     client: &Client,
     pool: &ThreadPool,
@@ -1137,7 +1141,7 @@ fn agent_start_metrics_server(config: &AgentConfig) -> MetricsMap {
 // consumers, namely the rebalancer zone test framework.
 #[allow(clippy::many_single_char_names)]
 pub fn router(
-    f: fn(&mut Task, &Client),
+    f: fn(&mut Task, &Client, &Option<MetricsMap>),
     config: Option<AgentConfig>,
 ) -> Router {
     build_simple_router(|route| {
@@ -1224,36 +1228,4 @@ fn create_dir(dirname: &str) {
     if let Err(e) = fs::create_dir_all(dirname) {
         panic!("Error creating directory {}", e);
     }
-}
-
-// The rebalancer agent has a unique feature where it can be started without
-// metrics.  That is, metrics are optional.  This is largely due to the fact
-// that it is not necessary to have metrics when running the agent as a thread
-// within the rebalancer manager unit test code.  To avoid the tedious
-// scaffolding of checking whether we have metrics or not before incrementing a
-// counter, we wrap it in this function which does it for us.
-pub fn agent_counter_inc_by(metrics: &Option<MetricsMap>, key: &str, val: u64) {
-    let map = match metrics {
-        Some(m) => m,
-        None => {
-            return;
-        }
-    };
-
-    counter_inc_by(&map, key, val);
-}
-
-pub fn agent_counter_vec_inc(
-    metrics: &Option<MetricsMap>,
-    key: &str,
-    bucket: Option<&str>,
-) {
-    let map = match metrics {
-        Some(m) => m,
-        None => {
-            return;
-        }
-    };
-
-    counter_vec_inc(&map, key, bucket);
 }
