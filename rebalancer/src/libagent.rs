@@ -600,7 +600,7 @@ fn post_assignment_handler(
                         );
 
                         agent_counter_vec_inc(
-                            &agent.metrics.lock().unwrap().clone(),
+                            &agent.metrics.lock().unwrap(),
                             ERROR_COUNT,
                             Some(&e),
                         );
@@ -617,7 +617,7 @@ fn post_assignment_handler(
                         create_empty_response(&state, StatusCode::CONFLICT);
 
                     agent_counter_vec_inc(
-                        &agent.metrics.lock().unwrap().clone(),
+                        &agent.metrics.lock().unwrap(),
                         ERROR_COUNT,
                         Some("conflict"),
                     );
@@ -657,7 +657,7 @@ fn post_assignment_handler(
 
             Err(e) => {
                 agent_counter_vec_inc(
-                    &agent.metrics.lock().unwrap().clone(),
+                    &agent.metrics.lock().unwrap(),
                     ERROR_COUNT,
                     Some(&e.to_string()),
                 );
@@ -768,7 +768,7 @@ impl Handler for Agent {
         let method = Method::borrow_from(&state);
 
         agent_counter_vec_inc(
-            &self.metrics.lock().unwrap().clone(),
+            &self.metrics.lock().unwrap(),
             REQUEST_COUNT,
             Some(method.as_str()),
         );
