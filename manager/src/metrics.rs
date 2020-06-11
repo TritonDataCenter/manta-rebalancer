@@ -70,17 +70,14 @@ pub fn metrics_init(cfg: metrics::ConfigMetrics) {
     // Create our baseline metrics.
     let mut metrics = metrics::register_metrics(&cfg);
 
-    let labels: HashMap<String, String> = match metrics::get_const_labels()
+    let labels: HashMap<String, String> = metrics::get_const_labels()
         .lock()
         .expect("metrics const labels")
         .clone()
-    {
-        Some(cl) => cl,
-        None => HashMap::new(),
-    };
+        .unwrap_or_else(HashMap::new);
 
     // Now create and register additional metrics exclusively used by the
-    // rebalaner manger.
+    // rebalancer manger.
     let skip_counter = register_counter_vec!(
         opts!(SKIP_COUNT, "Objects skipped.").const_labels(labels),
         &["reason"]
