@@ -34,7 +34,6 @@ use crate::storinfo::{self as mod_storinfo, SharkSource, StorageNode};
 
 use std::collections::hash_map::Entry::{Occupied, Vacant};
 use std::collections::HashMap;
-use std::convert::TryInto;
 use std::error::Error as _Error;
 use std::io::{ErrorKind, Write};
 use std::str::FromStr;
@@ -76,13 +75,12 @@ use diesel::sql_types;
 // Note: The ordering of the fields in this table must match the ordering of
 // the fields in 'struct EvacuateObject'
 table! {
-    use diesel::sql_types::{BigInt, Text, Integer, Nullable, Jsonb};
+    use diesel::sql_types::{Text, Integer, Nullable, Jsonb};
     evacuateobjects (id) {
         id -> Text,
         assignment_id -> Text,
         object -> Jsonb,
         shard -> Integer,
-        size -> BigInt,
         dest_shark -> Text,
         etag -> Text,
         status -> Text,
@@ -302,7 +300,6 @@ pub fn create_evacuateobjects_table(
                 assignment_id TEXT,
                 object Jsonb,
                 shard Integer,
-                size BIGINT,
                 dest_shark TEXT,
                 etag TEXT,
                 status TEXT CHECK(status IN ({})) NOT NULL,
@@ -358,7 +355,6 @@ pub struct EvacuateObject {
 
     pub object: Value, // The MantaObject being rebalanced
     pub shard: i32,    // shard number of metadata object record
-    pub size: i64,     // Due to PG limitations, this is actually 0 - i64::MAX
     pub dest_shark: String,
     pub etag: String, // Moray object "_etag"
     pub status: EvacuateObjectStatus,
@@ -382,7 +378,6 @@ impl Arbitrary for EvacuateObject {
         let mut skipped_reason = None;
         let mut error = None;
         let shard = g.next_u32() as i32 % 100;
-        let size: i64 = (g.next_u64() as i64 % std::i64::MAX).abs();
         let dest_shark = random_string(g, 100);
 
         match status {
@@ -401,7 +396,6 @@ impl Arbitrary for EvacuateObject {
             object: manta_value,
             shard,
             etag: manta_object.etag, // This is a different etag
-            size,
             dest_shark,
             status,
             skipped_reason,
@@ -414,7 +408,6 @@ impl EvacuateObject {
     fn from_parts(
         manta_object: Value,
         id: ObjectId,
-        size: i64,
         etag: String,
         shard: i32,
     ) -> Self {
@@ -422,7 +415,6 @@ impl EvacuateObject {
             assignment_id: String::new(),
             id,
             object: manta_object,
-            size,
             shard,
             etag,
             ..Default::default()
@@ -1690,10 +1682,10 @@ impl ProcessAssignment for EvacuateJob {
                 // in the failed_tasks Vec.
                 let successful_tasks: Vec<ObjectId> = objects
                     .iter()
-                    .filter(|obj| {
-                        !failed_tasks.iter().any(|ft| ft.object_id == obj.id)
-                    })
                     .map(|obj| obj.id.clone())
+                    .filter(|obj_id| {
+                        !failed_tasks.iter().any(|ft| &ft.object_id == obj_id)
+                    })
                     .collect();
 
                 self.mark_many_task_objects_skipped(failed_tasks);
@@ -1746,17 +1738,6 @@ fn _insert_bad_manta_object(
     };
 
     job_action.insert_into_db(&eobj);
-}
-
-fn _get_size_from_content_length(content_length: u64) -> Result<i64, String> {
-    let size = content_length / (1024 * 1024);
-    size.try_into().map_err(|e| {
-        format!(
-            "Sorry... objects larger than 9000 zetabytes are not \
-             supported: {}",
-            e,
-        )
-    })
 }
 
 //
@@ -1896,25 +1877,6 @@ fn start_sharkspotter(
                     }
                 };
 
-                let manta_object: MantaObjectEssential =
-                    match serde_json::from_value(manta_object_value.clone()) {
-                        Ok(mo) => mo,
-                        Err(e) => {
-                            error!(
-                                "Unable to get essential values from \
-                                 manta object: {} ({})",
-                                id, e
-                            );
-                            _insert_bad_manta_object(
-                                &job_action,
-                                manta_object_value,
-                                id,
-                            );
-
-                            return Ok(());
-                        }
-                    };
-
                 // If we fail to get the etag then we can't rebalance this
                 // object, but we return Ok(()) because we want to keep
                 // scanning for other objects.
@@ -1941,21 +1903,6 @@ fn start_sharkspotter(
                     }
                 };
 
-                let size = match _get_size_from_content_length(
-                    manta_object.content_length,
-                ) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        error!("Could not get object size for {}: {}", id, e);
-                        _insert_bad_manta_object(
-                            &job_action,
-                            manta_object_value,
-                            id,
-                        );
-                        return Ok(());
-                    }
-                };
-
                 // TODO: build a test for this
                 if shard > std::i32::MAX as u32 {
                     error!("Found shard number over int32 max for: {}", id);
@@ -1964,7 +1911,6 @@ fn start_sharkspotter(
                         id,
                         object: manta_object_value,
                         status: EvacuateObjectStatus::Error,
-                        size,
                         error: Some(EvacuateObjectError::BadShardNumber),
                         etag,
                         ..Default::default()
@@ -1981,7 +1927,6 @@ fn start_sharkspotter(
                 let eobj = EvacuateObject::from_parts(
                     manta_object_value,
                     id.clone(),
-                    size,
                     etag,
                     shard as i32,
                 );
@@ -2654,8 +2599,6 @@ fn shark_assignment_generator(
                                     &shark,
                                     &full_assignment_tx,
                                 )?;
-
-                                eobj_vec = Vec::new();
 
                                 continue;
                             }
@@ -3817,8 +3760,6 @@ mod tests {
             .name(String::from("test object generator thread"))
             .spawn(move || {
                 for (id, o) in test_objects.into_iter() {
-                    let size = _get_size_from_content_length(o.content_length)
-                        .unwrap_or(0);
                     let shard = 1;
                     let etag = String::from("Fake_etag");
                     let mobj_value =
@@ -3827,7 +3768,6 @@ mod tests {
                     let eobj = EvacuateObject::from_parts(
                         mobj_value,
                         id.clone(),
-                        size,
                         etag,
                         shard,
                     );
@@ -3929,7 +3869,7 @@ mod tests {
 
         let job_action = Arc::new(job_action);
 
-        // Generate 100 x 1MiB objects for a total of 100MiB.
+        // Generate 100 x 1MiB objects for a total of 100MiB on sharks 1 and 2.
         let mut g = StdThreadGen::new(10);
         let mut test_objects = HashMap::new();
         let num_objects = 100;
@@ -3938,8 +3878,6 @@ mod tests {
             let mut sharks = vec![];
 
             mobj.content_length = 1024 * 1024; // 1MiB
-                                               // first pass: 1 or 2
-                                               // second pass: 3 or 4
             for i in 1..3 {
                 let shark = MantaObjectShark {
                     datacenter: String::from("dc1"), //todo
@@ -4247,8 +4185,6 @@ mod tests {
         // Create some EvacuateObjects
         for _ in 0..100 {
             let mobj = MantaObject::arbitrary(&mut g);
-            let size =
-                _get_size_from_content_length(mobj.content_length).unwrap_or(0);
             let mobj_value = serde_json::to_value(mobj).expect("mobj_value");
             let shard = 1;
             let etag = random_string(&mut g, 10);
@@ -4256,7 +4192,7 @@ mod tests {
                 common::get_objectId_from_value(&mobj_value).expect("objectId");
 
             let mut eobj =
-                EvacuateObject::from_parts(mobj_value, id, size, etag, shard);
+                EvacuateObject::from_parts(mobj_value, id, etag, shard);
 
             eobj.assignment_id = uuid.clone();
             eobjs.push(eobj);
