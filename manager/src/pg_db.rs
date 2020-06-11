@@ -16,6 +16,7 @@ use diesel::result::ConnectionError;
 use diesel::sql_query;
 
 static DB_URL: &str = "postgres://postgres:postgres@";
+pub static REBALANCER_DB: &str = "rebalancer";
 
 pub fn connect_db(db_name: &str) -> Result<PgConnection, Error> {
     let connect_url = format!("{}/{}", DB_URL, db_name);

@@ -23,10 +23,10 @@ use rebalancer::libagent::{
 };
 use rebalancer::util::{MAX_HTTP_STATUS_CODE, MIN_HTTP_STATUS_CODE};
 
-use crate::config::{Config, ConfigOptions};
+use crate::config::{Config, ConfigOptions, MAX_TUNABLE_MD_UPDATE_THREADS};
 use crate::jobs::{
     assignment_cache_usage, Assignment, AssignmentCacheEntry, AssignmentId,
-    AssignmentState, StorageId,
+    AssignmentState, JobUpdateMessage, StorageId,
 };
 use crate::moray_client;
 use crate::pg_db;
@@ -56,7 +56,7 @@ use quickcheck::{Arbitrary, Gen};
 use quickcheck_helpers::random::string as random_string;
 use rand::seq::SliceRandom;
 use reqwest;
-use serde::{self, Deserialize};
+use serde::{self, Deserialize, Serialize};
 use serde_json::Value;
 use strum::IntoEnumIterator;
 use threadpool::ThreadPool;
@@ -436,6 +436,57 @@ pub struct EvacuateDestShark {
     pub status: DestSharkStatus,
 }
 
+///
+/// ```
+/// use serde_json::json;
+/// use manager::jobs::evacuate::EvacuateJobUpdateMessage;
+///
+/// let payload = json!({
+///     "action": "set_metadata_threads",
+///     "params": 30
+/// });
+///
+/// let deserialized: EvacuateJobUpdateMessage = serde_json::from_value(payload).unwrap();
+/// let EvacuateJobUpdateMessage::SetMetadataThreads(thr_count) = deserialized;
+/// assert_eq!(thr_count, 30);
+/// ```
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "action", content = "params", rename_all = "snake_case")]
+pub enum EvacuateJobUpdateMessage {
+    SetMetadataThreads(usize),
+}
+
+impl EvacuateJobUpdateMessage {
+    pub fn validate(&self) -> Result<(), String> {
+        #[allow(clippy::single_match)]
+        match self {
+            EvacuateJobUpdateMessage::SetMetadataThreads(num_threads) => {
+                if *num_threads < 1 {
+                    return Err(String::from(
+                        "Cannot set metadata update threads below 1",
+                    ));
+                }
+
+                // This is completely arbitrary, but intended to prevent the
+                // rebalancer from hammering the metadata tier due to a fat
+                // finger.  It is still possible to set this number higher
+                // but only at the start of a job. See MANTA-5284.
+                if *num_threads > MAX_TUNABLE_MD_UPDATE_THREADS {
+                    return Err(String::from(
+                        "Cannot set metadata update threads above 100",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+enum DyanmicWorkerMsg {
+    Data(AssignmentCacheEntry),
+    Stop,
+}
+
 /// Evacuate a given shark
 pub struct EvacuateJob {
     /// Hash of destination sharks that may change during the job execution.
@@ -469,6 +520,8 @@ pub struct EvacuateJob {
 
     pub md_update_time: AtomicU64,
 
+    pub update_rx: Option<crossbeam_channel::Receiver<JobUpdateMessage>>,
+
     /// TESTING ONLY
     pub max_objects: Option<u32>,
 }
@@ -481,6 +534,7 @@ impl EvacuateJob {
         domain_name: &str,
         db_name: &str,
         options: ConfigOptions,
+        update_rx: Option<crossbeam_channel::Receiver<JobUpdateMessage>>,
         max_objects: Option<u32>,
     ) -> Result<Self, Error> {
         let mut from_shark = MantaObjectShark::default();
@@ -506,6 +560,7 @@ impl EvacuateJob {
             max_objects,
             post_client: reqwest::Client::new(),
             get_client: reqwest::Client::new(),
+            update_rx,
             bytes_transferred: AtomicU64::new(0),
             md_update_time: AtomicU64::new(0),
         })
@@ -2671,7 +2726,7 @@ fn metadata_update_worker_static(
 // queue is empty the worker exits.
 fn metadata_update_worker_dynamic(
     job_action: Arc<EvacuateJob>,
-    queue_front: Arc<Injector<AssignmentCacheEntry>>,
+    queue_front: Arc<Injector<DyanmicWorkerMsg>>,
 ) -> impl Fn() {
     move || {
         // For each worker we create a hash of moray clients indexed by shard.
@@ -2686,9 +2741,19 @@ fn metadata_update_worker_dynamic(
             "Started metadata update worker: {:?}",
             thread::current().id()
         );
+
+        // If the queue is empty or we receive a Stop message, then break out
+        // of the loop and return.
+        //
+        // If we get a retry error then, retry.
+        //
+        // Otherwise get the assignment cache entry and process it.
         loop {
             let ace = match queue_front.steal() {
-                Steal::Success(a) => a,
+                Steal::Success(dwm) => match dwm {
+                    DyanmicWorkerMsg::Data(a) => a,
+                    DyanmicWorkerMsg::Stop => break,
+                },
                 Steal::Retry => continue,
                 Steal::Empty => break,
             };
@@ -3023,20 +3088,49 @@ fn metadata_update_assignment(
     // TODO: check for DB insert error
 }
 
+fn update_dynamic_metadata_threads(
+    pool: &mut ThreadPool,
+    queue_back: &Arc<Injector<DyanmicWorkerMsg>>,
+    max_thread_count: &mut usize,
+    msg: JobUpdateMessage,
+) {
+    // Currently there is only one valid message here so we
+    // can use this irrefutable pattern.
+    // If we add any additional messages we have to use match
+    // statements.
+    let JobUpdateMessage::Evacuate(eum) = msg;
+    let EvacuateJobUpdateMessage::SetMetadataThreads(worker_count) = eum;
+    let difference: i32 = *max_thread_count as i32 - worker_count as i32;
+
+    // If the difference is negative then we need to
+    // reduce our running thread count, so inject
+    // the appropriate number of Stop messages to
+    // tell active threads to exit.
+    // Otherwise the logic below will handle spinning up
+    // more worker threads if they are needed.
+    for _ in difference..0 {
+        queue_back.push(DyanmicWorkerMsg::Stop);
+    }
+    *max_thread_count = worker_count;
+    pool.set_num_threads(*max_thread_count);
+
+    info!(
+        "Max number of metadata update threads set to: {}",
+        max_thread_count
+    );
+}
+
 /// This thread runs until EvacuateJob Completion.
 /// When it receives a completed Assignment it will enqueue it into a work queue
 /// and then possibly starts worker thread to do the work.  The worker thread
 /// comes from a pool with a tunable size.  If the max number of worker threads
 /// are already running the completed Assignment stays in the queue to be picked
 /// up by the next available and running worker thread.  Worker threads will
-/// exit if the queue is empty when they finish their current work and check the
-/// queue for the next Assignment.
+/// exit if the queue is empty or if they receive a Stop message when they
+/// finish their current work and check the queue for the next Assignment.
 ///
-/// The plan is for this thread pool size to be the main tunable
-/// controlling our load on the Manta Metadata tier.  The thread pool size can
-/// be changed while the job is running with `.set_num_threads()`.
-/// How we communicate with a running job to tell it to alter its tunables is
-/// still TBD.
+/// The number of threads can be adjusted while the job is running.  See
+/// EvacuateJobUpdateMessage.
 ///
 /// One trade off here is whether or not the messages being sent to this
 /// thread are Assignments or individual EvacuateObjects (or
@@ -3058,28 +3152,42 @@ fn metadata_update_assignment(
 // of of the current layout as possible, so that if future changes are made they
 // don't interfere too much with the previous (preferred) one when we
 // re-implement it.
-
 fn metadata_update_broker_dynamic(
     job_action: Arc<EvacuateJob>,
     md_update_rx: crossbeam::Receiver<AssignmentCacheEntry>,
 ) -> Result<thread::JoinHandle<Result<(), Error>>, Error> {
-    let pool = ThreadPool::with_name(
+    let mut max_thread_count = job_action.options.max_metadata_update_threads;
+    let mut pool = ThreadPool::with_name(
         "Dyn_MD_Update".into(),
         job_action.options.max_metadata_update_threads,
     );
-    let queue = Arc::new(Injector::<AssignmentCacheEntry>::new());
-    let queue_back = Arc::clone(&queue);
+    let queue = Arc::new(Injector::<DyanmicWorkerMsg>::new());
+    let update_rx = match &job_action.update_rx {
+        Some(urx) => urx.clone(),
+        None => panic!(
+            "Missing update_rx channel for job with dynamic update threads"
+        ),
+    };
 
     thread::Builder::new()
         .name(String::from("Metadata Update broker"))
         .spawn(move || {
             loop {
+                if let Ok(msg) = update_rx.try_recv() {
+                    debug!("Received metadata update message: {:#?}", msg);
+                    update_dynamic_metadata_threads(
+                        &mut pool,
+                        &queue,
+                        &mut max_thread_count,
+                        msg,
+                    );
+                }
                 let ace = match md_update_rx.recv() {
                     Ok(ace) => ace,
                     Err(e) => {
                         // If the queue is empty and there are no active or
                         // queued threads, kick one off to drain the queue.
-                        if !queue_back.is_empty()
+                        if !queue.is_empty()
                             && pool.active_count() == 0
                             && pool.queued_count() == 0
                         {
@@ -3099,7 +3207,7 @@ fn metadata_update_broker_dynamic(
                     }
                 };
 
-                queue_back.push(ace);
+                queue.push(DyanmicWorkerMsg::Data(ace));
 
                 // If all the pools threads are devoted to workers there's
                 // really no reason to queue up a new worker.
@@ -3382,12 +3490,14 @@ mod tests {
             }
         }
 
+        let (_, update_rx) = crossbeam_channel::unbounded();
         let from_shark = String::from("1.stor.domain");
         let job_action = EvacuateJob::new(
             from_shark,
             "fakedomain.us",
             &Uuid::new_v4().to_string(),
             ConfigOptions::default(),
+            Some(update_rx),
             Some(100),
         )
         .expect("initialize evacuate job");
@@ -3574,11 +3684,13 @@ mod tests {
     fn assignment_processing_test() {
         unit_test_init();
         let mut g = StdThreadGen::new(10);
+        let (_, update_rx) = crossbeam_channel::unbounded();
         let job_action = EvacuateJob::new(
             String::new(),
             "fakedomain.us",
             &Uuid::new_v4().to_string(),
             ConfigOptions::default(),
+            Some(update_rx),
             None,
         )
         .expect("initialize evacuate job");
@@ -3702,6 +3814,7 @@ mod tests {
         let (full_assignment_tx, _) = crossbeam::bounded(5);
         let (checker_fini_tx, _) = crossbeam::bounded(1);
         let (_, obj_rx) = crossbeam::bounded(5);
+        let (_, update_rx) = crossbeam_channel::unbounded();
 
         // These tests are run locally and don't go out over the network so any properly formatted
         // host/domain name is valid here.
@@ -3710,6 +3823,7 @@ mod tests {
             "fakedomain.us",
             &Uuid::new_v4().to_string(),
             ConfigOptions::default(),
+            Some(update_rx),
             None,
         )
         .expect("initialize evacuate job");
@@ -3833,6 +3947,7 @@ mod tests {
         let (obj_tx, obj_rx) = crossbeam::bounded(5);
         let (md_update_tx, md_update_rx) = crossbeam::bounded(5);
         let (checker_fini_tx, checker_fini_rx) = crossbeam::bounded(1);
+        let (_, update_rx) = crossbeam_channel::unbounded();
 
         // These tests are run locally and don't go out over the network so any properly formatted
         // host/domain name is valid here.
@@ -3841,6 +3956,7 @@ mod tests {
             "region.fakedomain.us",
             &Uuid::new_v4().to_string(),
             ConfigOptions::default(),
+            Some(update_rx),
             None,
         )
         .expect("initialize evacuate job");

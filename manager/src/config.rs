@@ -25,6 +25,8 @@ use std::thread::JoinHandle;
 
 static DEFAULT_CONFIG_PATH: &str = "/opt/smartdc/rebalancer/config.json";
 
+// TODO: Determine max and min values for each (MANTA-5284)
+
 // The maximum number of tasks we will send in a single assignment to the agent.
 static DEFAULT_MAX_TASKS_PER_ASSIGNMENT: usize = 50;
 
@@ -48,6 +50,8 @@ static DEFAULT_STATIC_QUEUE_DEPTH: usize = 10;
 // This will only be checked synchronously every time we gather another set of
 // destination sharks.
 static DEFAULT_MAX_ASSIGNMENT_AGE: u64 = 600;
+
+pub const MAX_TUNABLE_MD_UPDATE_THREADS: usize = 100;
 
 #[derive(Deserialize, Default, Debug, Clone)]
 pub struct Shard {
@@ -74,7 +78,7 @@ impl Default for ConfigOptions {
             max_tasks_per_assignment: DEFAULT_MAX_TASKS_PER_ASSIGNMENT,
             max_metadata_update_threads: DEFAULT_MAX_METADATA_UPDATE_THREADS,
             max_sharks: DEFAULT_MAX_SHARKS,
-            use_static_md_update_threads: true,
+            use_static_md_update_threads: false,
             static_queue_depth: DEFAULT_STATIC_QUEUE_DEPTH,
             max_assignment_age: DEFAULT_MAX_ASSIGNMENT_AGE,
             use_batched_updates: true,

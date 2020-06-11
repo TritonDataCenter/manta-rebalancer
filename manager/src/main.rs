@@ -17,6 +17,8 @@ extern crate serde_derive;
 #[macro_use]
 extern crate rebalancer;
 
+mod gotham_json_util;
+
 // JEmallocator drastically improves our memory footprint
 use jemallocator::Jemalloc;
 #[global_allocator]
@@ -24,29 +26,45 @@ static GLOBAL: Jemalloc = Jemalloc;
 
 use manager::config::Config;
 use manager::jobs::status::StatusError;
-use manager::jobs::{self, JobBuilder, JobDbEntry, JobPayload};
+use manager::jobs::{
+    self, JobActionDbEntry, JobBuilder, JobDbEntry, JobPayload, JobState,
+    JobUpdateMessage,
+};
 use manager::metrics::{metrics_init, metrics_request_inc};
+use manager::pg_db::{connect_db, REBALANCER_DB};
 use rebalancer::util;
 
 use std::collections::HashMap;
 use std::error::Error;
+use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
+use crate::gotham_json_util::JsonBody;
 use clap::{App, Arg, ArgMatches};
 use crossbeam_channel;
-use futures::{future, Future, Stream};
-use gotham::handler::{Handler, HandlerFuture, IntoHandlerError, NewHandler};
+use diesel::query_dsl::{QueryDsl, RunQueryDsl};
+use diesel::PgConnection;
+use futures::{future, Future};
+use gotham::handler::{Handler, HandlerFuture, NewHandler};
 use gotham::helpers::http::response::create_response;
-use gotham::router::builder::{
-    build_simple_router, DefineSingleRoute, DrawRoutes,
-};
+use gotham::middleware::Middleware;
+use gotham::pipeline::new_pipeline;
+use gotham::pipeline::set::{finalize_pipeline_set, new_pipeline_set};
+use gotham::router::builder::{build_router, DefineSingleRoute, DrawRoutes};
 use gotham::router::Router;
 use gotham::state::{FromState, State};
 use hyper::{Body, Response, StatusCode};
+use lazy_static::lazy_static;
+use manager::jobs::evacuate::EvacuateJobUpdateMessage;
 use threadpool::ThreadPool;
 use uuid::Uuid;
 
 static THREAD_COUNT: usize = 1;
+
+lazy_static! {
+    static ref UPDATE_CHANS: Mutex<HashMap<Uuid, crossbeam_channel::Sender<JobUpdateMessage>>> =
+        Mutex::new(HashMap::new());
+}
 
 #[derive(Deserialize, StateData, StaticResponseExtender)]
 struct GetJobParams {
@@ -61,6 +79,53 @@ struct JobStatus {
 #[derive(Debug, Deserialize, Serialize)]
 struct JobList {
     jobs: Vec<String>,
+}
+
+#[derive(Deserialize, StateData, StaticResponseExtender)]
+struct UpdateJobParams {
+    uuid: String,
+}
+
+fn add_update_channel(
+    uuid: Uuid,
+    update_tx: crossbeam_channel::Sender<JobUpdateMessage>,
+) {
+    let mut update_chans =
+        UPDATE_CHANS.lock().expect("lock update chans hashmap");
+
+    // This should only happen if we have duplicate UUIDs, so panic is
+    // appropriate.
+    if update_chans.insert(uuid, update_tx).is_some() {
+        let msg = format!("update_tx for {} already exists", uuid.to_string());
+        error!("{}", msg);
+        panic!(msg);
+    }
+}
+
+fn remove_update_channel(uuid: Uuid) {
+    let mut update_chans =
+        UPDATE_CHANS.lock().expect("lock update chans hashmap");
+
+    if update_chans.remove(&uuid).is_none() {
+        warn!(
+            "attempt to remove update_tx for {} that  doesn't exist",
+            uuid.to_string()
+        );
+    }
+}
+
+fn get_update_channel(
+    uuid: Uuid,
+) -> Result<crossbeam_channel::Sender<JobUpdateMessage>, String> {
+    let update_chans = UPDATE_CHANS.lock().expect("lock update chans hashmap");
+    let chan = update_chans.get(&uuid).ok_or_else(|| {
+        format!(
+            "Job ({}) does not support dynamic configuration updates",
+            uuid
+        )
+    })?;
+
+    Ok(chan.clone())
 }
 
 fn bad_request(state: &State, msg: String) -> Response<Body> {
@@ -190,6 +255,95 @@ fn list_jobs(state: State) -> Box<HandlerFuture> {
     }))
 }
 
+fn update_job(mut state: State) -> (State, Response<Body>) {
+    use crate::jobs::jobs::dsl::jobs as jobs_db;
+
+    let db_conn = DBConnMiddlewareData::take_from(&mut state).db_conn;
+    let update_job_params = UpdateJobParams::take_from(&mut state);
+    let uuid =
+        Uuid::from_str(update_job_params.uuid.as_str()).expect("uuid from str");
+    let tx: crossbeam_channel::Sender<JobUpdateMessage>;
+
+    let job_db_entry: JobDbEntry = match jobs_db
+        .find(update_job_params.uuid.as_str())
+        .first(&db_conn)
+    {
+        Ok(jdbe) => jdbe,
+        Err(_) => {
+            let msg = format!("Could not find job {}", uuid);
+            let res = bad_request(&state, msg);
+            return (state, res);
+        }
+    };
+
+    if job_db_entry.state != JobState::Running {
+        let res = bad_request(
+            &state,
+            "Attempt to update job that is not running".into(),
+        );
+        return (state, res);
+    }
+
+    tx = match get_update_channel(uuid) {
+        Ok(t) => t,
+        Err(e) => {
+            let res = bad_request(&state, e);
+            return (state, res);
+        }
+    };
+
+    #[allow(clippy::single_match)]
+    let update_message = match job_db_entry.action {
+        JobActionDbEntry::Evacuate => {
+            let evac_msg =
+                match state.json_body::<EvacuateJobUpdateMessage>().wait() {
+                    Ok(p) => p,
+                    Err(e) => {
+                        let msg = format!(
+                            "Could not parse Evacuate Update \
+                             Message: {}",
+                            e
+                        );
+                        warn!("{}", msg);
+                        let res = create_response(
+                            &state,
+                            StatusCode::UNPROCESSABLE_ENTITY,
+                            mime::APPLICATION_JSON,
+                            msg,
+                        );
+                        return (state, res);
+                    }
+                };
+
+            if let Err(e) = evac_msg.validate() {
+                let res = bad_request(&state, e);
+                return (state, res);
+            }
+
+            JobUpdateMessage::Evacuate(evac_msg)
+        }
+        _ => {
+            let res = bad_request(&state, "payload action mismatch".into());
+            return (state, res);
+        }
+    };
+
+    // Send update message down channel
+    if let Err(e) = tx.send(update_message) {
+        let res = invalid_server_error(
+            &state,
+            format!("could not communicate with job: {}", e),
+        );
+
+        return (state, res);
+    }
+
+    let res =
+        create_response(&state, StatusCode::OK, mime::APPLICATION_JSON, "");
+
+    (state, res)
+}
+
 #[derive(Clone)]
 struct JobCreateHandler {
     tx: crossbeam_channel::Sender<jobs::Job>,
@@ -221,28 +375,7 @@ impl Handler for JobCreateHandler {
         }
 
         let job_builder = JobBuilder::new(config);
-        let f =
-            Body::take_from(&mut state).concat2().then(
-                move |body| match body {
-                    Ok(valid_body) => {
-                        match serde_json::from_slice::<JobPayload>(
-                            &valid_body.into_bytes(),
-                        ) {
-                            Ok(jp) => future::ok(jp),
-                            Err(e) => {
-                                error!("Error deserializing: {}", &e);
-                                future::err(e.into_handler_error())
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        error!("Body parse error: {}", &e);
-                        future::err(e.into_handler_error())
-                    }
-                },
-            );
-
-        let payload: JobPayload = match f.wait() {
+        let payload = match state.json_body::<JobPayload>().wait() {
             Ok(p) => p,
             Err(e) => {
                 error!("Payload error: {}", &e);
@@ -286,11 +419,16 @@ impl Handler for JobCreateHandler {
                 };
 
                 let job_uuid = job.get_id();
+                let uuid_response = format!("{}\n", &job_uuid);
+
+                if let Some(update_tx) = &job.update_tx {
+                    add_update_channel(job_uuid, update_tx.clone());
+                }
+
                 if let Err(e) = self.tx.send(job) {
                     panic!("Tx error: {}", e);
                 }
 
-                let uuid_response = format!("{}\n", job_uuid);
                 create_response(
                     &state,
                     StatusCode::OK,
@@ -301,6 +439,45 @@ impl Handler for JobCreateHandler {
         };
 
         Box::new(future::ok((state, ret)))
+    }
+}
+
+#[derive(NewMiddleware, Copy, Clone)]
+struct NoopMiddleware;
+
+impl Middleware for NoopMiddleware {
+    fn call<Chain>(self, state: State, chain: Chain) -> Box<HandlerFuture>
+    where
+        Chain: FnOnce(State) -> Box<HandlerFuture> + Send + 'static,
+    {
+        chain(state)
+    }
+}
+
+#[derive(NewMiddleware, Copy, Clone)]
+struct DBConnMiddleware;
+
+#[derive(StateData)]
+struct DBConnMiddlewareData {
+    db_conn: PgConnection,
+}
+
+impl Middleware for DBConnMiddleware {
+    fn call<Chain>(self, mut state: State, chain: Chain) -> Box<HandlerFuture>
+    where
+        Chain: FnOnce(State) -> Box<HandlerFuture> + Send + 'static,
+    {
+        let db_conn = match connect_db(REBALANCER_DB) {
+            Ok(dbc) => dbc,
+            Err(e) => {
+                let msg = format!("Could not connect to rebalancer DB: {}", e);
+                let res = invalid_server_error(&state, msg);
+                return Box::new(future::ok((state, res)));
+            }
+        };
+
+        state.put(DBConnMiddlewareData { db_conn });
+        chain(state)
     }
 }
 
@@ -317,29 +494,53 @@ fn router(config: Arc<Mutex<Config>>) -> Router {
         pool.execute(move || loop {
             let job = match thread_rx.recv() {
                 Ok(j) => j,
-                Err(_) => {
-                    // TODO Check error
+                Err(e) => {
+                    error!("Error receiving job message: {}", e);
                     return;
                 }
             };
+            let job_id = job.get_id();
+
             // This blocks until the job is complete.  If the user wants to
             // see the status of the job, they can issue a request to:
             //      /jobs/<job uuid>
             if let Err(e) = job.run() {
                 warn!("Error running job: {}", e);
             }
+
+            remove_update_channel(job_id);
         });
     }
 
-    let rtr = build_simple_router(|route| {
+    let ps_builder = new_pipeline_set();
+    let (ps_builder, noop) =
+        ps_builder.add(new_pipeline().add(NoopMiddleware).build());
+
+    let (ps_builder, db_conn) =
+        ps_builder.add(new_pipeline().add(DBConnMiddleware).build());
+
+    let ps = finalize_pipeline_set(ps_builder);
+
+    let noop_pipeline = (noop, ());
+    let db_conn_pipeline = (db_conn, ());
+
+    // By default we use the NoopPipeline.  If a given route needs a specific
+    // pipeline, then specify it via `.with_pipeline_chain()`
+    let rtr = build_router(noop_pipeline, ps, |route| {
+        route.with_pipeline_chain(db_conn_pipeline, |route| {
+            route
+                .put("/jobs/:uuid")
+                .with_path_extractor::<UpdateJobParams>()
+                .to(update_job);
+        });
+        route
+            .post("/jobs")
+            .to_new_handler(job_create_handler.clone());
         route
             .get("/jobs/:uuid")
             .with_path_extractor::<GetJobParams>()
             .to(get_job);
         route.get("/jobs").to(list_jobs);
-        route
-            .post("/jobs")
-            .to_new_handler(job_create_handler.clone());
     });
 
     info!("Rebalancer Online");
@@ -396,7 +597,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gotham::test::TestServer;
+    use gotham::test::{TestResponse, TestServer};
     use lazy_static::lazy_static;
     use manager::jobs::{EvacuateJobPayload, JobPayload};
     use rebalancer::error::{Error, InternalError};
@@ -456,6 +657,43 @@ mod tests {
         (config, test_server)
     }
 
+    fn put_update(
+        test_server: &TestServer,
+        uuid: &Uuid,
+        update_msg: &EvacuateJobUpdateMessage,
+    ) -> TestResponse {
+        let put_url =
+            format!("http://localhost:8888/jobs/{}", uuid.to_string());
+        let update_msg = serde_json::to_string(update_msg).unwrap();
+        test_server
+            .client()
+            .put(put_url, update_msg, mime::APPLICATION_JSON)
+            .perform()
+            .expect("put update")
+    }
+
+    fn create_job(test_server: &TestServer, job_payload: JobPayload) -> String {
+        let payload = serde_json::to_string(&job_payload)
+            .expect("serde serialize payload");
+        let response = test_server
+            .client()
+            .post(
+                "http://localhost:8888/jobs",
+                payload,
+                mime::APPLICATION_JSON,
+            )
+            .perform()
+            .expect("client post");
+
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let ret = response.read_utf8_body().expect("response body");
+        let ret = ret.trim_end();
+        assert!(Uuid::parse_str(ret).is_ok());
+
+        ret.to_string()
+    }
+
     #[test]
     fn basic() {
         unit_test_init();
@@ -499,24 +737,78 @@ mod tests {
             from_shark: String::from("fake_storage_id"),
             max_objects: Some(10),
         });
-        let payload = serde_json::to_string(&job_payload)
-            .expect("serde serialize payload");
-        let response = test_server
-            .client()
-            .post(
-                "http://localhost:8888/jobs",
-                payload,
-                mime::APPLICATION_JSON,
-            )
-            .perform()
-            .expect("client post");
 
-        assert_eq!(response.status(), StatusCode::OK);
+        let job_id = create_job(&test_server, job_payload);
+        println!("{}", job_id);
+    }
 
-        let ret = response.read_utf8_body().expect("response body");
-        let ret = ret.trim_end();
-        assert!(Uuid::parse_str(ret).is_ok());
+    #[test]
+    fn job_dynamic_update() {
+        unit_test_init();
+        let update_msg = EvacuateJobUpdateMessage::SetMetadataThreads(1);
+        let (tx, _) = crossbeam_channel::unbounded();
+        let uuid = Uuid::new_v4();
+        let (config, test_server) = test_server_init();
 
-        println!("{:#?}", ret);
+        let config = { config.lock().unwrap().clone() };
+        assert!(!config.options.use_static_md_update_threads);
+
+        add_update_channel(uuid, tx);
+        assert!(get_update_channel(uuid).is_ok());
+
+        // We just manually put the channel in the UPDATE_CHANS hash, so
+        // didn't actually create a job so we don't expect the job lookup to
+        // succeed.
+        let expected_body = format!("Could not find job {}", uuid);
+        let res = put_update(&test_server, &uuid, &update_msg);
+        let res_body = res.read_utf8_body().unwrap();
+
+        assert_eq!(expected_body, res_body);
+
+        remove_update_channel(uuid);
+        assert!(get_update_channel(uuid).is_err());
+
+        // Now we actually start a job and wait for it to fail, then assert
+        // that we get the correct error message.  We could try to race with
+        // the job creation and see if we get a 200 back, but that is error
+        // prone.  Some testing will need to be done with this deployed in an
+        // actual environment.
+        let job_payload = JobPayload::Evacuate(EvacuateJobPayload {
+            from_shark: String::from("fake_storage_id"),
+            max_objects: Some(10),
+        });
+        let job_id = create_job(&test_server, job_payload);
+        let mut count = 0;
+
+        // This job will eventually fail, unless this is being run in a
+        // legitimate manta deployment.  But all other tests assume they are
+        // being run outside of manta.
+        loop {
+            if count > 50 {
+                assert!(false, "Job stalled");
+            }
+
+            let job_list = get_job_list(&test_server).expect("get job list");
+            let job = job_list
+                .into_iter()
+                .find(|j| j.id == job_id)
+                .expect("missing job");
+
+            if job.state != JobState::Failed {
+                thread::sleep(std::time::Duration::from_millis(500));
+                count += 1;
+                continue;
+            }
+            break;
+        }
+
+        let expected_body =
+            format!("Attempt to update job that is not running");
+
+        let job_uuid = Uuid::parse_str(&job_id).unwrap();
+        let res = put_update(&test_server, &job_uuid, &update_msg);
+        let res_body = res.read_utf8_body().unwrap();
+
+        assert_eq!(res_body, expected_body);
     }
 }
