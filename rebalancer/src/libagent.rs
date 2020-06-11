@@ -599,9 +599,12 @@ fn post_assignment_handler(
                             StatusCode::BAD_REQUEST,
                         );
 
-                        if let Some(m) = agent.metrics.lock().unwrap().clone() {
-                            counter_vec_inc(&m, ERROR_COUNT, Some(&e));
-                        }
+                        agent_counter_vec_inc(
+                            &agent.metrics.lock().unwrap().clone(),
+                            ERROR_COUNT,
+                            Some(&e),
+                        );
+
                         return future::ok((state, res));
                     }
                 };
@@ -613,9 +616,11 @@ fn post_assignment_handler(
                     let res =
                         create_empty_response(&state, StatusCode::CONFLICT);
 
-                    if let Some(m) = agent.metrics.lock().unwrap().clone() {
-                        counter_vec_inc(&m, ERROR_COUNT, Some("conflict"));
-                    }
+                    agent_counter_vec_inc(
+                        &agent.metrics.lock().unwrap().clone(),
+                        ERROR_COUNT,
+                        Some("conflict"),
+                    );
 
                     return future::ok((state, res));
                 }
@@ -651,9 +656,11 @@ fn post_assignment_handler(
             }
 
             Err(e) => {
-                if let Some(m) = agent.metrics.lock().unwrap().clone() {
-                    counter_vec_inc(&m, ERROR_COUNT, Some(&e.to_string()));
-                }
+                agent_counter_vec_inc(
+                    &agent.metrics.lock().unwrap().clone(),
+                    ERROR_COUNT,
+                    Some(&e.to_string()),
+                );
 
                 future::err((state, e.into_handler_error()))
             }
@@ -760,9 +767,11 @@ impl Handler for Agent {
     fn handle(self, state: State) -> Box<HandlerFuture> {
         let method = Method::borrow_from(&state);
 
-        if let Some(m) = self.metrics.lock().unwrap().clone() {
-            counter_vec_inc(&m, REQUEST_COUNT, Some(method.as_str()));
-        }
+        agent_counter_vec_inc(
+            &self.metrics.lock().unwrap().clone(),
+            REQUEST_COUNT,
+            Some(method.as_str()),
+        );
 
         // If we are here, then the method must either be
         // POST or GET.  It can not be anything else.
@@ -1007,13 +1016,7 @@ fn process_assignment_impl(
 
         // Update the total number of objects that have been processed, whether
         // successful or not.
-        if let Some(m) = metrics.clone() {
-            // Note: The rebalancer agent does not currently break down this
-            // metric by anything meaningful, so we don't supply a bucket.
-            // That is, the only thing we track here is the total number of
-            // objects processed.
-            counter_vec_inc(&m, OBJECT_COUNT, None);
-        }
+        agent_counter_vec_inc(&metrics, OBJECT_COUNT, None);
 
         let tmp = &mut assignment.write().unwrap();
 
@@ -1025,9 +1028,11 @@ fn process_assignment_impl(
                 log_file_stats(&t, &uuid, &metrics);
             }
             TaskStatus::Failed(e) => {
-                if let Some(m) = metrics.clone() {
-                    counter_vec_inc(&m, ERROR_COUNT, Some(&e.to_string()));
-                }
+                agent_counter_vec_inc(
+                    &metrics,
+                    ERROR_COUNT,
+                    Some(&e.to_string()),
+                );
                 tmp.stats.failed += 1;
                 failures.lock().unwrap().push(t.clone());
             }
@@ -1236,4 +1241,19 @@ pub fn agent_counter_inc_by(metrics: &Option<MetricsMap>, key: &str, val: u64) {
     };
 
     counter_inc_by(&map, key, val);
+}
+
+pub fn agent_counter_vec_inc(
+    metrics: &Option<MetricsMap>,
+    key: &str,
+    bucket: Option<&str>,
+) {
+    let map = match metrics {
+        Some(m) => m,
+        None => {
+            return;
+        }
+    };
+
+    counter_vec_inc(&map, key, bucket);
 }
