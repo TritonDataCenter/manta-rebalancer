@@ -2396,11 +2396,12 @@ fn add_object_to_assignment(
             }
         };
 
-    let source = match manta_object
+    let source = manta_object
         .sharks
         .iter()
-        .find(|s| s.manta_storage_id != from_shark_host)
-    {
+        .find(|s| s.manta_storage_id != from_shark_host);
+
+    let source = match source {
         Some(src) => src,
         None => {
             // The only shark we could find was the one that
