@@ -34,6 +34,7 @@ use crate::storinfo::{self as mod_storinfo, SharkSource, StorageNode};
 
 use std::collections::hash_map::Entry::{Occupied, Vacant};
 use std::collections::HashMap;
+use std::convert::TryInto;
 use std::error::Error as _Error;
 use std::io::{ErrorKind, Write};
 use std::str::FromStr;
@@ -3442,7 +3443,8 @@ fn metadata_update_broker_dynamic(
     job_action: Arc<EvacuateJob>,
     md_update_rx: crossbeam::Receiver<AssignmentCacheEntry>,
 ) -> Result<thread::JoinHandle<Result<(), Error>>, Error> {
-    let mut max_thread_count = job_action.options.max_metadata_update_threads;
+    let mut max_thread_count =
+        job_action.config.options.max_metadata_update_threads;
     let mut pool = ThreadPool::with_name(
         "Dyn_MD_Update".into(),
         job_action.config.options.max_metadata_update_threads,
@@ -4013,7 +4015,6 @@ mod tests {
         let storinfo = NoSkipStorinfo::new();
         let storinfo = Arc::new(storinfo);
 
-        let (_, update_rx) = crossbeam_channel::unbounded();
         let (full_assignment_tx, full_assignment_rx) = crossbeam::bounded(5);
         let (obj_tx, obj_rx) = crossbeam::bounded(5);
         let (checker_fini_tx, checker_fini_rx) = crossbeam::bounded(1);
@@ -4174,16 +4175,15 @@ mod tests {
         unit_test_init();
         let mut g = StdThreadGen::new(10);
 
-        let (_, update_rx) = crossbeam_channel::unbounded();
+        // Evacuate Job Action
         let job_action = create_test_evacuate_job();
-        // Create a vector to hold the evacuate objects and a new assignment.
-        let mut eobjs = vec![];
-        let mut assignment = Assignment::new(StorageNode::arbitrary(&mut g));
 
-        // We will use this uuid throughout the test.
+        // New Assignment
+        let mut assignment = Assignment::new(StorageNode::arbitrary(&mut g));
         let uuid = assignment.id.clone();
 
         // Create some EvacuateObjects
+        let mut eobjs = vec![];
         for _ in 0..100 {
             let mobj = MantaObject::arbitrary(&mut g);
             let mobj_value = serde_json::to_value(mobj).expect("mobj_value");
@@ -4292,7 +4292,6 @@ mod tests {
         let (full_assignment_tx, _) = crossbeam::bounded(5);
         let (checker_fini_tx, _) = crossbeam::bounded(1);
         let (_, obj_rx) = crossbeam::bounded(5);
-        let (_, update_rx) = crossbeam_channel::unbounded();
 
         let job_action = Arc::new(create_test_evacuate_job());
 
@@ -4439,7 +4438,6 @@ mod tests {
         let (obj_tx, obj_rx) = crossbeam::bounded(5);
         let (md_update_tx, md_update_rx) = crossbeam::bounded(5);
         let (checker_fini_tx, checker_fini_rx) = crossbeam::bounded(1);
-        let (_, update_rx) = crossbeam_channel::unbounded();
 
         // Job Action
         let job_action = Arc::new(create_test_evacuate_job());

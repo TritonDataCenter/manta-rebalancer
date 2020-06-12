@@ -139,9 +139,9 @@ impl Config {
         // Both min_shard_num() and max_shard_num() depend on this vector
         // being sorted.  Do not change or remove this line without making a
         // complementary change to those two functions.
-        config.shards.sort_by_key(|s| {
-            util::shard_host2num(s.host.as_str())
-        });
+        config
+            .shards
+            .sort_by_key(|s| util::shard_host2num(s.host.as_str()));
 
         Ok(config)
     }
@@ -325,7 +325,8 @@ mod tests {
                     bld.insert_str("host", "3.fake.joyent.us")
                         .insert_bool("last", true)
                 })
-            }).build();
+            })
+            .build();
         let config = update_test_config_with_vars(&vars);
 
         assert_eq!(config.min_shard_num(), 3);
@@ -336,24 +337,20 @@ mod tests {
             .insert_bool("SNAPLINK_CLEANUP_REQUIRED", true)
             .insert_vec("INDEX_MORAY_SHARDS", |builder| {
                 builder
-                    .push_map(|bld| {
-                        bld.insert_str("host", "99.fake.joyent.us")
-                    })
+                    .push_map(|bld| bld.insert_str("host", "99.fake.joyent.us"))
                     .push_map(|bld| {
                         bld.insert_str("host", "1000.fake.joyent.us")
                     })
                     .push_map(|bld| {
                         bld.insert_str("host", "200.fake.joyent.us")
                     })
+                    .push_map(|bld| bld.insert_str("host", "2.fake.joyent.us"))
                     .push_map(|bld| {
-                           bld.insert_str("host", "2.fake.joyent.us")
-                    })
-                    .push_map(|bld| {
-                        bld
-                            .insert_str("host", "100.fake.joyent.us")
+                        bld.insert_str("host", "100.fake.joyent.us")
                             .insert_bool("last", true)
                     })
-            }).build();
+            })
+            .build();
 
         let config = update_test_config_with_vars(&vars);
 
@@ -418,7 +415,7 @@ mod tests {
         assert_eq!(config.options.max_tasks_per_assignment, 1111);
         assert_eq!(config.options.max_metadata_update_threads, 2222);
         assert_eq!(config.options.max_sharks, 3333);
-        assert_eq!(config.options.use_static_md_update_threads, true);
+        assert_eq!(config.options.use_static_md_update_threads, false);
         assert_eq!(
             config.options.static_queue_depth,
             DEFAULT_STATIC_QUEUE_DEPTH
