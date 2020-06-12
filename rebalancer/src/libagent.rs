@@ -32,7 +32,10 @@ use joyent_rust_utils::file::calculate_md5;
 use libmanta::moray::MantaObjectShark;
 
 use crate::common::{AssignmentPayload, ObjectSkippedReason, Task, TaskStatus};
-use crate::metrics::{self, *};
+use crate::metrics::{
+    self, counter_inc_by, counter_vec_inc, ConfigMetrics, MetricsMap,
+    BYTES_COUNT, ERROR_COUNT, OBJECT_COUNT, REQUEST_COUNT,
+};
 
 use reqwest::{Client, StatusCode};
 use rusqlite;
@@ -838,7 +841,7 @@ fn download(
     object: &str,
     csum: &str,
     client: &Client,
-) -> Result<(u64), ObjectSkippedReason> {
+) -> Result<u64, ObjectSkippedReason> {
     let mut response = match client.get(uri).send() {
         Ok(resp) => resp,
         Err(e) => {
@@ -915,8 +918,8 @@ pub fn process_task(
         client,
     ) {
         Ok(bytes) => {
-            if let Some(m) = metrics.clone() {
-                counter_inc_by(&m, BYTES_COUNT, bytes);
+            if let Some(m) = metrics {
+                counter_inc_by(m, BYTES_COUNT, bytes);
             }
 
             info!(
