@@ -989,7 +989,7 @@ fn process_assignment_impl(
         let mut t = assignment.read().unwrap().tasks[index].clone();
 
         trace!(
-            "Processing assignment: {}, owner: {}, object: {}",
+            "Processing task: assignment: {}, owner: {}, object: {}",
             &uuid,
             &t.owner,
             &t.object_id
