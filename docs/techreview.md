@@ -83,7 +83,7 @@ and get this to production soon" and "something big needs to change in the
 design".
 
 
-# Napkin math to feel out what is *possible*
+# Initial Performance Approximation
 
 We worked through what evacuation speed would theoretically be possible in SPC.
 
@@ -107,7 +107,7 @@ Concerns:
 4. Impact on service.
 
 
-### 1. sharkspotter time
+### 1. Sharkspotter Time
 
 With 90 servers and estimating ~50 million objects per server (see the metadata
 section below), the "sharkspotter" run (or runs) would generate a listing of
@@ -119,7 +119,7 @@ I would definitely hope the design is to do this sharkspotting *once* at
 the start and re-use that info for possible re-runs of the evacuation job.
 
 
-### 2. byte move time
+### 2. Byte Transfer Time
 
 Bandwith capacity in SPC:
 - Each server has a 10Gbps NIC. Assuming 3% TCP overhead (which has been used
@@ -161,7 +161,7 @@ Note: These calculations ignore *current* network load to the storage servers.
 I don't have the link, but IIRC a starfish.scloud.host chart showed that
 current nominal traffic to storage nodes is almost nothing.
 
-### 3. metadata update time
+### 3. Metadata Update Time
 
 The current rebalancer design does metadata updates at the completion of an
 assignment, while other assignments in the same will still be in flight.  Put
@@ -210,7 +210,7 @@ updateobject and/or batch updates. If moray is (by a large margin) our limiter,
 I don't see a point in getting "smart" in doing inter-DC file transfer.
 
 
-### 4. Impact on service
+### 4. Impact on Service
 
 What specifically is a disruption? In a nicer world we would have SLOs for error
 rate, response time, throughput (others?) and "disrupt" would be those going
@@ -245,7 +245,7 @@ Suggestions:
 
 # Links / References
 
-- The best intro to the number of servers, their capacity, and the history of
+- Intro to the number of servers, their capacity, and the history of
   expansions in the SPC regions [here](https://github.com/joyent/ops-sop/blob/capacity-calc/manta/capacity_calculations/MANTA-INFO-spc-manta-storage-capacity_model.md).
 
-- [Manta Rebalancer slides](https://docs.google.com/presentation/d/1PmbXfa1ZUiAyQzaFdasQMlO0U8JKg8KEcZHk_LRmN9Y/edit#slide=id.p)
+- [Manta Rebalancer Slides](https://docs.google.com/presentation/d/1PmbXfa1ZUiAyQzaFdasQMlO0U8JKg8KEcZHk_LRmN9Y/edit#slide=id.p)
