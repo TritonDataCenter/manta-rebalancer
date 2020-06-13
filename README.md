@@ -26,6 +26,7 @@ evacuated.
 For information in each piece of the project, please see:
 * [Rebalancer Manager Guide](docs/manager.md)
 * [Rebalancer Agent Guide](docs/agent.md)
+* [Rebalancer Technical Review / Deployment Checklist](docs/techreview.md)
 
 ## Basic Rebalancer Topology
 ```
