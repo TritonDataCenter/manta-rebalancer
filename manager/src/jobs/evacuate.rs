@@ -1807,16 +1807,15 @@ fn _calculate_available_mb(
 
     // If (max_remaining - assigned_mb) < 0 (i.e. assigned_mb > max_remaining),
     // we've already exceeded our max fill quota, return 0.
-    max_remaining
-        .checked_sub(assigned_mb)
-        .ok_or_else(|| {
-            warn!(
-                "Detected underflow, returning 0 available_mb for {}",
-                dest_shark.shark.manta_storage_id
-            );
-            0
-        })
-        .expect("checked_sub")
+    if let Some(avail_mb) = max_remaining.checked_sub(assigned_mb) {
+        avail_mb
+    } else {
+        warn!(
+            "Detected underflow, returning 0 available_mb for {}",
+            dest_shark.shark.manta_storage_id
+        );
+        0
+    }
 }
 
 /// Start the sharkspotter thread and feed the objects into the assignment
