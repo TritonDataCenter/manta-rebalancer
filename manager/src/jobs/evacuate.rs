@@ -1314,41 +1314,37 @@ impl EvacuateJob {
 
     #[allow(clippy::ptr_arg)]
     fn mark_dest_shark_assigned(&self, dest_shark: &StorageId, size: u64) {
+        trace!("Marking shark {} assigned with {}MB", dest_shark, size);
         self.mark_dest_shark(
             dest_shark,
             DestSharkStatus::Assigned,
             Some(|shark: &mut EvacuateDestShark| {
-                shark.assigned_mb = shark
-                    .assigned_mb
-                    .checked_add(size)
-                    .ok_or_else(|| {
-                        warn!(
-                            "Detected overflow on assigned_mb, setting to \
-                             u64::MAX"
-                        );
-                        std::u64::MAX
-                    })
-                    .expect("shark assigned");
+                if let Some(assigned_mb) = shark.assigned_mb.checked_add(size) {
+                    shark.assigned_mb = assigned_mb;
+                } else {
+                    warn!(
+                        "Detected overflow on assigned_mb, setting to \
+                         u64::MAX"
+                    );
+                    shark.assigned_mb = std::u64::MAX;
+                }
             }),
         )
     }
 
     #[allow(clippy::ptr_arg)]
     fn mark_dest_shark_ready(&self, dest_shark: &StorageId, size: u64) {
+        trace!("Marking shark {} ready with {}MB", dest_shark, size);
         self.mark_dest_shark(
             dest_shark,
             DestSharkStatus::Ready,
             Some(|shark: &mut EvacuateDestShark| {
-                shark.assigned_mb = shark
-                    .assigned_mb
-                    .checked_sub(size)
-                    .ok_or_else(|| {
-                        warn!(
-                            "Detected underflow on assigned_mb, setting to 0"
-                        );
-                        0
-                    })
-                    .expect("shark ready");
+                if let Some(assigned_mb) = shark.assigned_mb.checked_sub(size) {
+                    shark.assigned_mb = assigned_mb;
+                } else {
+                    warn!("Detected underflow on assigned_mb, setting to 0");
+                    shark.assigned_mb = 0;
+                }
             }),
         )
     }
@@ -1380,6 +1376,12 @@ fn assignment_post_success(
     job_action: &EvacuateJob,
     mut assignment: Assignment,
 ) {
+    trace!(
+        "Post of assignment ({}) with size {} succeeded",
+        assignment.id,
+        assignment.total_size
+    );
+
     assignment.state = AssignmentState::Assigned;
     let mut assignments = job_action
         .assignments
@@ -1406,6 +1408,11 @@ fn assignment_post_fail(
     assignment_state: AssignmentState,
 ) {
     // TODO: Should we blacklist this destination shark?
+
+    warn!(
+        "Post of assignment ({}) with size {} failed: {}",
+        assignment.id, assignment.total_size, reason
+    );
 
     job_action.mark_dest_shark_ready(
         &assignment.dest_shark.manta_storage_id,
@@ -2327,37 +2334,37 @@ fn _channel_send_assignment(
             "Sending {}MB Assignment: {}",
             assignment_size, assignment_uuid
         );
-        full_assignment_tx
-            .send(assignment)
-            .map_err(|e| {
-                error!("Error sending assignment to be posted: {}", e);
 
-                job_action.mark_assignment_error(
-                    &assignment_uuid,
-                    EvacuateObjectError::InternalError,
-                );
-                InternalError::new(
-                    Some(InternalErrorCode::Crossbeam),
-                    CrossbeamError::from(e).description(),
-                )
-            })
-            .and_then(|_| {
-                // This might not be the best place to mark an assignment as
-                // posted because it is possible that the post will fail.  It
-                // would be better if we marked the dest shark as assigned in
-                // assignment_post_success().  But that is it's own thread, and
-                // each per shark assignment generator thread needs to know the
-                // most up to date available_mb for its associated shark.  So
-                // this blocking call is our best choice.  If we err on the
-                // available_mb, it is better to err on the side of lower available
-                // MB than higher, which is possible on a post error.  The
-                // way we account for that is we call mark_dest_shark_ready on post
-                // failure, thus decreasing the assigned_mb and increasing the
-                // available_mb for this shark.
-                job_action
-                    .mark_dest_shark_assigned(&dest_shark, assignment_size);
-                Ok(())
-            })?;
+        // This might not be the best place to mark an assignment as
+        // posted because it is possible that the post will fail.  It
+        // would be better if we marked the dest shark as assigned in
+        // assignment_post_success().  But that is it's own thread, and
+        // each per shark assignment generator thread needs to know the
+        // most up to date available_mb for its associated shark.  So
+        // this blocking call is our best choice.  If we err on the
+        // available_mb, it is better to err on the side of lower available
+        // MB than higher, which is possible on a post error.  The
+        // way we account for that is we call mark_dest_shark_ready() on post
+        // failure, thus decreasing the assigned_mb and increasing the
+        // available_mb for this shark.  Note that we also call
+        // mark_dest_shark_ready() on a channel send failure.
+        job_action.mark_dest_shark_assigned(&dest_shark, assignment_size);
+
+        full_assignment_tx.send(assignment).map_err(|e| {
+            error!("Error sending assignment to be posted: {}", e);
+
+            job_action.mark_assignment_error(
+                &assignment_uuid,
+                EvacuateObjectError::InternalError,
+            );
+
+            job_action.mark_dest_shark_ready(&dest_shark, assignment_size);
+
+            InternalError::new(
+                Some(InternalErrorCode::Crossbeam),
+                CrossbeamError::from(e).description(),
+            )
+        })?;
     }
 
     Ok(())
@@ -3636,6 +3643,7 @@ mod tests {
     use quickcheck::{Arbitrary, StdThreadGen};
     use quickcheck_helpers::random::string as random_string;
     use rand::Rng;
+    use rebalancer::common::ObjectSkippedReason;
     use rebalancer::libagent::{router as agent_router, AgentAssignmentStats};
     use rebalancer::util;
     use reqwest::Client;
@@ -3848,7 +3856,7 @@ mod tests {
 
                 // Create a destination storage node that we will use to
                 // measure our available_mb calculations.  Since there are
-                // only 3 storage nodes an all objects will be on 1.stor and
+                // only 3 storage nodes and all objects will be on 1.stor and
                 // 2.stor this one should be the only possible destination.
                 let mut dest_node = StorageNode::default();
                 dest_node.available_mb = 200;
@@ -3869,8 +3877,12 @@ mod tests {
 
         let mut job_action = create_test_evacuate_job();
         job_action.config.max_fill_percentage = 90;
-
         let job_action = Arc::new(job_action);
+
+        // Channels
+        let (full_assignment_tx, full_assignment_rx) = crossbeam::bounded(5);
+        let (obj_tx, obj_rx) = crossbeam::bounded(5);
+        let (checker_fini_tx, _checker_fini_rx) = crossbeam::bounded(1);
 
         // Generate 100 x 1MiB objects for a total of 100MiB on sharks 1 and 2.
         let mut g = StdThreadGen::new(10);
@@ -3892,11 +3904,6 @@ mod tests {
 
             test_objects.insert(mobj.object_id.clone(), mobj);
         }
-
-        // Channels
-        let (full_assignment_tx, full_assignment_rx) = crossbeam::bounded(5);
-        let (obj_tx, obj_rx) = crossbeam::bounded(5);
-        let (checker_fini_tx, _checker_fini_rx) = crossbeam::bounded(1);
 
         // Manager Thread
         let manager_thread = start_assignment_manager(
@@ -3975,7 +3982,111 @@ mod tests {
         verification_thread
             .join()
             .expect("verification thread handle");
+
+        // Now rerun the job, except this time simulate failure for every
+        // assignment.
+        let mut job_action = create_test_evacuate_job();
+        job_action.config.max_fill_percentage = 90;
+        let job_action = Arc::new(job_action);
+
+        // Channels
+        let (full_assignment_tx, full_assignment_rx) = crossbeam::bounded(5);
+        let (obj_tx, obj_rx) = crossbeam::bounded(5);
+        let (checker_fini_tx, _checker_fini_rx) = crossbeam::bounded(1);
+
+        // Manager Thread
+        let manager_thread = start_assignment_manager(
+            full_assignment_tx,
+            checker_fini_tx,
+            obj_rx,
+            Arc::clone(&job_action),
+            Arc::clone(&storinfo),
+        )
+        .expect("manager_thread");
+
+        // Give the manager thread a second to populate its shark hash
+        thread::sleep(std::time::Duration::from_secs(1));
+
+        // Calculate the available_mb before we simulate the rebalance of any
+        // objects.
+        let pre_available_mb = job_action
+            .get_shark_available_mb(&"3.stor.domain".to_string())
+            .expect("get_shark_available_mb");
+
+        // Max fill: 90%
+        // available_mb: 200MB
+        // percent used: 80%
+        // Total: 200/0.8 = 1000
+        // Total Fill: 1000 * 0.9 = 900
+        // Used MB: 1000 - 200 = 800
+        // pre_available_mb = 900 - 800 = 100
+        assert_eq!(pre_available_mb, 100);
+
+        // Generator Thread
+        let generator_thread_handle =
+            start_test_obj_generator_thread(obj_tx, test_objects.clone());
+
+        // Verification Thread
+        let builder = thread::Builder::new();
+        let verif_job_action = Arc::clone(&job_action);
+        let verification_thread = builder
+            .name(String::from("verification thread"))
+            .spawn(move || {
+                let mut object_count = 0;
+                while let Ok(assignment) = full_assignment_rx.recv() {
+                    assert_eq!(
+                        assignment.dest_shark.manta_storage_id,
+                        "3.stor.domain".to_string()
+                    );
+
+                    assert_eq!(assignment.dest_shark.available_mb, 200);
+
+                    assignment_post_fail(
+                        &verif_job_action,
+                        &assignment,
+                        ObjectSkippedReason::NetworkError,
+                        AssignmentState::Assigned,
+                    );
+
+                    object_count += assignment.tasks.len();
+                }
+
+                let available_mb = verif_job_action
+                    .get_shark_available_mb(&"3.stor.domain".to_string())
+                    .expect("get_shark_available_mb");
+
+                assert_eq!(available_mb, pre_available_mb);
+                assert_eq!(object_count, num_objects);
+
+                use self::evacuateobjects::dsl::{evacuateobjects, status};
+
+                let locked_conn = verif_job_action.conn.lock().expect(
+                    "DB \
+                     conn",
+                );
+
+                let skipped_objs: Vec<EvacuateObject> = evacuateobjects
+                    .filter(status.eq(EvacuateObjectStatus::Skipped))
+                    .load::<EvacuateObject>(&*locked_conn)
+                    .expect("getting filtered objects");
+
+                assert_eq!(skipped_objs.len(), num_objects);
+            })
+            .expect("verification thread result");
+
+        // Join Threads
+        generator_thread_handle
+            .join()
+            .expect("generator thread handle");
+        manager_thread
+            .join()
+            .expect("manager_thread")
+            .expect("manager thread result");
+        verification_thread
+            .join()
+            .expect("verification thread handle");
     }
+
     #[test]
     fn no_skip() {
         use super::*;
