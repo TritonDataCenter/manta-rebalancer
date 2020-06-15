@@ -32,10 +32,9 @@ use joyent_rust_utils::file::calculate_md5;
 use libmanta::moray::MantaObjectShark;
 
 use crate::common::{AssignmentPayload, ObjectSkippedReason, Task, TaskStatus};
-use crate::metrics;
 use crate::metrics::{
-    counter_vec_inc, ConfigMetrics, MetricsMap, ERROR_COUNT, OBJECT_COUNT,
-    REQUEST_COUNT,
+    self, counter_inc_by, counter_vec_inc, ConfigMetrics, MetricsMap,
+    BYTES_COUNT, ERROR_COUNT, OBJECT_COUNT, REQUEST_COUNT,
 };
 
 use reqwest::{Client, StatusCode};
@@ -842,7 +841,7 @@ fn download(
     object: &str,
     csum: &str,
     client: &Client,
-) -> Result<(), ObjectSkippedReason> {
+) -> Result<u64, ObjectSkippedReason> {
     let mut response = match client.get(uri).send() {
         Ok(resp) => resp,
         Err(e) => {
@@ -863,8 +862,8 @@ fn download(
     let tmp_path = manta_tmp_path(owner, object);
     let mut file = file_create(&tmp_path);
 
-    match std::io::copy(&mut response, &mut file) {
-        Ok(_) => (),
+    let bytes = match std::io::copy(&mut response, &mut file) {
+        Ok(b) => b,
         Err(e) => {
             error!("Failed to complete object download: {}:{}", uri, e);
             return Err(ObjectSkippedReason::AgentFSError);
@@ -872,14 +871,18 @@ fn download(
     };
 
     if calculate_md5(&tmp_path) == csum {
-        Ok(())
+        Ok(bytes)
     } else {
         error!("Checksum failed for {}/{}.", owner, object);
         Err(ObjectSkippedReason::MD5Mismatch)
     }
 }
 
-pub fn process_task(task: &mut Task, client: &Client) {
+pub fn process_task(
+    task: &mut Task,
+    client: &Client,
+    metrics: &Option<MetricsMap>,
+) {
     let file_path = manta_file_path(&task.owner, &task.object_id);
     let path = Path::new(&file_path);
 
@@ -914,7 +917,16 @@ pub fn process_task(task: &mut Task, client: &Client) {
         &task.md5sum,
         client,
     ) {
-        Ok(_) => {
+        Ok(bytes) => {
+            if let Some(m) = metrics {
+                counter_inc_by(m, BYTES_COUNT, bytes);
+            }
+
+            info!(
+                "owner: {}, object: {}, bytes: {}",
+                &task.owner, &task.object_id, bytes
+            );
+
             // Upon successful download, move the temprorary object to its
             // rightful location (i.e. /manta/account/object).
             let manta_path = manta_file_path(&task.owner, &task.object_id);
@@ -949,35 +961,10 @@ fn assignment_get(
     }
 }
 
-fn log_file_stats(task: &Task, uuid: &str) {
-    let path = manta_file_path(&task.owner, &task.object_id);
-
-    // If this does not work for some unknown reason, it's not important
-    // enough to stop everything.  Log the failure and move on.
-    let metadata = match fs::metadata(&path) {
-        Ok(md) => md,
-        Err(e) => {
-            error!(
-                "Failed to get object metadata for {}/{}: {}",
-                task.owner, task.object_id, e
-            );
-            return;
-        }
-    };
-
-    info!(
-        "assignment: {}, owner: {}, object: {}, bytes: {}",
-        uuid,
-        task.owner,
-        task.object_id,
-        metadata.len()
-    );
-}
-
 fn process_assignment_impl(
     assignment: Arc<RwLock<Assignment>>,
     uuid: &str,
-    f: fn(&mut Task, &Client),
+    f: fn(&mut Task, &Client, &Option<MetricsMap>),
     failures: Arc<Mutex<Vec<Task>>>,
     metrics: &Option<MetricsMap>,
     client: &Client,
@@ -1004,8 +991,15 @@ fn process_assignment_impl(
 
         let mut t = assignment.read().unwrap().tasks[index].clone();
 
+        trace!(
+            "Processing task: assignment: {}, owner: {}, object: {}",
+            &uuid,
+            &t.owner,
+            &t.object_id
+        );
+
         // Process the task.
-        f(&mut t, client);
+        f(&mut t, client, &metrics);
 
         // Update the total number of objects that have been processed, whether
         // successful or not.
@@ -1022,18 +1016,12 @@ fn process_assignment_impl(
         // Update our stats.
         tmp.stats.complete += 1;
 
-        match t.status {
-            TaskStatus::Complete => {
-                log_file_stats(&t, &uuid);
+        if let TaskStatus::Failed(e) = t.status {
+            if let Some(m) = metrics.clone() {
+                counter_vec_inc(&m, ERROR_COUNT, Some(&e.to_string()));
             }
-            TaskStatus::Failed(e) => {
-                if let Some(m) = metrics.clone() {
-                    counter_vec_inc(&m, ERROR_COUNT, Some(&e.to_string()));
-                }
-                tmp.stats.failed += 1;
-                failures.lock().unwrap().push(t.clone());
-            }
-            _ => (),
+            tmp.stats.failed += 1;
+            failures.lock().unwrap().push(t.clone());
         }
 
         // Update the task in the assignment.
@@ -1062,7 +1050,7 @@ fn process_assignment_impl(
 fn process_assignment(
     assignments: Arc<Mutex<Assignments>>,
     uuid: String,
-    f: fn(&mut Task, &Client),
+    f: fn(&mut Task, &Client, &Option<MetricsMap>),
     metrics: Option<MetricsMap>,
     client: &Client,
     pool: &ThreadPool,
@@ -1134,7 +1122,7 @@ fn agent_start_metrics_server(config: &AgentConfig) -> MetricsMap {
 // consumers, namely the rebalancer zone test framework.
 #[allow(clippy::many_single_char_names)]
 pub fn router(
-    f: fn(&mut Task, &Client),
+    f: fn(&mut Task, &Client, &Option<MetricsMap>),
     config: Option<AgentConfig>,
 ) -> Router {
     build_simple_router(|route| {
