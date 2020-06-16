@@ -9,7 +9,7 @@ workspace = ".."
 assert_cli = "0.6.3"
 jemallocator = "0.3.2"
 clap = "2.33.0"
-crossbeam-channel = "0.3.8"
+crossbeam-channel = "0.4.2"
 crossbeam-deque = "0.7.1"
 futures = "0.1.29"
 hyper = "0.12"
@@ -19,7 +19,7 @@ lazy_static = "1.4.0"
 libmanta = { git = "https://github.com/joyent/rust-libmanta", features = ["postgres"], tag = "v0.7.0" }
 mime = "0.3.13"
 moray = { git = "https://github.com/joyent/rust-moray", features = ["postgres"], tag = "v0.10.0" }
-sharkspotter = { git = "https://github.com/joyent/rust-sharkspotter", features = ["postgres"], tag = "v0.10.3" }
+sharkspotter = { git = "https://github.com/joyent/rust-sharkspotter", features = ["postgres"], tag = "v0.13.1" }
 diesel = { version = "1.4.2", features = ["postgres"] }
 rand = "0.7.0"
 reqwest = "0.9.24"
