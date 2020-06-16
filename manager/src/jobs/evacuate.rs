@@ -2594,7 +2594,7 @@ fn start_assignment_checker(
                                 // If necessary the assignment and its associated
                                 // objects are marked as skipped in the get()
                                 // method.
-                                error!("{}", e);
+                                error!("Could not get assignment: {}", e);
                                 continue;
                             }
                         };
