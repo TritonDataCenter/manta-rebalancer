@@ -61,7 +61,7 @@ pub fn metrics_get() -> &'static Mutex<Option<MetricsMap>> {
 }
 
 pub fn metrics_init(cfg: metrics::ConfigMetrics) {
-    let mut metrics_init = METRICS_INIT.lock().unwrap();
+    let mut metrics_init = METRICS_INIT.lock().expect("metrics init lock");
 
     if metrics_init.init {
         return;
@@ -70,14 +70,14 @@ pub fn metrics_init(cfg: metrics::ConfigMetrics) {
     // Create our baseline metrics.
     let mut metrics = metrics::register_metrics(&cfg);
 
-    let labels: HashMap<String, String> =
-        match metrics::get_const_labels().lock().unwrap().clone() {
-            Some(cl) => cl,
-            None => HashMap::new(),
-        };
+    let labels: HashMap<String, String> = metrics::get_const_labels()
+        .lock()
+        .expect("metrics const labels")
+        .clone()
+        .unwrap_or_else(HashMap::new);
 
     // Now create and register additional metrics exclusively used by the
-    // rebalaner manger.
+    // rebalancer manger.
     let skip_counter = register_counter_vec!(
         opts!(SKIP_COUNT, "Objects skipped.").const_labels(labels),
         &["reason"]
@@ -142,5 +142,5 @@ pub fn metrics_object_inc_by(action: Option<&str>, val: usize) {
 // Private method that directly accesses the metrics structure.
 fn metrics_vec_inc_by(key: &str, bucket: Option<&str>, val: usize) {
     let metrics = METRICS.lock().unwrap().clone();
-    counter_vec_inc_by(&metrics.unwrap(), key, bucket, val);
+    counter_vec_inc_by(&metrics.expect("metrics"), key, bucket, val);
 }

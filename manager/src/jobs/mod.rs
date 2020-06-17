@@ -95,7 +95,6 @@ impl JobBuilder {
     pub fn evacuate(
         mut self,
         from_shark: String,
-        domain_name: &str,
         max_objects: Option<u32>,
     ) -> JobBuilder {
         // A better approach here would be to create a thread in each job
@@ -119,9 +118,8 @@ impl JobBuilder {
 
         match EvacuateJob::new(
             from_shark,
-            domain_name,
+            &self.config,
             &self.id.to_string(),
-            self.config.options,
             rx,
             max_objects,
         ) {
@@ -314,7 +312,7 @@ impl fmt::Debug for Job {
                  from_shark: {:#?}, \
                  min_avail_mb: {:#?}, \
                  }}",
-                ej.dest_shark_list,
+                ej.dest_shark_hash,
                 ej.assignments,
                 ej.from_shark,
                 ej.min_avail_mb,
@@ -353,12 +351,10 @@ pub struct Assignment {
 
 impl Assignment {
     fn new(dest_shark: StorageNode) -> Self {
-        let max_size = dest_shark.available_mb / 2;
-
         Self {
             id: Uuid::new_v4().to_string(),
             dest_shark,
-            max_size,
+            max_size: 0,
             total_size: 0,
             tasks: HashMap::new(),
             state: AssignmentState::Init,
@@ -372,6 +368,7 @@ pub type AssignmentCache = HashMap<AssignmentId, AssignmentCacheEntry>;
 pub struct AssignmentCacheEntry {
     id: AssignmentId,
     dest_shark: StorageNode,
+    total_size: u64,
     state: AssignmentState,
 }
 
@@ -380,6 +377,7 @@ impl From<Assignment> for AssignmentCacheEntry {
         AssignmentCacheEntry {
             id: assignment.id,
             dest_shark: assignment.dest_shark,
+            total_size: assignment.total_size,
             state: assignment.state,
         }
     }
@@ -410,7 +408,7 @@ impl Job {
 
         let result = match self.action {
             JobAction::Evacuate(job_action) => {
-                match job_action.run(&self.config) {
+                match job_action.run() {
                     Ok(()) => {
                         info!(
                             "Job {} completed in {} seconds",
@@ -586,7 +584,7 @@ mod test {
         assert_eq!(builder.state, JobState::Init);
 
         let from_shark = String::from("1.stor.domain");
-        let builder = builder.evacuate(from_shark, "fakedomain.us", Some(1));
+        let builder = builder.evacuate(from_shark, Some(1));
         assert_eq!(builder.state, JobState::Init);
 
         let job = builder.commit().expect("failed to create job");

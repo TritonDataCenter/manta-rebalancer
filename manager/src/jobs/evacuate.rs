@@ -23,7 +23,7 @@ use rebalancer::libagent::{
 };
 use rebalancer::util::{MAX_HTTP_STATUS_CODE, MIN_HTTP_STATUS_CODE};
 
-use crate::config::{Config, ConfigOptions, MAX_TUNABLE_MD_UPDATE_THREADS};
+use crate::config::{Config, MAX_TUNABLE_MD_UPDATE_THREADS};
 use crate::jobs::{
     assignment_cache_usage, Assignment, AssignmentCacheEntry, AssignmentId,
     AssignmentState, JobUpdateMessage, StorageId,
@@ -428,12 +428,14 @@ pub enum DestSharkStatus {
     Init,
     Assigned,
     Ready,
+    Unavailable,
 }
 
 #[derive(Clone, Debug)]
 pub struct EvacuateDestShark {
     pub shark: StorageNode,
     pub status: DestSharkStatus,
+    pub assigned_mb: u64,
 }
 
 ///
@@ -489,8 +491,10 @@ enum DyanmicWorkerMsg {
 
 /// Evacuate a given shark
 pub struct EvacuateJob {
+    pub config: Config,
+
     /// Hash of destination sharks that may change during the job execution.
-    pub dest_shark_list: RwLock<HashMap<StorageId, EvacuateDestShark>>,
+    pub dest_shark_hash: RwLock<HashMap<StorageId, EvacuateDestShark>>,
 
     /// Hash of in progress assignments.
     pub assignments: RwLock<HashMap<AssignmentId, AssignmentCacheEntry>>,
@@ -498,19 +502,11 @@ pub struct EvacuateJob {
     /// The shark to evacuate.
     pub from_shark: MantaObjectShark,
 
+    // TODO: remove this?
     /// The minimum available space for a shark to be considered a destination.
     pub min_avail_mb: Option<u64>,
 
-    // TODO: Maximum total size of objects to include in a single assignment.
-
-    // TODO: max number of shark threads
     pub conn: Mutex<PgConnection>,
-
-    /// domain_name of manta deployment
-    pub domain_name: String,
-
-    /// Tunable options
-    pub options: ConfigOptions,
 
     pub post_client: reqwest::Client,
 
@@ -531,9 +527,8 @@ impl EvacuateJob {
     /// As part of this initialization also create a new PgConnection.
     pub fn new(
         storage_id: String,
-        domain_name: &str,
+        config: &Config,
         db_name: &str,
-        options: ConfigOptions,
         update_rx: Option<crossbeam_channel::Receiver<JobUpdateMessage>>,
         max_objects: Option<u32>,
     ) -> Result<Self, Error> {
@@ -550,13 +545,12 @@ impl EvacuateJob {
         from_shark.manta_storage_id = storage_id;
 
         Ok(Self {
+            config: config.to_owned(),
             min_avail_mb: Some(1000), // TODO: config
-            dest_shark_list: RwLock::new(HashMap::new()),
+            dest_shark_hash: RwLock::new(HashMap::new()),
             assignments: RwLock::new(HashMap::new()),
             from_shark,
             conn: Mutex::new(conn),
-            domain_name: domain_name.to_string(),
-            options,
             max_objects,
             post_client: reqwest::Client::new(),
             get_client: reqwest::Client::new(),
@@ -576,7 +570,7 @@ impl EvacuateJob {
     fn validate(&mut self) -> Result<(), Error> {
         let from_shark = moray_client::get_manta_object_shark(
             &self.from_shark.manta_storage_id,
-            &self.domain_name,
+            &self.config.domain_name,
         )?;
 
         self.from_shark = from_shark;
@@ -584,7 +578,7 @@ impl EvacuateJob {
         Ok(())
     }
 
-    pub fn run(mut self, config: &Config) -> Result<(), Error> {
+    pub fn run(mut self) -> Result<(), Error> {
         self.validate()?;
 
         let mut ret = Ok(());
@@ -593,9 +587,9 @@ impl EvacuateJob {
         let job_action = Arc::new(self);
 
         // get what the evacuate job needs from the config structure
-        let domain = &config.domain_name;
-        let min_shard = config.min_shard_num();
-        let max_shard = config.max_shard_num();
+        let domain = &job_action.config.domain_name;
+        let min_shard = job_action.config.min_shard_num();
+        let max_shard = job_action.config.max_shard_num();
 
         // TODO: How big should each channel be?
         // Set up channels for thread to communicate.
@@ -829,55 +823,96 @@ impl EvacuateJob {
         &self,
         eobj: &mut EvacuateObject,
         reason: ObjectSkippedReason,
-    ) -> Result<(), Error> {
+    ) {
         info!("Skipping object {}: {}.", &eobj.id, reason);
         metrics_skip_inc(Some(&reason.to_string()));
 
         eobj.status = EvacuateObjectStatus::Skipped;
         eobj.skipped_reason = Some(reason);
-        self.insert_into_db(&eobj)?;
-        Ok(())
+        self.insert_into_db(&eobj);
+    }
+
+    // This generates a new Assignment and sets the max_size with
+    // get_shark_available_mb() which takes into account the outstanding
+    // assignments for this shark.
+    fn new_assignment(&self, shark: StorageNode) -> Result<Assignment, Error> {
+        let mut assignment = Assignment::new(shark);
+
+        assignment.max_size = self
+            .get_shark_available_mb(&assignment.dest_shark.manta_storage_id)?;
+
+        Ok(assignment)
+    }
+
+    // Source of truth for available storage space on a shark.
+    #[allow(clippy::ptr_arg)]
+    fn get_shark_available_mb(&self, shark: &StorageId) -> Result<u64, Error> {
+        let dest_shark_hash = self
+            .dest_shark_hash
+            .read()
+            .expect("get_shark_available_mb read lock");
+
+        dest_shark_hash
+            .get(shark)
+            .ok_or_else(|| {
+                let msg =
+                    format!("Could not find dest_shark ({}) in hash", shark);
+                InternalError::new(Some(InternalErrorCode::SharkNotFound), msg)
+            })
+            .and_then(|dest_shark| {
+                Ok(_calculate_available_mb(
+                    dest_shark,
+                    self.config.max_fill_percentage,
+                ))
+            })
+            .map_err(Error::from)
     }
 
     /// Iterate over a new set of storage nodes and update our destination
-    /// shark list accordingly.  This may need to change so that we update
-    /// available_mb more judiciously (i.e. based on timestamp).
+    /// shark hash accordingly.
     fn update_dest_sharks(&self, new_sharks: &[StorageNode]) {
-        let mut dest_shark_list = self
-            .dest_shark_list
+        let mut dest_shark_hash = self
+            .dest_shark_hash
             .write()
-            .expect("update dest_shark_list write lock");
+            .expect("update dest_shark_hash write lock");
 
         for sn in new_sharks.iter() {
             if let Some(dest_shark) =
-                dest_shark_list.get_mut(sn.manta_storage_id.as_str())
+                dest_shark_hash.get_mut(sn.manta_storage_id.as_str())
             {
-                if dest_shark.status == DestSharkStatus::Ready {
-                    dest_shark.shark.available_mb = sn.available_mb;
+                // This is the only place that can move a dest shark from the
+                // Unavailable state to the Ready state.
+                if dest_shark.status == DestSharkStatus::Unavailable {
+                    dest_shark.status = DestSharkStatus::Ready;
                 }
+
+                // Update the available_mb as reported by storinfo.  We use
+                // this along with dest_shark.assigned_mb to calculate the
+                // available storage space in get_shark_available_mb().
+                // Otherwise we should not modify available_mb directly.
+                dest_shark.shark.available_mb = sn.available_mb;
             } else {
                 // create new dest shark and add it to the hash
                 let new_shark = EvacuateDestShark {
                     shark: sn.to_owned(),
                     status: DestSharkStatus::Init,
+                    assigned_mb: 0,
                 };
                 debug!("Adding new destination shark {:?} ", new_shark);
-                dest_shark_list.insert(sn.manta_storage_id.clone(), new_shark);
+                dest_shark_hash.insert(sn.manta_storage_id.clone(), new_shark);
             }
         }
 
         // Walk the list of our destination sharks, if it doesn't exist in
-        // new_sharks Vec then remove it from the hash.  Perhaps a pre-walk
-        // of marking every dest_shark dirty and then a post walk
-        // marking each found shark as clean, and removing all dirty sharks
-        // would be more efficient.
-        *dest_shark_list = dest_shark_list
-            .iter()
-            .filter(|&(ds, _)| {
-                new_sharks.iter().any(|s| &s.manta_storage_id == ds)
-            })
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
+        // new_sharks Vec then mark it as unavailable.  We don't remove them
+        // from the hash because they may re-appear in a subsequent query to
+        // storinfo.  In that event we want to make sure that we are properly
+        // tracking the available space as seen in get_shark_available_mb().
+        for (sn_id, val) in dest_shark_hash.iter_mut() {
+            if !new_sharks.iter().any(|s| &s.manta_storage_id == sn_id) {
+                val.status = DestSharkStatus::Unavailable;
+            }
+        }
     }
 
     // Check for a new storinfo snapshot.
@@ -894,11 +929,11 @@ impl EvacuateJob {
         storinfo: Arc<S>,
         algo: &mod_storinfo::DefaultChooseAlgorithm,
         retries: u16,
-    ) -> Result<Vec<StorageNode>, Error>
+    ) -> Result<Vec<EvacuateDestShark>, Error>
     where
         S: SharkSource + 'static,
     {
-        let mut shark_list: Vec<StorageNode> = vec![];
+        let mut shark_list: Vec<EvacuateDestShark> = vec![];
         let mut tries = 0;
         let shark_list_retry_delay = std::time::Duration::from_millis(500);
 
@@ -910,12 +945,15 @@ impl EvacuateJob {
                 self.update_dest_sharks(&valid_sharks);
             }
 
+            // Turn the shark hash into a list, and filter out any
+            // unavailable sharks.
             shark_list = self
-                .dest_shark_list
+                .dest_shark_hash
                 .read()
-                .expect("dest_shark_list read lock")
+                .expect("dest_shark_hash read lock")
                 .values()
-                .map(|v| v.shark.to_owned())
+                .filter(|v| v.status != DestSharkStatus::Unavailable)
+                .map(|v| v.to_owned())
                 .collect();
 
             if shark_list.is_empty() {
@@ -940,14 +978,14 @@ impl EvacuateJob {
             // Rust sort methods sort from lowest to highest order.  We want
             // the sharks with the most available_mb at the beginning of the
             // list so we reverse the sort.
-            shark_list.sort_by_key(|s| s.available_mb);
+            shark_list.sort_by_key(|s| s.shark.available_mb);
             shark_list.as_mut_slice().reverse();
             Ok(shark_list)
         }
     }
 
     // TODO: Consider doing batched inserts: MANTA-4464.
-    fn insert_into_db(&self, obj: &EvacuateObject) -> Result<usize, Error> {
+    fn insert_into_db(&self, obj: &EvacuateObject) -> usize {
         use self::evacuateobjects::dsl::*;
 
         let locked_conn = self.conn.lock().expect("DB conn lock");
@@ -963,7 +1001,8 @@ impl EvacuateJob {
                 panic!(msg);
             });
 
-        Ok(ret)
+        assert_eq!(ret, 1);
+        ret
     }
 
     #[allow(clippy::ptr_arg)]
@@ -1249,28 +1288,65 @@ impl EvacuateJob {
     }
 
     #[allow(clippy::ptr_arg)]
-    fn mark_dest_shark(&self, dest_shark: &StorageId, status: DestSharkStatus) {
+    fn mark_dest_shark<F>(
+        &self,
+        dest_shark: &StorageId,
+        status: DestSharkStatus,
+        post_fn: Option<F>,
+    ) where
+        F: Fn(&mut EvacuateDestShark) -> (),
+    {
         if let Some(shark) = self
-            .dest_shark_list
+            .dest_shark_hash
             .write()
-            .expect("dest_shark_list write")
+            .expect("dest_shark_hash write")
             .get_mut(dest_shark)
         {
             debug!("Updating shark '{}' to {:?} state", dest_shark, status,);
             shark.status = status;
+            if let Some(func) = post_fn {
+                func(shark)
+            }
         } else {
             warn!("Could not find shark: '{}'", dest_shark);
         }
     }
 
     #[allow(clippy::ptr_arg)]
-    fn mark_dest_shark_assigned(&self, dest_shark: &StorageId) {
-        self.mark_dest_shark(dest_shark, DestSharkStatus::Assigned)
+    fn mark_dest_shark_assigned(&self, dest_shark: &StorageId, size: u64) {
+        trace!("Marking shark {} assigned with {}MB", dest_shark, size);
+        self.mark_dest_shark(
+            dest_shark,
+            DestSharkStatus::Assigned,
+            Some(|shark: &mut EvacuateDestShark| {
+                if let Some(assigned_mb) = shark.assigned_mb.checked_add(size) {
+                    shark.assigned_mb = assigned_mb;
+                } else {
+                    warn!(
+                        "Detected overflow on assigned_mb, setting to \
+                         u64::MAX"
+                    );
+                    shark.assigned_mb = std::u64::MAX;
+                }
+            }),
+        )
     }
 
     #[allow(clippy::ptr_arg)]
-    fn mark_dest_shark_ready(&self, dest_shark: &StorageId) {
-        self.mark_dest_shark(dest_shark, DestSharkStatus::Ready)
+    fn mark_dest_shark_ready(&self, dest_shark: &StorageId, size: u64) {
+        trace!("Marking shark {} ready with {}MB", dest_shark, size);
+        self.mark_dest_shark(
+            dest_shark,
+            DestSharkStatus::Ready,
+            Some(|shark: &mut EvacuateDestShark| {
+                if let Some(assigned_mb) = shark.assigned_mb.checked_sub(size) {
+                    shark.assigned_mb = assigned_mb;
+                } else {
+                    warn!("Detected underflow on assigned_mb, setting to 0");
+                    shark.assigned_mb = 0;
+                }
+            }),
+        )
     }
 
     fn load_assignment_objects(
@@ -1295,43 +1371,16 @@ impl EvacuateJob {
 /// 1. Set AssignmentState to Assigned.
 /// 2. Update assignment that has been successfully posted to the Agent into the
 ///    EvacauteJob's assignment cache.
-/// 3. Update shark available_mb.
 /// 4. Implicitly drop (free) the Assignment on return.
 fn assignment_post_success(
     job_action: &EvacuateJob,
     mut assignment: Assignment,
 ) {
-    match job_action
-        .dest_shark_list
-        .write()
-        .expect("desk_shark_list")
-        .get_mut(&assignment.dest_shark.manta_storage_id)
-    {
-        Some(evac_dest_shark) => {
-            if assignment.total_size > evac_dest_shark.shark.available_mb {
-                warn!(
-                    "Attempting to set available space on destination shark \
-                     to a negative value.  Setting to 0 instead."
-                );
-            }
-
-            evac_dest_shark.shark.available_mb -= assignment.total_size;
-        }
-        None => {
-            // This could happen in the event that while this assignment was
-            // being filled out by the assignment generator thread and being
-            // posted to the agent, the assignment manager might have
-            // received an updated list of sharks from the storinfo service and
-            // as a result removed this one from it's active hash.  Regardless
-            // the assignment has been posted and is actively running on the
-            // shark's rebalancer agent at this point.
-            warn!(
-                "Could not find destination shark ({}) to update available \
-                 MB.",
-                &assignment.dest_shark.manta_storage_id
-            );
-        }
-    }
+    trace!(
+        "Post of assignment ({}) with size {} succeeded",
+        assignment.id,
+        assignment.total_size
+    );
 
     assignment.state = AssignmentState::Assigned;
     let mut assignments = job_action
@@ -1344,6 +1393,33 @@ fn assignment_post_success(
     // Assignment, the Assignment passed in is implicitly dropped (freed)
     // when this function returns.
     assignments.insert(assignment.id.clone(), assignment.into());
+}
+
+// This is one of two places where we mark the dest shark ready and decrease
+// its assigned_mb counter.  We do this because we increased it in
+// _channel_send_assignment(), and need to decrease it now due to the failure.
+// See the note in _channel_send_assignment() that explains why we don't do
+// simply increase the assigned_mb counter on a successful post in the
+// post() function below.
+fn assignment_post_fail(
+    job_action: &EvacuateJob,
+    assignment: &Assignment,
+    reason: ObjectSkippedReason,
+    assignment_state: AssignmentState,
+) {
+    // TODO: Should we blacklist this destination shark?
+
+    warn!(
+        "Post of assignment ({}) with size {} failed: {}",
+        assignment.id, assignment.total_size, reason
+    );
+
+    job_action.mark_dest_shark_ready(
+        &assignment.dest_shark.manta_storage_id,
+        assignment.total_size,
+    );
+
+    job_action.skip_assignment(&assignment.id, reason, assignment_state);
 }
 
 impl PostAssignment for EvacuateJob {
@@ -1363,35 +1439,32 @@ impl PostAssignment for EvacuateJob {
         {
             Ok(r) => r,
             Err(e) => {
-                // TODO: Should we blacklist this destination shark?
-                self.skip_assignment(
-                    &assignment.id,
+                assignment_post_fail(
+                    self,
+                    &assignment,
                     ObjectSkippedReason::DestinationUnreachable,
                     AssignmentState::AgentUnavailable,
                 );
-
                 return Err(e.into());
             }
         };
 
         if !res.status().is_success() {
-            // TODO: Should we blacklist this destination shark?
-            error!(
+            assignment_post_fail(
+                self,
+                &assignment,
+                ObjectSkippedReason::AssignmentRejected,
+                AssignmentState::Rejected,
+            );
+
+            let err = format!(
                 "Error posting assignment {} to {} ({})",
                 payload.id,
                 assignment.dest_shark.manta_storage_id,
                 res.status()
             );
 
-            self.skip_assignment(
-                &assignment.id,
-                ObjectSkippedReason::AssignmentRejected,
-                AssignmentState::Rejected,
-            );
-
-            return Err(
-                InternalError::new(None, "Error posting assignment").into()
-            );
+            return Err(InternalError::new(None, err).into());
         }
 
         debug!("Post of {} was successful", payload.id);
@@ -1538,6 +1611,8 @@ impl ProcessAssignment for EvacuateJob {
 
                 error!("{}", &msg);
 
+                // TODO: This should never happen, should we panic here?
+
                 // Note that we don't set the assignment state here because
                 // we JUST tried looking it up and that failed.  The best we
                 // can do is update the associated objects in the local DB
@@ -1594,18 +1669,19 @@ impl ProcessAssignment for EvacuateJob {
                 );
                 ace.state = AssignmentState::AgentComplete;
             }
+
             AgentAssignmentState::Complete(Some(failed_tasks)) => {
+                let objects = self.load_assignment_objects(
+                    &ace.id,
+                    EvacuateObjectStatus::Assigned,
+                );
+
                 info!(
                     "Assignment {} resulted in {} failed tasks.",
                     &ace.id,
                     failed_tasks.len()
                 );
                 trace!("{:#?}", &failed_tasks);
-
-                let objects = self.load_assignment_objects(
-                    &ace.id,
-                    EvacuateObjectStatus::Assigned,
-                );
 
                 // failed_tasks: Vec<Task>
                 // objects: Vec<EvacuateObject>
@@ -1629,6 +1705,10 @@ impl ProcessAssignment for EvacuateJob {
                 ace.state = AssignmentState::AgentComplete;
             }
         }
+        self.mark_dest_shark_ready(
+            &ace.dest_shark.manta_storage_id,
+            ace.total_size,
+        );
 
         Ok(())
     }
@@ -1648,9 +1728,94 @@ fn _insert_bad_moray_object(
         ..Default::default()
     };
 
-    job_action
-        .insert_into_db(&eobj)
-        .expect("Error inserting bad EvacuateObject into DB");
+    job_action.insert_into_db(&eobj);
+}
+
+fn _insert_bad_manta_object(
+    job_action: &EvacuateJob,
+    object: Value,
+    id: ObjectId,
+) {
+    error!("Moray value missing etag {:#?}", object);
+    let eobj = EvacuateObject {
+        id,
+        object,
+        status: EvacuateObjectStatus::Error,
+        error: Some(EvacuateObjectError::BadMantaObject),
+        ..Default::default()
+    };
+
+    job_action.insert_into_db(&eobj);
+}
+
+//
+// The amount that rebalancer can use is:
+// (total * max_fill_percent) - used_mb - assigned_mb
+//
+// Where:
+//  total = available_mb / (1 - percent_used)
+//  used_mb = total * percent_used
+//
+// Given:
+//  available_mb = 900
+//  assigned_mb = 300
+//  percent_used = 10
+//  max_fill_percent = 80
+//
+// Then:
+//  total_mb = 1000     [900 / (1 - .1)]
+//  used_mb = 100       [1000 * .1]
+//  max_fill_mb = 800   [1000 * .8]
+//  remaining = 400     [800 - 100 - 300]
+//
+fn _calculate_available_mb(
+    dest_shark: &EvacuateDestShark,
+    max_fill_percentage: u32,
+) -> u64 {
+    let available_mb = dest_shark.shark.available_mb;
+    let assigned_mb = dest_shark.assigned_mb;
+    let max_percent = max_fill_percentage as f64 / 100.0;
+    let percent_used = dest_shark.shark.percent_used as f64 / 100.0;
+
+    let total_mb = available_mb as f64 / (1.0 - percent_used);
+    let max_fill_mb = (total_mb * max_percent).floor() as u64;
+    let used_mb = total_mb - available_mb as f64;
+
+    if percent_used > max_percent {
+        warn!(
+            "percent used {} exceeds maximum utilization percentage {}, \
+             reporting shark available MB as 0",
+            percent_used, max_percent
+        );
+        return 0;
+    }
+
+    assert!(percent_used <= 1.0);
+    assert!(percent_used >= 0.0);
+    assert!(max_percent <= 1.0);
+    assert!(max_percent >= 0.0);
+
+    let max_remaining = max_fill_mb
+        .checked_sub(used_mb.floor() as u64)
+        .unwrap_or_else(|| {
+            let msg = format!(
+                "used_mb({}) > max_fill_mb({}) for max_fill({}): {:#?}",
+                used_mb, max_fill_mb, max_percent, dest_shark
+            );
+            panic!(msg);
+        });
+
+    // If (max_remaining - assigned_mb) < 0 (i.e. assigned_mb > max_remaining),
+    // we've already exceeded our max fill quota, return 0.
+    if let Some(avail_mb) = max_remaining.checked_sub(assigned_mb) {
+        avail_mb
+    } else {
+        warn!(
+            "Detected underflow, returning 0 available_mb for {}",
+            dest_shark.shark.manta_storage_id
+        );
+        0
+    }
 }
 
 /// Start the sharkspotter thread and feed the objects into the assignment
@@ -1698,7 +1863,7 @@ fn start_sharkspotter(
                 // For now we consider a poorly formatted moray object or a
                 // missing objectId to be critical failures.  We cannot
                 // insert an evacuate object without an objectId.
-                let manta_object =
+                let manta_object_value =
                     match sharkspotter::manta_obj_from_moray_obj(&moray_object)
                     {
                         Ok(o) => o,
@@ -1710,7 +1875,9 @@ fn start_sharkspotter(
                         }
                     };
 
-                let id = match common::get_objectId_from_value(&manta_object) {
+                let id = match common::get_objectId_from_value(
+                    &manta_object_value,
+                ) {
                     Ok(id_str) => id_str,
                     Err(e) => {
                         return Err(std::io::Error::new(ErrorKind::Other, e));
@@ -1727,14 +1894,18 @@ fn start_sharkspotter(
                             error!("Cannot convert etag to string: {}", e);
                             _insert_bad_moray_object(
                                 &job_action,
-                                manta_object,
+                                manta_object_value,
                                 id,
                             );
                             return Ok(());
                         }
                     },
                     None => {
-                        _insert_bad_moray_object(&job_action, manta_object, id);
+                        _insert_bad_moray_object(
+                            &job_action,
+                            manta_object_value,
+                            id,
+                        );
                         return Ok(());
                     }
                 };
@@ -1745,16 +1916,14 @@ fn start_sharkspotter(
 
                     let eobj = EvacuateObject {
                         id,
-                        object: manta_object,
+                        object: manta_object_value,
                         status: EvacuateObjectStatus::Error,
                         error: Some(EvacuateObjectError::BadShardNumber),
                         etag,
                         ..Default::default()
                     };
 
-                    job_action
-                        .insert_into_db(&eobj)
-                        .expect("Error inserting bad EvacuateObject into DB");
+                    job_action.insert_into_db(&eobj);
 
                     return Err(std::io::Error::new(
                         ErrorKind::Other,
@@ -1763,7 +1932,7 @@ fn start_sharkspotter(
                 }
 
                 let eobj = EvacuateObject::from_parts(
-                    manta_object,
+                    manta_object_value,
                     id.clone(),
                     etag,
                     shard as i32,
@@ -1924,6 +2093,199 @@ fn _stop_join_some_assignment_threads(
     }
 }
 
+fn assignment_manager_impl<S>(
+    full_assignment_tx: crossbeam::Sender<Assignment>,
+    checker_fini_tx: crossbeam_channel::Sender<FiniMsg>,
+    obj_rx: crossbeam_channel::Receiver<EvacuateObject>,
+    job_action: Arc<EvacuateJob>,
+    storinfo: Arc<S>,
+) -> impl Fn() -> Result<(), Error>
+where
+    S: SharkSource + 'static,
+{
+    move || {
+        let mut done = false;
+        let max_sharks = job_action.config.options.max_sharks;
+        let max_tasks_per_assignment =
+            job_action.config.options.max_tasks_per_assignment;
+
+        let algo = mod_storinfo::DefaultChooseAlgorithm {
+            min_avail_mb: job_action.min_avail_mb,
+            blacklist: vec![],
+        };
+
+        let mut shark_hash: HashMap<StorageId, SharkHashEntry> = HashMap::new();
+
+        while !done {
+            // TODO: MANTA-4519
+            // get a fresh shark list
+            let mut shark_list =
+                job_action.get_shark_list(Arc::clone(&storinfo), &algo, 3)?;
+
+            // TODO: file ticket, tunable number of sharks which implies
+            // number of threads.
+            shark_list.truncate(max_sharks);
+
+            // We've already truncated the list to only include the sharks
+            // with the most available_mb.  Shuffling here ensures
+            // that of those sharks our assignments are more evenly spread
+            // out among them.  It is possible that a single shark could
+            // have significantly more space available than every other
+            // shark.  In such a case, if we dont shuffle, the evacuate
+            // job could take much longer as every object would go to a
+            // single shark.
+            let mut rng = rand::thread_rng();
+            shark_list.as_mut_slice().shuffle(&mut rng);
+
+            let shark_list: Vec<StorageNode> =
+                shark_list.into_iter().map(|s| s.shark).collect();
+
+            // For any active sharks that are not in the list remove them
+            // from the hash, send the stop command, join the associated
+            // threads.
+            let mut remove_keys = vec![];
+            for (key, _) in shark_hash.iter() {
+                if shark_list.iter().any(|s| &s.manta_storage_id == key) {
+                    continue;
+                }
+                remove_keys.push(key.clone());
+            }
+
+            // Send the stop command which flushes any outstanding
+            // assignments, then join the threads
+            _stop_join_some_assignment_threads(&mut shark_hash, remove_keys);
+
+            // Create and add any shark threads that are in the list but
+            // not in the hash.
+            for shark in shark_list.iter() {
+                if shark_hash.contains_key(&shark.manta_storage_id) {
+                    continue;
+                }
+
+                let (tx, rx) = crossbeam_channel::bounded(5);
+                let builder = thread::Builder::new();
+                let handle = builder
+                    .name(format!(
+                        "shark_assignment_generator({})",
+                        shark.manta_storage_id
+                    ))
+                    .spawn(shark_assignment_generator(
+                        Arc::clone(&job_action),
+                        shark.clone(),
+                        rx,
+                        full_assignment_tx.clone(),
+                    ))?;
+
+                shark_hash.insert(
+                    shark.manta_storage_id.clone(),
+                    SharkHashEntry {
+                        handle,
+                        tx,
+                        shark: shark.clone(),
+                    },
+                );
+            }
+
+            // for some max number of iterations get an object from shark
+            // spotter, then:
+            // - iteration over the hash:
+            //      * find first shark that is a vaild destination
+            //      * send object to that shark's thread
+            // end loop
+            for _ in 0..max_tasks_per_assignment * max_sharks {
+                // Get an object
+                let mut eobj = match obj_rx.recv() {
+                    Ok(obj) => {
+                        trace!("Received object {:#?}", &obj);
+                        obj
+                    }
+                    Err(e) => {
+                        warn!("Didn't receive object. {}\n", e);
+                        info!("Sending last assignments");
+                        done = true;
+                        break;
+                    }
+                };
+
+                // Iterate over the list of sharks and get the first
+                // valid one.
+                let mut last_reason = ObjectSkippedReason::AgentBusy;
+                let shark_list_entry: Option<&StorageNode> =
+                    shark_list.iter().find(|shark| {
+                        if let Some(reason) = validate_destination(
+                            &eobj.object,
+                            &job_action.from_shark,
+                            &shark,
+                        ) {
+                            trace!("shark is not valid because: {}", reason);
+                            last_reason = reason;
+                            return false;
+                        }
+                        true
+                    });
+
+                // Get the associated shark_hash_entry which holds the
+                // send side of the shark_assignment_generator channel.
+                let shark_hash_entry = match shark_list_entry {
+                    Some(shark) => shark_hash
+                        .get(&shark.manta_storage_id)
+                        .expect("shark not found in hash"),
+                    None => {
+                        warn!("No sharks available");
+                        job_action.skip_object(&mut eobj, last_reason);
+                        continue;
+                    }
+                };
+
+                let shark_id = shark_hash_entry.shark.manta_storage_id.clone();
+
+                // Send the evacuate object to the
+                // shark_assignment_generator.
+                if let Err(e) = shark_hash_entry
+                    .tx
+                    .send(AssignmentMsg::Data(Box::new(eobj.clone())))
+                {
+                    error!(
+                        "Error sending object to shark ({}) \
+                         generator thread: {}",
+                        &shark_id,
+                        CrossbeamError::from(e)
+                    );
+
+                    job_action.skip_object(
+                        &mut eobj,
+                        ObjectSkippedReason::AssignmentError,
+                    );
+
+                    // We can't send anything to the thread, but we need to
+                    // join it.
+                    _stop_join_some_assignment_threads(
+                        &mut shark_hash,
+                        vec![shark_id],
+                    );
+                    break;
+                }
+            }
+
+            // This is a conditional check.  If a given assignment is older
+            // than MAX_ASSIGNMENT_AGE, then we will post it.  But we
+            // don't want to unconditionally post assignments here
+            // because we have seen that results in many single
+            // object/task assignments.
+            _flush_shark_assignment_threads(&mut shark_hash);
+        }
+
+        // Flush all the threads first so that while we are joining they
+        // are all flushing.
+        info!("Shutting down all assignment threads");
+        _stop_join_drain_assignment_threads(shark_hash);
+
+        info!("Manager: Shutting down assignment checker");
+        checker_fini_tx.send(FiniMsg).expect("Fini Msg");
+        Ok(())
+    }
+}
+
 fn start_assignment_manager<S>(
     full_assignment_tx: crossbeam::Sender<Assignment>,
     checker_fini_tx: crossbeam_channel::Sender<FiniMsg>,
@@ -1936,185 +2298,13 @@ where
 {
     thread::Builder::new()
         .name(String::from("assignment_manager"))
-        .spawn(move || {
-            let mut done = false;
-            let max_sharks = job_action.options.max_sharks;
-            let max_tasks_per_assignment =
-                job_action.options.max_tasks_per_assignment;
-
-            let algo = mod_storinfo::DefaultChooseAlgorithm {
-                min_avail_mb: job_action.min_avail_mb,
-                blacklist: vec![],
-            };
-
-            let mut shark_hash: HashMap<StorageId, SharkHashEntry> =
-                HashMap::new();
-
-            while !done {
-                // TODO: MANTA-4519
-                // get a fresh shark list
-                let mut shark_list = job_action.get_shark_list(
-                    Arc::clone(&storinfo),
-                    &algo,
-                    3,
-                )?;
-
-                // TODO: file ticket, tunable number of sharks which implies
-                // number of threads.
-                shark_list.truncate(max_sharks);
-
-                // We've already truncated the list to only include the sharks
-                // with the most available_mb.  Shuffling here ensures
-                // that of those sharks our assignments are more evenly spread
-                // out among them.  It is possible that a single shark could
-                // have significantly more space available than every other
-                // shark.  In such a case, if we dont shuffle, the evacuate
-                // job could take much longer as every object would go to a
-                // single shark.
-                let mut rng = rand::thread_rng();
-                shark_list.as_mut_slice().shuffle(&mut rng);
-
-                // For any active sharks that are not in the list remove them
-                // from the hash, send the stop command, join the associated
-                // threads.
-                let mut remove_keys = vec![];
-                for (key, _) in shark_hash.iter() {
-                    if shark_list.iter().any(|s| &s.manta_storage_id == key) {
-                        continue;
-                    }
-                    remove_keys.push(key.clone());
-                }
-
-                // Send the stop command which flushes any outstanding
-                // assignments, then join the threads
-                _stop_join_some_assignment_threads(
-                    &mut shark_hash,
-                    remove_keys,
-                );
-
-                // Create and add any shark threads that are in the list but
-                // not in the hash.
-                for shark in shark_list.iter() {
-                    if shark_hash.contains_key(&shark.manta_storage_id) {
-                        continue;
-                    }
-
-                    let (tx, rx) = crossbeam_channel::bounded(5);
-                    let builder = thread::Builder::new();
-                    let handle = builder
-                        .name(format!(
-                            "shark_assignment_generator({})",
-                            shark.manta_storage_id
-                        ))
-                        .spawn(shark_assignment_generator(
-                            Arc::clone(&job_action),
-                            shark.clone(),
-                            rx,
-                            full_assignment_tx.clone(),
-                        ))?;
-
-                    shark_hash.insert(
-                        shark.manta_storage_id.clone(),
-                        SharkHashEntry {
-                            handle,
-                            tx,
-                            shark: shark.clone(),
-                        },
-                    );
-                }
-
-                // for some max number of iterations get an object from shark
-                // spotter, then:
-                // - iteration over the hash:
-                //      * find first shark that is a vaild destination
-                //      * send object to that shark's thread
-                // end loop
-                for _ in 0..max_tasks_per_assignment * max_sharks {
-                    // Get an object
-                    let mut eobj = match obj_rx.recv() {
-                        Ok(obj) => {
-                            trace!("Received object {:#?}", &obj);
-                            obj
-                        }
-                        Err(e) => {
-                            warn!("Didn't receive object. {}\n", e);
-                            info!("Sending last assignments");
-                            done = true;
-                            break;
-                        }
-                    };
-
-                    // Iterate over the list of sharks and get the first
-                    // valid one.
-                    let mut last_reason = ObjectSkippedReason::AgentBusy;
-                    let shark_list_entry: Option<&StorageNode> =
-                        shark_list.iter().find(|shark| {
-                            if let Some(reason) = validate_destination(
-                                &eobj.object,
-                                &job_action.from_shark,
-                                &shark,
-                            ) {
-                                last_reason = reason;
-                                return false;
-                            }
-                            true
-                        });
-
-                    // Get the associated shark_hash_entry which holds the
-                    // send side of the shark_assignment_generator channel.
-                    let shark_hash_entry = match shark_list_entry {
-                        Some(shark) => shark_hash
-                            .get(&shark.manta_storage_id)
-                            .expect("shark not found in hash"),
-                        None => {
-                            warn!("No sharks available");
-                            job_action.skip_object(&mut eobj, last_reason)?;
-                            continue;
-                        }
-                    };
-
-                    let shark_id =
-                        shark_hash_entry.shark.manta_storage_id.clone();
-
-                    // Send the evacuate object to the
-                    // shark_assignment_generator.
-                    if let Err(e) = shark_hash_entry
-                        .tx
-                        .send(AssignmentMsg::Data(Box::new(eobj)))
-                    {
-                        error!(
-                            "Error sending object to shark ({}) \
-                             generator thread: {}",
-                            &shark_id,
-                            CrossbeamError::from(e)
-                        );
-
-                        // We can't send anything to the thread, but we need to
-                        // join it.
-                        _stop_join_some_assignment_threads(
-                            &mut shark_hash,
-                            vec![shark_id],
-                        );
-                        break;
-                    }
-                }
-
-                // This is a conditional check.  If a given assignment is older
-                // than MAX_ASSIGNMENT_AGE, then we will post it.  But we
-                // don't want to unconditionally post assignments here
-                // because we have seen that results in many single
-                // object/task assignments.
-                _flush_shark_assignment_threads(&mut shark_hash);
-            }
-
-            // Flush all the threads first so that while we are joining they
-            // are all flushing.
-            _stop_join_drain_assignment_threads(shark_hash);
-
-            info!("Manager: Shutting down assignment checker");
-            checker_fini_tx.send(FiniMsg).expect("Fini Msg");
-            Ok(())
-        })
+        .spawn(assignment_manager_impl(
+            full_assignment_tx,
+            checker_fini_tx,
+            obj_rx,
+            job_action,
+            storinfo,
+        ))
         .map_err(Error::from)
 }
 
@@ -2130,6 +2320,8 @@ fn _channel_send_assignment(
         // that the assignment checker thread knows to wait for
         // it to be posted and to check for it later on.
         let assignment_uuid = assignment.id.clone();
+        let assignment_size = assignment.total_size;
+        let dest_shark = assignment.dest_shark.manta_storage_id.clone();
 
         job_action
             .assignments
@@ -2137,7 +2329,26 @@ fn _channel_send_assignment(
             .expect("assignments write lock")
             .insert(assignment_uuid.clone(), assignment.clone().into());
 
-        info!("Sending Assignment: {}", assignment_uuid);
+        info!(
+            "Sending {}MB Assignment: {}",
+            assignment_size, assignment_uuid
+        );
+
+        // This might not be the best place to mark an assignment as
+        // posted because it is possible that the post will fail.  It
+        // would be better if we marked the dest shark as assigned in
+        // assignment_post_success().  But that is it's own thread, and
+        // each per shark assignment generator thread needs to know the
+        // most up to date available_mb for its associated shark.  So
+        // this blocking call is our best choice.  If we err on the
+        // available_mb, it is better to err on the side of lower available
+        // MB than higher, which is possible on a post error.  The
+        // way we account for that is we call mark_dest_shark_ready() on post
+        // failure, thus decreasing the assigned_mb and increasing the
+        // available_mb for this shark.  Note that we also call
+        // mark_dest_shark_ready() on a channel send failure.
+        job_action.mark_dest_shark_assigned(&dest_shark, assignment_size);
+
         full_assignment_tx.send(assignment).map_err(|e| {
             error!("Error sending assignment to be posted: {}", e);
 
@@ -2145,6 +2356,9 @@ fn _channel_send_assignment(
                 &assignment_uuid,
                 EvacuateObjectError::InternalError,
             );
+
+            job_action.mark_dest_shark_ready(&dest_shark, assignment_size);
+
             InternalError::new(
                 Some(InternalErrorCode::Crossbeam),
                 CrossbeamError::from(e).description(),
@@ -2155,6 +2369,135 @@ fn _channel_send_assignment(
     Ok(())
 }
 
+enum AssignmentAddObjectError {
+    BadMantaObject,
+    DestinationInsufficentSpace,
+    SouceIsEvacShark,
+}
+
+// return True of False if we should flush the assignment or not
+fn add_object_to_assignment(
+    job_action: &EvacuateJob,
+    mut eobj: EvacuateObject,
+    shark: &StorageNode,
+    assignment: &mut Assignment,
+    available_space: &mut u64,
+    from_shark_host: &str,
+) -> Result<EvacuateObject, AssignmentAddObjectError> {
+    eobj.dest_shark = shark.manta_storage_id.clone();
+
+    let manta_object: MantaObjectEssential =
+        match serde_json::from_value(eobj.object.clone()) {
+            Ok(mo) => mo,
+            Err(e) => {
+                error!(
+                    "Unable to get essential values from \
+                     manta object: {} ({})",
+                    eobj.id, e
+                );
+                job_action.mark_object_error(
+                    &eobj.id,
+                    EvacuateObjectError::BadMantaObject,
+                );
+                return Err(AssignmentAddObjectError::BadMantaObject);
+            }
+        };
+
+    let source = manta_object
+        .sharks
+        .iter()
+        .find(|s| s.manta_storage_id != from_shark_host);
+
+    let source = match source {
+        Some(src) => src,
+        None => {
+            // The only shark we could find was the one that
+            // is being evacuated.
+            job_action
+                .skip_object(&mut eobj, ObjectSkippedReason::SourceIsEvacShark);
+
+            return Err(AssignmentAddObjectError::SouceIsEvacShark);
+        }
+    };
+
+    // Make sure there is enough space for this object on the
+    // shark.
+    let content_mb = manta_object.content_length / (1024 * 1024);
+    if content_mb > *available_space {
+        job_action.skip_object(
+            &mut eobj,
+            ObjectSkippedReason::DestinationInsufficientSpace,
+        );
+
+        return Err(AssignmentAddObjectError::DestinationInsufficentSpace);
+    }
+
+    assignment.tasks.insert(
+        manta_object.object_id.to_owned(),
+        Task {
+            object_id: manta_object.object_id.to_owned(),
+            owner: manta_object.owner.to_owned(),
+            md5sum: manta_object.content_md5.to_owned(),
+            source: source.to_owned(),
+            status: TaskStatus::Pending,
+        },
+    );
+
+    // We don't checked_sub() here because if we do underflow we want to
+    // panic.  We've already assured that available_space >= content_mb above.
+    *available_space -= content_mb;
+    assignment.total_size += content_mb;
+
+    trace!(
+        "{}: Available space: {} | Tasks: {}",
+        assignment.id,
+        &available_space,
+        &assignment.tasks.len()
+    );
+
+    eobj.status = EvacuateObjectStatus::Assigned;
+    eobj.assignment_id = assignment.id.clone();
+
+    Ok(eobj)
+}
+
+// This function handles:
+// - inserting all assignment tasks into the database
+// - sending the assignment to the post thread to be sent to the agents
+// - getting a new assignment
+// - resetting the eobj_vec
+// - updating the available_space to the appropriate value
+fn flush_assignment(
+    job_action: &Arc<EvacuateJob>,
+    assignment: &mut Assignment,
+    eobj_vec: &mut Vec<EvacuateObject>,
+    shark: &StorageNode,
+    full_assignment_tx: &crossbeam::Sender<Assignment>,
+) -> Result<u64, Error> {
+    job_action.insert_assignment_into_db(&assignment.id, &eobj_vec)?;
+
+    // This function calls mark_dest_shark_ready() which in turn
+    // updates the assigned_mb counter for this shark.
+    _channel_send_assignment(
+        Arc::clone(job_action),
+        full_assignment_tx,
+        assignment.clone(),
+    )?;
+
+    *eobj_vec = Vec::new();
+
+    // See above.  assigned_mb counter is up to date, so when we
+    // create a new assignment with this method it will
+    // set assignment.max_size to the most up to date value.
+    *assignment = job_action.new_assignment(shark.to_owned())?;
+
+    // See comment at top of shark_assignment_generator for why we divide by 2.
+    let available_space = assignment.max_size / 2;
+    debug!("Setting available_space: {}MB", available_space);
+
+    Ok(available_space)
+}
+
 fn shark_assignment_generator(
     job_action: Arc<EvacuateJob>,
     shark: StorageNode, // TODO: reference?
@@ -2162,28 +2505,30 @@ fn shark_assignment_generator(
     full_assignment_tx: crossbeam::Sender<Assignment>,
 ) -> impl Fn() -> Result<(), Error> {
     move || {
-        let max_tasks = job_action.options.max_tasks_per_assignment;
-        let max_age = job_action.options.max_assignment_age;
+        let max_tasks = job_action.config.options.max_tasks_per_assignment;
+        let max_age = job_action.config.options.max_assignment_age;
         let from_shark_host = job_action.from_shark.manta_storage_id.clone();
-        let mut assignment = Assignment::new(shark.clone());
-        let mut assignment_birth_time = std::time::Instant::now();
-        let mut flush = false;
         let mut stop = false;
+        let mut flush = false;
         let mut eobj_vec = vec![];
+        let mut assignment = job_action.new_assignment(shark.clone())?;
+        let mut assignment_birth_time = std::time::Instant::now();
 
-        // There are two places where we "manage" the available space on a
-        // shark.  One is in assignment_post_success() where the dest shark
-        // entry in the EvacuateJobAction's hash is updated.  The other is here.
-        // If this thread is still running when the shark enters the Ready
-        // state again (when there are no active assignments on it), but
-        // before the storinfo updates the amount of available space (or before
-        // storinfo is re-queried for an updated) then we want to have some
-        // idea of what we are working with.
-        let mut available_space = assignment.max_size;
+        // max_size is set appropriately in `new_assignment()`.  We divide by 2
+        // here to account for the possibility that other objects are written to
+        // the shark while we are generating the assignment.
+        let mut available_space = assignment.max_size / 2;
+
+        debug!("Starting with available_space: {}MB", available_space);
 
         // TODO: get any objects from the DB that were previously supposed to
         // be assigned to this shark but the shark was busy at that time.
+
         while !stop {
+            // An assignment message is either:
+            // Stop
+            // Flush
+            // Data(EvacuateObject)
             let assign_msg = match assign_msg_rx.recv() {
                 Ok(msg) => msg,
                 Err(_) => {
@@ -2196,8 +2541,6 @@ fn shark_assignment_generator(
                     // Stop message.  But in the event that it does exit
                     // without doing this and we have an active assignment,
                     // this will clean that up before exiting.
-                    job_action
-                        .mark_dest_shark_assigned(&shark.manta_storage_id);
 
                     job_action
                         .insert_assignment_into_db(&assignment.id, &eobj_vec)?;
@@ -2214,6 +2557,7 @@ fn shark_assignment_generator(
 
             match assign_msg {
                 AssignmentMsg::Stop => {
+                    debug!("Received Stop");
                     stop = true;
                 }
                 AssignmentMsg::Flush => {
@@ -2230,66 +2574,44 @@ fn shark_assignment_generator(
                 }
 
                 AssignmentMsg::Data(data) => {
-                    let mut eobj = *data;
-                    eobj.dest_shark = shark.manta_storage_id.clone();
+                    match add_object_to_assignment(
+                        &job_action,
+                        *data,
+                        &shark,
+                        &mut assignment,
+                        &mut available_space,
+                        &from_shark_host,
+                    ) {
+                        Ok(eobj) => eobj_vec.push(eobj),
+                        Err(e) => match e {
+                            AssignmentAddObjectError::BadMantaObject |
+                            AssignmentAddObjectError::SouceIsEvacShark => {
+                                // We either skipped or errored on an object,
+                                // but it was the object's fault so we should
+                                // continue trying to add other objects to this
+                                // assignment, for this shark.
 
-                    let manta_object: MantaObjectEssential =
-                        match serde_json::from_value(eobj.object.clone()) {
-                            Ok(mo) => mo,
-                            Err(e) => {
-                                error!(
-                                    "Unable to get essential values from \
-                                     manta object: {} ({})",
-                                    eobj.id, e
-                                );
-                                job_action.mark_object_error(
-                                    &eobj.id,
-                                    EvacuateObjectError::BadMantaObject,
-                                );
                                 continue;
                             }
-                        };
+                            AssignmentAddObjectError::DestinationInsufficentSpace => {
+                                // TODO: This can be improved via MANTA-5306
+                                // We have hit out maximum for this assignment.
+                                // add_object_to_assignment() added the object
+                                // that would have overflowed the available
+                                // space as a skipped object to the DB.
 
-                    let source = match manta_object
-                        .sharks
-                        .iter()
-                        .find(|s| s.manta_storage_id != from_shark_host)
-                    {
-                        Some(src) => src,
-                        None => {
-                            // The only shark we could find was the one that
-                            // is being evacuated.
-                            job_action.skip_object(
-                                &mut eobj,
-                                ObjectSkippedReason::SourceIsEvacShark,
-                            )?;
-                            continue;
+                                available_space = flush_assignment(
+                                    &job_action,
+                                    &mut assignment,
+                                    &mut eobj_vec,
+                                    &shark,
+                                    &full_assignment_tx,
+                                )?;
+
+                                continue;
+                            }
                         }
-                    };
-
-                    // Make sure there is enough space for this object on the
-                    // shark.
-                    let content_mb =
-                        manta_object.content_length / (1024 * 1024);
-                    if content_mb > available_space {
-                        job_action.skip_object(
-                            &mut eobj,
-                            ObjectSkippedReason::DestinationInsufficientSpace,
-                        )?;
-
-                        break;
                     }
-
-                    assignment.tasks.insert(
-                        manta_object.object_id.to_owned(),
-                        Task {
-                            object_id: manta_object.object_id.to_owned(),
-                            owner: manta_object.owner.to_owned(),
-                            md5sum: manta_object.content_md5.to_owned(),
-                            source: source.to_owned(),
-                            status: TaskStatus::Pending,
-                        },
-                    );
 
                     // If this is the first assignment to be added, start the
                     // clock.  We don't care about the age of 0 task
@@ -2297,57 +2619,30 @@ fn shark_assignment_generator(
                     if assignment.tasks.len() == 1 {
                         assignment_birth_time = std::time::Instant::now();
                     }
-
-                    assignment.total_size += content_mb;
-                    available_space -= content_mb;
-
-                    trace!(
-                        "{}: Available space: {} | Tasks: {}",
-                        assignment.id,
-                        &available_space,
-                        &assignment.tasks.len()
-                    );
-
-                    eobj.status = EvacuateObjectStatus::Assigned;
-                    eobj.assignment_id = assignment.id.clone();
-                    eobj_vec.push(eobj.clone());
                 }
-            }
+            } // End Assignment Message match block
 
             // Post this assignment and create a new one if:
             //  * There are any tasks in the assignment AND:
             //      * We were told to flush or stop
-            //      OR
+            //        OR
             //      * We have reached the maximum number of tasks per assignment
             if !assignment.tasks.is_empty() && flush
                 || stop
                 || assignment.tasks.len() >= max_tasks
             {
-                let assignment_size = assignment.total_size;
-
                 flush = false;
 
-                job_action.mark_dest_shark_assigned(&shark.manta_storage_id);
-
-                job_action
-                    .insert_assignment_into_db(&assignment.id, &eobj_vec)?;
-
-                _channel_send_assignment(
-                    Arc::clone(&job_action),
+                available_space = flush_assignment(
+                    &job_action,
+                    &mut assignment,
+                    &mut eobj_vec,
+                    &shark,
                     &full_assignment_tx,
-                    assignment,
                 )?;
-
-                // Re-set the available space to half of what is remaining.
-                // See comment above where we initialize 'available_space'
-                // for details.
-                available_space = (shark.available_mb - assignment_size) / 2;
-                assignment = Assignment::new(shark.clone());
-                assignment.max_size = available_space;
-
-                eobj_vec = Vec::new();
             }
-        }
+        } // End while !stop (get next message/object)
+
         Ok(())
     }
 }
@@ -2369,6 +2664,14 @@ fn validate_destination(
             return Some(ObjectSkippedReason::SourceOtherError);
         }
     };
+
+    trace!(
+        "Validating {:#?} as dest_shark\nFor object on {:#?}\n being \
+         removed from {:#?}",
+        dest_shark,
+        sharks,
+        evac_shark
+    );
 
     let obj_on_dest = sharks
         .iter()
@@ -2423,11 +2726,6 @@ where
                             continue;
                         }
                     }
-
-                    // TODO sqlite: put assignment into persistent store?
-                    // Currently considering allowing the assignment to be
-                    // transient and only keep EvacuateObjects in persistent
-                    // store.
                 }
             }
             Err(_) => {
@@ -2620,11 +2918,6 @@ fn start_assignment_checker(
 
                     found_assignment_count += 1;
 
-                    // Mark the shark associated with this assignment as Ready
-                    job_action.mark_dest_shark_ready(
-                        &ace.dest_shark.manta_storage_id,
-                    );
-
                     match md_update_tx.send(ace.to_owned()) {
                         Ok(()) => (),
                         Err(e) => {
@@ -2777,7 +3070,7 @@ fn get_client_from_hash<'a>(
             debug!("Client for shard {} does not exist, creating.", shard);
             let client = match moray_client::create_client(
                 shard,
-                &job_action.domain_name,
+                &job_action.config.domain_name,
             ) {
                 Ok(client) => client,
                 Err(e) => {
@@ -3030,7 +3323,7 @@ fn metadata_update_assignment(
         // sharks, and then returns the updated Manta metadata object.
         match job_action.update_object_shark(mobj, dest_shark) {
             Ok(o) => {
-                if job_action.options.use_batched_updates {
+                if job_action.config.options.use_batched_updates {
                     if let Err(e) =
                         batch_add_putobj(&mut batched_reqs, o, shard, etag)
                     {
@@ -3072,7 +3365,7 @@ fn metadata_update_assignment(
         updated_objects.push(eobj);
     }
 
-    if job_action.options.use_batched_updates {
+    if job_action.config.options.use_batched_updates {
         let marked_error =
             metadata_update_batch(job_action, client_hash, batched_reqs);
 
@@ -3156,10 +3449,11 @@ fn metadata_update_broker_dynamic(
     job_action: Arc<EvacuateJob>,
     md_update_rx: crossbeam::Receiver<AssignmentCacheEntry>,
 ) -> Result<thread::JoinHandle<Result<(), Error>>, Error> {
-    let mut max_thread_count = job_action.options.max_metadata_update_threads;
+    let mut max_thread_count =
+        job_action.config.options.max_metadata_update_threads;
     let mut pool = ThreadPool::with_name(
         "Dyn_MD_Update".into(),
-        job_action.options.max_metadata_update_threads,
+        job_action.config.options.max_metadata_update_threads,
     );
     let queue = Arc::new(Injector::<DyanmicWorkerMsg>::new());
     let update_rx = match &job_action.update_rx {
@@ -3246,8 +3540,8 @@ fn _update_broker_static(
     job_action: Arc<EvacuateJob>,
     md_update_rx: crossbeam::Receiver<AssignmentCacheEntry>,
 ) -> Result<(), Error> {
-    let num_threads = job_action.options.max_metadata_update_threads;
-    let queue_depth = job_action.options.static_queue_depth;
+    let num_threads = job_action.config.options.max_metadata_update_threads;
+    let queue_depth = job_action.config.options.static_queue_depth;
     let (static_tx, static_rx) = crossbeam_channel::bounded(queue_depth);
     let mut thread_handles = vec![];
 
@@ -3317,7 +3611,7 @@ fn start_metadata_update_broker(
     job_action: Arc<EvacuateJob>,
     md_update_rx: crossbeam::Receiver<AssignmentCacheEntry>,
 ) -> Result<thread::JoinHandle<Result<(), Error>>, Error> {
-    if job_action.options.use_static_md_update_threads {
+    if job_action.config.options.use_static_md_update_threads {
         metadata_update_broker_static(job_action, md_update_rx)
     } else {
         metadata_update_broker_dynamic(job_action, md_update_rx)
@@ -3348,6 +3642,7 @@ mod tests {
     use quickcheck::{Arbitrary, StdThreadGen};
     use quickcheck_helpers::random::string as random_string;
     use rand::Rng;
+    use rebalancer::common::ObjectSkippedReason;
     use rebalancer::libagent::{router as agent_router, AgentAssignmentStats};
     use rebalancer::metrics::MetricsMap;
     use rebalancer::util;
@@ -3400,18 +3695,32 @@ mod tests {
         task.set_status(TaskStatus::Complete);
     }
 
+    // TODO: need some more reasonable ranges here.  We will panic in the
+    // event that we hit objects above 1000 zetabytes
     fn generate_storage_node(local: bool) -> StorageNode {
+        // Init rand
         let mut rng = rand::thread_rng();
         let mut g = StdThreadGen::new(100);
-        let available_mb: u64 = rng.gen();
-        let percent_used: u8 = rng.gen_range(0, 101);
+
+        // calculate random fields
+        let timestamp: u64 = rng.gen();
         let filesystem = random_string(&mut g, rng.gen_range(1, 20));
         let datacenter = random_string(&mut g, rng.gen_range(1, 20));
         let manta_storage_id = match local {
             true => String::from("localhost"),
             false => format!("{}.stor.joyent.us", rng.gen_range(1, 100)),
         };
-        let timestamp: u64 = rng.gen();
+
+        // We set available_mb to a max of u64::MAX/100 because we calculate
+        // the total storage space by available_mb / (1 - percent_used), and
+        // if available_mb gets randomly set to something very close to
+        // std::u64::MAX, we don't want to divide by a (1 - percent_used)
+        // that is less than 1 (i.e. percent_used == 0), or else we will
+        // overflow u64.  In the code we will panic if this happens, which is
+        // the right thing to do because std::u64::MAX MB works out to be
+        // > 18,000 Zetabytes... on a single storage node.
+        let available_mb: u64 = rng.gen_range(0, std::u64::MAX / 100);
+        let percent_used: u8 = rng.gen_range(0, 100);
 
         StorageNode {
             available_mb,
@@ -3432,25 +3741,65 @@ mod tests {
         ret
     }
 
-    struct MockStorinfo;
+    fn create_test_evacuate_job() -> EvacuateJob {
+        let mut config = Config::default();
+        let from_shark = String::from("1.stor.domain");
 
-    impl MockStorinfo {
-        fn new() -> Self {
-            MockStorinfo {}
-        }
+        config.max_fill_percentage = 100;
+
+        let (_, update_rx) = crossbeam_channel::unbounded();
+        let mut job_action = EvacuateJob::new(
+            from_shark,
+            &config,
+            &Uuid::new_v4().to_string(),
+            Some(update_rx),
+            Some(100),
+        )
+        .expect("initialize evacuate job");
+
+        // Manually set the datacenter so that our destination validation
+        // allows for same DC transfer.  This is normally done in
+        // EvacuateJob::validate(), but that calls into moray to get the DC
+        // name.
+        job_action.from_shark.datacenter = "dc1".into();
+        assert!(job_action.create_table().is_ok());
+
+        job_action
     }
 
-    impl SharkSource for MockStorinfo {
-        fn choose(&self, _: &ChooseAlgorithm) -> Option<Vec<StorageNode>> {
-            let mut rng = rand::thread_rng();
-            let random = rng.gen_range(0, 10);
+    fn start_test_obj_generator_thread(
+        obj_tx: crossbeam_channel::Sender<EvacuateObject>,
+        test_objects: HashMap<String, MantaObject>,
+    ) -> thread::JoinHandle<()> {
+        thread::Builder::new()
+            .name(String::from("test object generator thread"))
+            .spawn(move || {
+                for (id, o) in test_objects.into_iter() {
+                    let shard = 1;
+                    let etag = String::from("Fake_etag");
+                    let mobj_value =
+                        serde_json::to_value(o.clone()).expect("mobj value");
 
-            if random == 0 {
-                return None;
-            }
-
-            Some(generate_sharks(random, true))
-        }
+                    let eobj = EvacuateObject::from_parts(
+                        mobj_value,
+                        id.clone(),
+                        etag,
+                        shard,
+                    );
+                    match obj_tx.send(eobj) {
+                        Ok(()) => (),
+                        Err(e) => {
+                            error!(
+                                "Could not send object.  Assignment \
+                                 generator must have shutdown {}.",
+                                e
+                            );
+                            break;
+                        }
+                    }
+                }
+            })
+            .expect("failed to build object generator thread")
     }
 
     #[derive(Default)]
@@ -3459,6 +3808,375 @@ mod tests {
         fn choose(&self, _algo: &ChooseAlgorithm) -> Option<Vec<StorageNode>> {
             None
         }
+    }
+
+    #[test]
+    fn calculate_available_mb_test() {
+        unit_test_init();
+        let mut max_fill_percentage = 80;
+        let mut storage_node = StorageNode::default();
+
+        // --- Test exact calculation --- //
+        storage_node.percent_used = 10;
+        storage_node.available_mb = 900;
+
+        let evac_dest_shark = EvacuateDestShark {
+            shark: storage_node.clone(),
+            status: DestSharkStatus::Ready,
+            assigned_mb: 100,
+        };
+
+        // Total MB is 1000, 100(10%) is used, and 100 is assigned, so there
+        // should be a total of 800 MB available.  But our max fill is 80% (or
+        // 800MB), so if we consider 200 MB used, of the 800MB available, we
+        // should only see 600MB available for us.
+        assert_eq!(
+            _calculate_available_mb(&evac_dest_shark, max_fill_percentage),
+            600
+        );
+
+        // --- Test Max fill percentage < percent used returns 0 --- //
+        storage_node.percent_used = 90;
+        storage_node.available_mb = 100;
+
+        let evac_dest_shark = EvacuateDestShark {
+            shark: storage_node.clone(),
+            status: DestSharkStatus::Ready,
+            assigned_mb: 100,
+        };
+
+        // Max fill is 80 and percent_used is 90, so this should return 0
+        // because we are already over our high water mark.
+        assert_eq!(
+            _calculate_available_mb(&evac_dest_shark, max_fill_percentage),
+            0
+        );
+
+        // --- Test max_remaining < assigned_mb should return 0 --- //
+        // Used = 80 MB
+        // Total = 100 MB
+        storage_node.percent_used = 80;
+        storage_node.available_mb = 20; // Total is 100MB
+
+        // Max fill MB = 90 MB
+        // max_remaining = max_fill_mb - used_mb = 90 - 80 = 10 MB
+        max_fill_percentage = 90;
+
+        // setting assigned_mb > 10 would result in max_remaining <
+        // assigned_mb and should return 0
+        let evac_dest_shark = EvacuateDestShark {
+            shark: storage_node.clone(),
+            status: DestSharkStatus::Ready,
+            assigned_mb: 11,
+        };
+
+        assert_eq!(
+            _calculate_available_mb(&evac_dest_shark, max_fill_percentage),
+            0
+        );
+
+        // setting assigned_mb to 9 should leave us with 1MB to spare.
+        let evac_dest_shark = EvacuateDestShark {
+            shark: storage_node.clone(),
+            status: DestSharkStatus::Ready,
+            assigned_mb: 9,
+        };
+
+        assert_eq!(
+            _calculate_available_mb(&evac_dest_shark, max_fill_percentage),
+            1
+        );
+
+        // --- Test 0 available_mb should result in a return value of 0 --- //
+        storage_node.percent_used = 100;
+        storage_node.available_mb = 0;
+        let evac_dest_shark = EvacuateDestShark {
+            shark: storage_node.clone(),
+            status: DestSharkStatus::Ready,
+            assigned_mb: 9,
+        };
+
+        // set this to 100 so we don't trip over percent_used > max_fill
+        max_fill_percentage = 100;
+
+        assert_eq!(
+            _calculate_available_mb(&evac_dest_shark, max_fill_percentage),
+            0
+        );
+
+        // --- Test storinfo giving us incorrect values is still safe --- //
+        storage_node.percent_used = 100;
+        storage_node.available_mb = 100;
+        let evac_dest_shark = EvacuateDestShark {
+            shark: storage_node.clone(),
+            status: DestSharkStatus::Ready,
+            assigned_mb: 9,
+        };
+
+        // set this to 100 so we don't trip over percent_used > max_fill
+        max_fill_percentage = 100;
+
+        assert_eq!(
+            _calculate_available_mb(&evac_dest_shark, max_fill_percentage),
+            0
+        );
+    }
+
+    #[test]
+    fn available_mb() {
+        unit_test_init();
+        struct MockStorinfo;
+
+        impl MockStorinfo {
+            fn new() -> Self {
+                MockStorinfo {}
+            }
+        }
+
+        impl SharkSource for MockStorinfo {
+            fn choose(&self, _: &ChooseAlgorithm) -> Option<Vec<StorageNode>> {
+                let mut sharks = vec![];
+
+                // First create two storage nodes where we will put the objects.
+                for i in 1..3 {
+                    let mut sn = StorageNode::default();
+                    sn.manta_storage_id = format!("{}.stor.domain", i);
+                    sn.datacenter = "dc1".into();
+                    sharks.push(sn);
+                }
+
+                // Create a destination storage node that we will use to
+                // measure our available_mb calculations.  Since there are
+                // only 3 storage nodes and all objects will be on 1.stor and
+                // 2.stor this one should be the only possible destination.
+                let mut dest_node = StorageNode::default();
+                dest_node.available_mb = 200;
+                dest_node.percent_used = 80;
+                dest_node.datacenter = "dc1".into();
+                dest_node.manta_storage_id = "3.stor.domain".into();
+
+                sharks.push(dest_node);
+
+                debug!("Choosing sharks: {:#?}", &sharks);
+                Some(sharks)
+            }
+        }
+
+        // Storinfo
+        let storinfo = MockStorinfo::new();
+        let storinfo = Arc::new(storinfo);
+
+        // Create the job
+        let mut job_action = create_test_evacuate_job();
+        job_action.config.max_fill_percentage = 90;
+        let job_action = Arc::new(job_action);
+
+        // Channels
+        let (full_assignment_tx, full_assignment_rx) = crossbeam::bounded(5);
+        let (obj_tx, obj_rx) = crossbeam::bounded(5);
+        let (checker_fini_tx, _checker_fini_rx) = crossbeam::bounded(1);
+
+        // Generate 100 x 1MiB objects for a total of 100MiB on sharks 1 and 2.
+        let mut g = StdThreadGen::new(10);
+        let mut test_objects = HashMap::new();
+        let num_objects = 100;
+        for _ in 0..num_objects {
+            let mut mobj = MantaObject::arbitrary(&mut g);
+            let mut sharks = vec![];
+
+            mobj.content_length = 1024 * 1024; // 1MiB
+            for i in 1..3 {
+                let shark = MantaObjectShark {
+                    datacenter: String::from("dc1"), //todo
+                    manta_storage_id: format!("{}.stor.domain", i),
+                };
+                sharks.push(shark);
+            }
+            mobj.sharks = sharks;
+
+            test_objects.insert(mobj.object_id.clone(), mobj);
+        }
+
+        // Manager Thread
+        let manager_thread = start_assignment_manager(
+            full_assignment_tx,
+            checker_fini_tx,
+            obj_rx,
+            Arc::clone(&job_action),
+            Arc::clone(&storinfo),
+        )
+        .expect("manager_thread");
+
+        // Generator Thread
+        let generator_thread_handle =
+            start_test_obj_generator_thread(obj_tx, test_objects.clone());
+
+        // Verification Thread
+        let builder = thread::Builder::new();
+        let verif_job_action = Arc::clone(&job_action);
+        let verification_thread = builder
+            .name(String::from("verification thread"))
+            .spawn(move || {
+                let mut object_count = 0;
+                while let Ok(assignment) = full_assignment_rx.recv() {
+                    assert_eq!(
+                        assignment.dest_shark.manta_storage_id,
+                        "3.stor.domain".to_string()
+                    );
+
+                    assert_eq!(assignment.dest_shark.available_mb, 200);
+
+                    object_count += assignment.tasks.len();
+                }
+
+                let available_mb = verif_job_action
+                    .get_shark_available_mb(&"3.stor.domain".to_string())
+                    .expect("get_shark_available_mb");
+
+                // We should have used all the available_mb, but because of
+                // MANTA-5306 we skip one every time we hit our max.  Which
+                // should happen 4 times with 100 objects.
+                assert_eq!(available_mb, 4);
+
+                {
+                    use self::evacuateobjects::dsl::{evacuateobjects, status};
+
+                    let locked_conn = verif_job_action.conn.lock().expect(
+                        "DB \
+                         conn",
+                    );
+
+                    let skipped_objs: Vec<EvacuateObject> = evacuateobjects
+                        .filter(status.eq(EvacuateObjectStatus::Skipped))
+                        .load::<EvacuateObject>(&*locked_conn)
+                        .expect("getting filtered objects");
+
+                    assert_eq!(skipped_objs.len() as u64, available_mb);
+                    assert_eq!(num_objects - object_count, skipped_objs.len());
+
+                    let all_objects: Vec<EvacuateObject> = evacuateobjects
+                        .load::<EvacuateObject>(&*locked_conn)
+                        .expect("getting filtered objects");
+
+                    assert_eq!(all_objects.len(), num_objects);
+                }
+            })
+            .expect("verification thread result");
+
+        // Join Threads
+        generator_thread_handle
+            .join()
+            .expect("generator thread handle");
+        manager_thread
+            .join()
+            .expect("manager_thread")
+            .expect("manager thread result");
+        verification_thread
+            .join()
+            .expect("verification thread handle");
+
+        // Now rerun the job, except this time simulate failure for every
+        // assignment.
+        let mut job_action = create_test_evacuate_job();
+        job_action.config.max_fill_percentage = 90;
+        let job_action = Arc::new(job_action);
+
+        // Channels
+        let (full_assignment_tx, full_assignment_rx) = crossbeam::bounded(5);
+        let (obj_tx, obj_rx) = crossbeam::bounded(5);
+        let (checker_fini_tx, _checker_fini_rx) = crossbeam::bounded(1);
+
+        // Manager Thread
+        let manager_thread = start_assignment_manager(
+            full_assignment_tx,
+            checker_fini_tx,
+            obj_rx,
+            Arc::clone(&job_action),
+            Arc::clone(&storinfo),
+        )
+        .expect("manager_thread");
+
+        // Give the manager thread a second to populate its shark hash
+        thread::sleep(std::time::Duration::from_secs(1));
+
+        // Calculate the available_mb before we simulate the rebalance of any
+        // objects.
+        let pre_available_mb = job_action
+            .get_shark_available_mb(&"3.stor.domain".to_string())
+            .expect("get_shark_available_mb");
+
+        // Max fill: 90%
+        // available_mb: 200MB
+        // percent used: 80%
+        // Total: 200/0.8 = 1000
+        // Total Fill: 1000 * 0.9 = 900
+        // Used MB: 1000 - 200 = 800
+        // pre_available_mb = 900 - 800 = 100
+        assert_eq!(pre_available_mb, 100);
+
+        // Generator Thread
+        let generator_thread_handle =
+            start_test_obj_generator_thread(obj_tx, test_objects.clone());
+
+        // Verification Thread
+        let builder = thread::Builder::new();
+        let verif_job_action = Arc::clone(&job_action);
+        let verification_thread = builder
+            .name(String::from("verification thread"))
+            .spawn(move || {
+                let mut object_count = 0;
+                while let Ok(assignment) = full_assignment_rx.recv() {
+                    assert_eq!(
+                        assignment.dest_shark.manta_storage_id,
+                        "3.stor.domain".to_string()
+                    );
+
+                    assert_eq!(assignment.dest_shark.available_mb, 200);
+
+                    assignment_post_fail(
+                        &verif_job_action,
+                        &assignment,
+                        ObjectSkippedReason::NetworkError,
+                        AssignmentState::Assigned,
+                    );
+
+                    object_count += assignment.tasks.len();
+                }
+
+                let available_mb = verif_job_action
+                    .get_shark_available_mb(&"3.stor.domain".to_string())
+                    .expect("get_shark_available_mb");
+
+                assert_eq!(available_mb, pre_available_mb);
+                assert_eq!(object_count, num_objects);
+
+                use self::evacuateobjects::dsl::{evacuateobjects, status};
+
+                let locked_conn = verif_job_action.conn.lock().expect(
+                    "DB \
+                     conn",
+                );
+
+                let skipped_objs: Vec<EvacuateObject> = evacuateobjects
+                    .filter(status.eq(EvacuateObjectStatus::Skipped))
+                    .load::<EvacuateObject>(&*locked_conn)
+                    .expect("getting filtered objects");
+
+                assert_eq!(skipped_objs.len(), num_objects);
+            })
+            .expect("verification thread result");
+
+        // Join Threads
+        generator_thread_handle
+            .join()
+            .expect("generator thread handle");
+        manager_thread
+            .join()
+            .expect("manager_thread")
+            .expect("manager thread result");
+        verification_thread
+            .join()
+            .expect("verification thread handle");
     }
 
     #[test]
@@ -3486,7 +4204,7 @@ mod tests {
                         let str_len = rand::thread_rng().gen_range(1, 50);
                         shark.datacenter = random_string(&mut g, str_len);
                     } else {
-                        shark.datacenter = String::from("foo");
+                        shark.datacenter = String::from("dc1");
                     }
 
                     sharks.push(shark);
@@ -3495,20 +4213,8 @@ mod tests {
             }
         }
 
-        let (_, update_rx) = crossbeam_channel::unbounded();
-        let from_shark = String::from("1.stor.domain");
-        let job_action = EvacuateJob::new(
-            from_shark,
-            "fakedomain.us",
-            &Uuid::new_v4().to_string(),
-            ConfigOptions::default(),
-            Some(update_rx),
-            Some(100),
-        )
-        .expect("initialize evacuate job");
-        assert!(job_action.create_table().is_ok());
+        let job_action = Arc::new(create_test_evacuate_job());
 
-        let job_action = Arc::new(job_action);
         let storinfo = NoSkipStorinfo::new();
         let storinfo = Arc::new(storinfo);
 
@@ -3534,7 +4240,7 @@ mod tests {
                 let shark_num = rng.gen_range(1 + i * 2, 3 + i * 2);
 
                 let shark = MantaObjectShark {
-                    datacenter: String::from("foo"), //todo
+                    datacenter: String::from("dc1"), //todo
                     manta_storage_id: format!("{}.stor.domain", shark_num),
                 };
                 sharks.push(shark);
@@ -3561,36 +4267,8 @@ mod tests {
         )
         .expect("start assignment manager");
 
-        let builder = thread::Builder::new();
-        let obj_generator_th = builder
-            .name(String::from("no skip object_generator_test"))
-            .spawn(move || {
-                for (id, o) in test_objects_copy.into_iter() {
-                    let shard = 1;
-                    let etag = String::from("Fake_etag");
-                    let mobj_value =
-                        serde_json::to_value(o.clone()).expect("mobj value");
-
-                    let eobj = EvacuateObject::from_parts(
-                        mobj_value,
-                        id.clone(),
-                        etag,
-                        shard,
-                    );
-                    match obj_tx.send(eobj) {
-                        Ok(()) => (),
-                        Err(e) => {
-                            error!(
-                                "Could not send object.  Assignment \
-                                 generator must have shutdown {}.",
-                                e
-                            );
-                            break;
-                        }
-                    }
-                }
-            })
-            .expect("failed to build object generator thread");
+        let generator_thread_handle =
+            start_test_obj_generator_thread(obj_tx, test_objects_copy);
 
         let verification_objects = test_objects.clone();
         let builder = thread::Builder::new();
@@ -3601,70 +4279,80 @@ mod tests {
                 debug!("Starting verification thread");
                 let mut assignment_count = 0;
                 let mut task_count = 0;
-                loop {
-                    match full_assignment_rx.recv() {
-                        Ok(assignment) => {
-                            assignment_count += 1;
-                            task_count += assignment.tasks.len();
-                            let dest_shark =
-                                assignment.dest_shark.manta_storage_id;
-                            for (tid, _) in assignment.tasks {
-                                match verification_objects.get(&tid) {
-                                    Some(obj) => {
-                                        println!(
-                                            "Checking that {:#?} is not in \
-                                             {:#?}",
-                                            dest_shark, obj.sharks
-                                        );
+                while let Ok(assignment) = full_assignment_rx.recv() {
+                    let dest_shark = assignment.dest_shark.manta_storage_id;
 
-                                        assert_eq!(
-                                            obj.sharks.iter().any(|shark| {
-                                                shark.manta_storage_id
-                                                    == dest_shark
-                                            }),
-                                            false
-                                        );
-                                    }
-                                    None => {
-                                        assert!(false, "test error");
-                                    }
-                                }
-                            }
-                            verif_job_action.mark_dest_shark_ready(&dest_shark);
-                            println!("Task COUNT {}", task_count);
-                        }
-                        Err(_) => {
-                            info!(
-                                "Verification Thread: Channel closed, exiting."
-                            );
-                            break;
-                        }
+                    assignment_count += 1;
+                    task_count += assignment.tasks.len();
+
+                    for (tid, _) in assignment.tasks {
+                        let obj = verification_objects
+                            .get(&tid)
+                            .expect("missing object");
+
+                        println!(
+                            "Checking that {:#?} is not in {:#?}",
+                            dest_shark, obj.sharks
+                        );
+
+                        assert_eq!(
+                            obj.sharks.iter().any(|shark| {
+                                shark.manta_storage_id == dest_shark
+                            }),
+                            false
+                        );
                     }
+
+                    println!("Task COUNT {}", task_count);
                 }
 
-                use self::evacuateobjects::dsl::{evacuateobjects, status};
+                use self::evacuateobjects::dsl::{
+                    evacuateobjects, skipped_reason, status,
+                };
                 let locked_conn =
                     verif_job_action.conn.lock().expect("DB conn");
-                let records: Vec<EvacuateObject> = evacuateobjects
+
+                let skipped: Vec<EvacuateObject> = evacuateobjects
                     .filter(status.eq(EvacuateObjectStatus::Skipped))
                     .load::<EvacuateObject>(&*locked_conn)
                     .expect("getting skipped objects");
-                let skip_count = records.len();
 
+                let insufficient_space: Vec<EvacuateObject> =
+                    evacuateobjects
+                        .filter(skipped_reason.eq(
+                            ObjectSkippedReason::DestinationInsufficientSpace,
+                        ))
+                        .load::<EvacuateObject>(&*locked_conn)
+                        .expect("getting skipped objects");
+
+                let skip_count = skipped.len();
+                let insufficient_space_skips = insufficient_space.len();
+
+                // Because we are using random sizes for objects and storage
+                // node available MB we will hit many destination
+                // insufficient space skips.  In production, that shouldn't
+                // happen that often as we should rarely be in a situation
+                // where all of our destination storage nodes are so close
+                // to full.
+                println!("Num Objects: {}", num_objects);
                 println!("Assignment Count: {}", assignment_count);
                 println!("Task Count: {}", task_count);
+                println!("Total skips: {}", skip_count);
                 println!(
-                    "Skip Count: {} (this should be a fairly small \
-                     percentage of Num Objects)",
-                    skip_count
+                    "Insufficient space skips: {}",
+                    insufficient_space_skips
                 );
-                println!("Num Objects: {}", num_objects);
+                println!(
+                    "Other Skip Count: {} (this should be a fairly small \
+                     percentage of Num Objects)",
+                    skip_count - insufficient_space_skips
+                );
                 assert_eq!(task_count + skip_count, num_objects);
             })
             .expect("verification thread");
 
-        verification_thread.join().expect("verification join TODO");
-        obj_generator_th.join().expect("obj_gen thr join TODO");
+        verification_thread.join().expect("verification join");
+        generator_thread_handle.join().expect("obj_gen thr join");
 
         // mark all assignments as post processed so that the checker thread
         // can exit.
@@ -3689,28 +4377,16 @@ mod tests {
     fn assignment_processing_test() {
         unit_test_init();
         let mut g = StdThreadGen::new(10);
-        let (_, update_rx) = crossbeam_channel::unbounded();
-        let job_action = EvacuateJob::new(
-            String::new(),
-            "fakedomain.us",
-            &Uuid::new_v4().to_string(),
-            ConfigOptions::default(),
-            Some(update_rx),
-            None,
-        )
-        .expect("initialize evacuate job");
 
-        // Create the database table
-        assert!(job_action.create_table().is_ok());
+        // Evacuate Job Action
+        let job_action = create_test_evacuate_job();
 
-        // Create a vector to hold the evacuate objects and a new assignment.
-        let mut eobjs = vec![];
+        // New Assignment
         let mut assignment = Assignment::new(StorageNode::arbitrary(&mut g));
-
-        // We will use this uuid throughout the test.
         let uuid = assignment.id.clone();
 
         // Create some EvacuateObjects
+        let mut eobjs = vec![];
         for _ in 0..100 {
             let mobj = MantaObject::arbitrary(&mut g);
             let mobj_value = serde_json::to_value(mobj).expect("mobj_value");
@@ -3819,20 +4495,8 @@ mod tests {
         let (full_assignment_tx, _) = crossbeam::bounded(5);
         let (checker_fini_tx, _) = crossbeam::bounded(1);
         let (_, obj_rx) = crossbeam::bounded(5);
-        let (_, update_rx) = crossbeam_channel::unbounded();
 
-        // These tests are run locally and don't go out over the network so any properly formatted
-        // host/domain name is valid here.
-        let job_action = EvacuateJob::new(
-            String::new(),
-            "fakedomain.us",
-            &Uuid::new_v4().to_string(),
-            ConfigOptions::default(),
-            Some(update_rx),
-            None,
-        )
-        .expect("initialize evacuate job");
-        let job_action = Arc::new(job_action);
+        let job_action = Arc::new(create_test_evacuate_job());
 
         let assignment_manager_handle = match start_assignment_manager(
             full_assignment_tx,
@@ -3944,74 +4608,56 @@ mod tests {
     #[test]
     fn full_test() {
         unit_test_init();
+
+        struct MockStorinfo;
+
+        impl MockStorinfo {
+            fn new() -> Self {
+                MockStorinfo {}
+            }
+        }
+
+        impl SharkSource for MockStorinfo {
+            fn choose(&self, _: &ChooseAlgorithm) -> Option<Vec<StorageNode>> {
+                let mut rng = rand::thread_rng();
+                let random = rng.gen_range(0, 10);
+
+                if random == 0 {
+                    return None;
+                }
+
+                Some(generate_sharks(random, true))
+            }
+        }
+
         let now = std::time::Instant::now();
+
+        // Storinfo
         let storinfo = MockStorinfo::new();
         let storinfo = Arc::new(storinfo);
 
+        // Channels
         let (full_assignment_tx, full_assignment_rx) = crossbeam::bounded(5);
         let (obj_tx, obj_rx) = crossbeam::bounded(5);
         let (md_update_tx, md_update_rx) = crossbeam::bounded(5);
         let (checker_fini_tx, checker_fini_rx) = crossbeam::bounded(1);
-        let (_, update_rx) = crossbeam_channel::unbounded();
 
-        // These tests are run locally and don't go out over the network so any properly formatted
-        // host/domain name is valid here.
-        let job_action = EvacuateJob::new(
-            String::new(),
-            "region.fakedomain.us",
-            &Uuid::new_v4().to_string(),
-            ConfigOptions::default(),
-            Some(update_rx),
-            None,
-        )
-        .expect("initialize evacuate job");
+        // Job Action
+        let job_action = Arc::new(create_test_evacuate_job());
 
-        // Create the database table
-        assert!(job_action.create_table().is_ok());
-
-        let job_action = Arc::new(job_action);
-        let mut test_objects = vec![];
+        // Test Objects
+        let mut test_objects = HashMap::new();
         let mut g = StdThreadGen::new(10);
         let num_objects = 100;
 
         for _ in 0..num_objects {
             let mobj = MantaObject::arbitrary(&mut g);
-            test_objects.push(mobj);
+            test_objects.insert(mobj.object_id.clone(), mobj);
         }
 
-        let test_objects_copy = test_objects.clone();
-
-        let builder = thread::Builder::new();
-        let obj_generator_th = builder
-            .name(String::from("object_generator_test"))
-            .spawn(move || {
-                for o in test_objects_copy.into_iter() {
-                    let shard = 1;
-                    let etag = String::from("Fake_etag");
-                    let mobj_value =
-                        serde_json::to_value(o.clone()).expect("mobj value");
-
-                    let id = o.object_id;
-                    let eobj = EvacuateObject::from_parts(
-                        mobj_value,
-                        id.clone(),
-                        etag,
-                        shard,
-                    );
-                    match obj_tx.send(eobj) {
-                        Ok(()) => (),
-                        Err(e) => {
-                            error!(
-                                "Could not send object.  Assignment \
-                                 generator must have shutdown {}.",
-                                e
-                            );
-                            break;
-                        }
-                    }
-                }
-            })
-            .expect("failed to build object generator thread");
+        // Threads
+        let obj_generator_th =
+            start_test_obj_generator_thread(obj_tx, test_objects.clone());
 
         let metadata_update_thread =
             start_metadata_update_broker(Arc::clone(&job_action), md_update_rx)

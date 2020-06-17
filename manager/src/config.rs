@@ -104,6 +104,9 @@ pub struct Config {
 
     #[serde(default = "Config::default_port")]
     pub listen_port: u16,
+
+    #[serde(default = "Config::default_max_fill_percentage")]
+    pub max_fill_percentage: u32,
 }
 
 impl Config {
@@ -121,6 +124,10 @@ impl Config {
         80
     }
 
+    fn default_max_fill_percentage() -> u32 {
+        100
+    }
+
     pub fn parse_config(config_path: &Option<String>) -> Result<Config, Error> {
         let config_path = config_path
             .to_owned()
@@ -132,9 +139,9 @@ impl Config {
         // Both min_shard_num() and max_shard_num() depend on this vector
         // being sorted.  Do not change or remove this line without making a
         // complementary change to those two functions.
-        config.shards.sort_by_key(|s| {
-            util::shard_host2num(s.host.as_str())
-        });
+        config
+            .shards
+            .sort_by_key(|s| util::shard_host2num(s.host.as_str()));
 
         Ok(config)
     }
@@ -267,21 +274,18 @@ fn _config_update_signal_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_util::{
+        self, config_fini, update_test_config_with_vars, write_config_file,
+        TEST_CONFIG_FILE,
+    };
     use lazy_static::lazy_static;
     use libc;
-    use mustache::{Data, MapBuilder};
+    use mustache::MapBuilder;
     use std::fs::File;
-    use std::io::{Read, Write};
-
-    static TEST_CONFIG_FILE: &str = "config.test.json";
+    use std::io::Read;
 
     lazy_static! {
         static ref INITIALIZED: Mutex<bool> = Mutex::new(false);
-        pub static ref TEMPLATE_PATH: String = format!(
-            "{}/{}",
-            env!("CARGO_MANIFEST_DIR"),
-            "../sapi_manifests/rebalancer/template"
-        );
     }
 
     fn unit_test_init() {
@@ -301,54 +305,11 @@ mod tests {
         });
     }
 
-    fn write_config_file(buf: &[u8]) -> Config {
-        File::create(TEST_CONFIG_FILE)
-            .and_then(|mut f| f.write_all(buf))
-            .map_err(Error::from)
-            .and_then(|_| {
-                Config::parse_config(&Some(TEST_CONFIG_FILE.to_string()))
-            })
-            .expect("file write")
-    }
-
-    // Update our test config file with new variables
-    fn update_test_config_with_vars(vars: &Data) -> Config {
-        let template_str = std::fs::read_to_string(TEMPLATE_PATH.to_string())
-            .expect("template string");
-
-        println!("{}", template_str);
-
-        let config_data = mustache::compile_str(&template_str)
-            .and_then(|t| t.render_data_to_string(vars))
-            .expect("render template");
-
-        println!("{}", &config_data);
-        write_config_file(config_data.as_bytes())
-    }
-
     // Initialize a test configuration file by parsing and rendering the
     // same configuration template used in production.
     fn config_init() -> Config {
         assert!(*INITIALIZED.lock().unwrap());
-
-        std::fs::remove_file(TEST_CONFIG_FILE).unwrap_or(());
-
-        let vars = MapBuilder::new()
-            .insert_str("DOMAIN_NAME", "fake.joyent.us")
-            .insert_bool("SNAPLINK_CLEANUP_REQUIRED", true)
-            .insert_vec("INDEX_MORAY_SHARDS", |builder| {
-                builder.push_map(|bld| {
-                    bld.insert_str("host", "1.fake.joyent.us")
-                        .insert_bool("last", true)
-                })
-            }).build();
-
-        update_test_config_with_vars(&vars)
-    }
-
-    fn config_fini() {
-        std::fs::remove_file(TEST_CONFIG_FILE)
-            .expect("attempt to delete missing file")
+        test_util::config_init()
     }
 
     #[test]
@@ -364,7 +325,8 @@ mod tests {
                     bld.insert_str("host", "3.fake.joyent.us")
                         .insert_bool("last", true)
                 })
-            }).build();
+            })
+            .build();
         let config = update_test_config_with_vars(&vars);
 
         assert_eq!(config.min_shard_num(), 3);
@@ -375,24 +337,20 @@ mod tests {
             .insert_bool("SNAPLINK_CLEANUP_REQUIRED", true)
             .insert_vec("INDEX_MORAY_SHARDS", |builder| {
                 builder
-                    .push_map(|bld| {
-                        bld.insert_str("host", "99.fake.joyent.us")
-                    })
+                    .push_map(|bld| bld.insert_str("host", "99.fake.joyent.us"))
                     .push_map(|bld| {
                         bld.insert_str("host", "1000.fake.joyent.us")
                     })
                     .push_map(|bld| {
                         bld.insert_str("host", "200.fake.joyent.us")
                     })
+                    .push_map(|bld| bld.insert_str("host", "2.fake.joyent.us"))
                     .push_map(|bld| {
-                           bld.insert_str("host", "2.fake.joyent.us")
-                    })
-                    .push_map(|bld| {
-                        bld
-                            .insert_str("host", "100.fake.joyent.us")
+                        bld.insert_str("host", "100.fake.joyent.us")
                             .insert_bool("last", true)
                     })
-            }).build();
+            })
+            .build();
 
         let config = update_test_config_with_vars(&vars);
 
@@ -457,7 +415,7 @@ mod tests {
         assert_eq!(config.options.max_tasks_per_assignment, 1111);
         assert_eq!(config.options.max_metadata_update_threads, 2222);
         assert_eq!(config.options.max_sharks, 3333);
-        assert_eq!(config.options.use_static_md_update_threads, true);
+        assert_eq!(config.options.use_static_md_update_threads, false);
         assert_eq!(
             config.options.static_queue_depth,
             DEFAULT_STATIC_QUEUE_DEPTH

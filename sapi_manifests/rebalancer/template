@@ -10,6 +10,9 @@
     },
     "listen_port": 80,
     "domain_name": "{{DOMAIN_NAME}}",
+    {{#MUSKIE_MAX_UTILIZATION_PCT}}
+    "max_fill_precentage": {{MUSKIE_MAX_UTILIZATION_PCT}},
+    {{/MUSKIE_MAX_UTILIZATION_PCT}}
     {{#SNAPLINK_CLEANUP_REQUIRED}}
     "snaplink_cleanup_required": true,
     {{/SNAPLINK_CLEANUP_REQUIRED}}
