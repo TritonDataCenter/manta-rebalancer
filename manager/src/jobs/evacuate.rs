@@ -3808,26 +3808,113 @@ mod tests {
     #[test]
     fn calculate_available_mb_test() {
         unit_test_init();
+        let mut max_fill_percentage = 80;
         let mut storage_node = StorageNode::default();
+
+        // --- Test exact calculation --- //
         storage_node.percent_used = 10;
         storage_node.available_mb = 900;
 
         let evac_dest_shark = EvacuateDestShark {
-            shark: storage_node,
+            shark: storage_node.clone(),
             status: DestSharkStatus::Ready,
             assigned_mb: 100,
         };
-
-        let max_fill_percentage = 80;
 
         // Total MB is 1000, 100(10%) is used, and 100 is assigned, so there
         // should be a total of 800 MB available.  But our max fill is 80% (or
         // 800MB), so if we consider 200 MB used, of the 800MB available, we
         // should only see 600MB available for us.
-        let available_mb =
-            _calculate_available_mb(&evac_dest_shark, max_fill_percentage);
+        assert_eq!(
+            _calculate_available_mb(&evac_dest_shark, max_fill_percentage),
+            600
+        );
 
-        assert_eq!(available_mb, 600);
+        // --- Test Max fill percentage < percent used returns 0 --- //
+        storage_node.percent_used = 90;
+        storage_node.available_mb = 100;
+
+        let evac_dest_shark = EvacuateDestShark {
+            shark: storage_node.clone(),
+            status: DestSharkStatus::Ready,
+            assigned_mb: 100,
+        };
+
+        // Max fill is 80 and percent_used is 90, so this should return 0
+        // because we are already over our high water mark.
+        assert_eq!(
+            _calculate_available_mb(&evac_dest_shark, max_fill_percentage),
+            0
+        );
+
+        // --- Test max_remaining < assigned_mb should return 0 --- //
+        // Used = 80 MB
+        // Total = 100 MB
+        storage_node.percent_used = 80;
+        storage_node.available_mb = 20; // Total is 100MB
+
+        // Max fill MB = 90 MB
+        // max_remaining = max_fill_mb - used_mb = 90 - 80 = 10 MB
+        max_fill_percentage = 90;
+
+        // setting assigned_mb > 10 would result in max_remaining <
+        // assigned_mb and should return 0
+        let evac_dest_shark = EvacuateDestShark {
+            shark: storage_node.clone(),
+            status: DestSharkStatus::Ready,
+            assigned_mb: 11,
+        };
+
+        assert_eq!(
+            _calculate_available_mb(&evac_dest_shark, max_fill_percentage),
+            0
+        );
+
+        // setting assigned_mb to 9 should leave us with 1MB to spare.
+        let evac_dest_shark = EvacuateDestShark {
+            shark: storage_node.clone(),
+            status: DestSharkStatus::Ready,
+            assigned_mb: 9,
+        };
+
+        assert_eq!(
+            _calculate_available_mb(&evac_dest_shark, max_fill_percentage),
+            1
+        );
+
+        // --- Test 0 available_mb should result in a return value of 0 --- //
+        storage_node.percent_used = 100;
+        storage_node.available_mb = 0;
+        let evac_dest_shark = EvacuateDestShark {
+            shark: storage_node.clone(),
+            status: DestSharkStatus::Ready,
+            assigned_mb: 9,
+        };
+
+        // set this to 100 so we don't trip over percent_used > max_fill
+        max_fill_percentage = 100;
+
+        assert_eq!(
+            _calculate_available_mb(&evac_dest_shark, max_fill_percentage),
+            0
+        );
+
+        // --- Test storinfo giving us incorrect values is still safe --- //
+        storage_node.percent_used = 100;
+        storage_node.available_mb = 100;
+        let evac_dest_shark = EvacuateDestShark {
+            shark: storage_node.clone(),
+            status: DestSharkStatus::Ready,
+            assigned_mb: 9,
+        };
+
+        // set this to 100 so we don't trip over percent_used > max_fill
+        max_fill_percentage = 100;
+
+        assert_eq!(
+            _calculate_available_mb(&evac_dest_shark, max_fill_percentage),
+            0
+        );
     }
 
     #[test]
