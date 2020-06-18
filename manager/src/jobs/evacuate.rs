@@ -2127,11 +2127,7 @@ where
                             match EvacuateObject::try_from(obj) {
                                 Ok(o) => o,
                                 Err(e) => {
-                                    job_action.insert_into_db(&e).expect(
-                                        "insert bad \
-                                         EvacuateObject into DB",
-                                    );
-
+                                    job_action.insert_into_db(&e);
                                     continue;
                                 }
                             };
@@ -2231,7 +2227,7 @@ where
 fn start_assignment_manager<S>(
     full_assignment_tx: crossbeam::Sender<Assignment>,
     checker_fini_tx: crossbeam_channel::Sender<FiniMsg>,
-    obj_rx: crossbeam_channel::Receiver<EvacuateObject>,
+    obj_rx: crossbeam_channel::Receiver<SharkspotterMessage>,
     job_action: Arc<EvacuateJob>,
     storinfo: Arc<S>,
 ) -> Result<thread::JoinHandle<Result<(), Error>>, Error>
@@ -3698,7 +3694,7 @@ mod tests {
         ret
     }
 
-    fn create_test_evacuate_job(max_objects: u32) -> EvacuateJob {
+    fn create_test_evacuate_job(max_objects: usize) -> EvacuateJob {
         let mut config = Config::default();
         let from_shark = String::from("1.stor.domain");
 
@@ -3710,7 +3706,7 @@ mod tests {
             &config,
             &Uuid::new_v4().to_string(),
             Some(update_rx),
-            Some(num_objects),
+            Some(max_objects as u32),
         )
         .expect("initialize evacuate job");
 
@@ -3732,7 +3728,7 @@ mod tests {
         thread::Builder::new()
             .name(String::from("test object generator thread"))
             .spawn(move || {
-                for (id, o) in test_objects.into_iter() {
+                for (_, o) in test_objects.into_iter() {
                     let shard = 1;
                     let etag = String::from("Fake_etag");
                     let mobj_value =
@@ -3888,6 +3884,11 @@ mod tests {
     #[test]
     fn available_mb() {
         unit_test_init();
+
+        let num_objects = 100;
+        let mut g = StdThreadGen::new(10);
+        let mut test_objects = HashMap::new();
+
         struct MockStorinfo;
 
         impl MockStorinfo {
@@ -3930,7 +3931,7 @@ mod tests {
         let storinfo = Arc::new(storinfo);
 
         // Create the job
-        let mut job_action = create_test_evacuate_job();
+        let mut job_action = create_test_evacuate_job(num_objects);
         job_action.config.max_fill_percentage = 90;
         let job_action = Arc::new(job_action);
 
@@ -3940,9 +3941,6 @@ mod tests {
         let (checker_fini_tx, _checker_fini_rx) = crossbeam::bounded(1);
 
         // Generate 100 x 1MiB objects for a total of 100MiB on sharks 1 and 2.
-        let mut g = StdThreadGen::new(10);
-        let mut test_objects = HashMap::new();
-        let num_objects = 100;
         for _ in 0..num_objects {
             let mut mobj = MantaObject::arbitrary(&mut g);
             let mut sharks = vec![];
@@ -4018,7 +4016,8 @@ mod tests {
                         .expect("getting filtered objects");
 
                     assert_eq!(skipped_objs.len() as u64, available_mb);
-                    assert_eq!(num_objects - object_count, skipped_objs.len());
+                    assert_eq!(num_objects - object_count,
+                               skipped_objs.len());
 
                     let all_objects: Vec<EvacuateObject> = evacuateobjects
                         .load::<EvacuateObject>(&*locked_conn)
@@ -4043,7 +4042,7 @@ mod tests {
 
         // Now rerun the job, except this time simulate failure for every
         // assignment.
-        let mut job_action = create_test_evacuate_job();
+        let mut job_action = create_test_evacuate_job(num_objects);
         job_action.config.max_fill_percentage = 90;
         let job_action = Arc::new(job_action);
 
@@ -4154,6 +4153,12 @@ mod tests {
         use rand::Rng;
 
         unit_test_init();
+
+        let num_objects = 1000;
+        let mut g = StdThreadGen::new(10);
+        let mut rng = rand::thread_rng();
+        let mut test_objects = HashMap::new();
+
         struct NoSkipStorinfo;
         impl NoSkipStorinfo {
             fn new() -> Self {
@@ -4182,8 +4187,7 @@ mod tests {
             }
         }
 
-        let num_objects = 1000;
-        let job_action = Arc::new(create_test_evacuate_job());
+        let job_action = Arc::new(create_test_evacuate_job(num_objects));
 
         let storinfo = NoSkipStorinfo::new();
         let storinfo = Arc::new(storinfo);
@@ -4192,10 +4196,6 @@ mod tests {
         let (obj_tx, obj_rx) = crossbeam::bounded(5);
         let (checker_fini_tx, checker_fini_rx) = crossbeam::bounded(1);
         let (md_update_tx, _) = crossbeam::bounded(1);
-
-        let mut g = StdThreadGen::new(10);
-        let mut rng = rand::thread_rng();
-        let mut test_objects = HashMap::new();
 
         for _ in 0..num_objects {
             let mut mobj = MantaObject::arbitrary(&mut g);
@@ -4346,18 +4346,20 @@ mod tests {
     #[test]
     fn assignment_processing_test() {
         unit_test_init();
+
+        let num_objects = 100;
         let mut g = StdThreadGen::new(10);
+        let mut eobjs = vec![];
 
         // Evacuate Job Action
-        let job_action = create_test_evacuate_job();
+        let job_action = create_test_evacuate_job(num_objects);
 
         // New Assignment
         let mut assignment = Assignment::new(StorageNode::arbitrary(&mut g));
         let uuid = assignment.id.clone();
 
         // Create some EvacuateObjects
-        let mut eobjs = vec![];
-        for _ in 0..100 {
+        for _ in 0..num_objects {
             let mobj = MantaObject::arbitrary(&mut g);
             let mobj_value = serde_json::to_value(mobj).expect("mobj_value");
             let shard = 1;
@@ -4471,7 +4473,7 @@ mod tests {
         let (checker_fini_tx, _) = crossbeam::bounded(1);
         let (_, obj_rx) = crossbeam::bounded(5);
 
-        let job_action = Arc::new(create_test_evacuate_job());
+        let job_action = Arc::new(create_test_evacuate_job(99));
 
         let assignment_manager_handle = match start_assignment_manager(
             full_assignment_tx,
@@ -4584,9 +4586,9 @@ mod tests {
     fn full_test() {
         unit_test_init();
 
-        let num_objects = 100;
+        let num_objects: usize = 100;
         let mut g = StdThreadGen::new(10);
-        let mut test_objects = vec![];
+        let mut test_objects = HashMap::new();
 
         struct MockStorinfo;
 
@@ -4623,10 +4625,6 @@ mod tests {
 
         // Job Action
         let job_action = Arc::new(create_test_evacuate_job(num_objects));
-
-        // Test Objects
-        let mut test_objects = HashMap::new();
-        let mut g = StdThreadGen::new(10);
 
         for _ in 0..num_objects {
             let mobj = MantaObject::arbitrary(&mut g);
