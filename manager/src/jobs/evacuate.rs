@@ -4016,8 +4016,7 @@ mod tests {
                         .expect("getting filtered objects");
 
                     assert_eq!(skipped_objs.len() as u64, available_mb);
-                    assert_eq!(num_objects - object_count,
-                               skipped_objs.len());
+                    assert_eq!(num_objects - object_count, skipped_objs.len());
 
                     let all_objects: Vec<EvacuateObject> = evacuateobjects
                         .load::<EvacuateObject>(&*locked_conn)
