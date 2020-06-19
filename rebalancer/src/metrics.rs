@@ -119,7 +119,6 @@ pub fn counter_inc_by<S: ::std::hash::BuildHasher>(
     }
 }
 
-#[allow(irrefutable_let_patterns)]
 pub fn histogram_observe<S: ::std::hash::BuildHasher>(
     metrics: &HashMap<&'static str, Metrics, S>,
     key: &str,
