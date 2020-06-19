@@ -14,8 +14,8 @@ use hyper::StatusCode;
 use hyper::{Request, Response};
 use lazy_static::lazy_static;
 use prometheus::{
-    opts, register_counter, register_counter_vec, Counter, CounterVec, Encoder,
-    TextEncoder,
+    opts, register_counter, register_counter_vec, register_histogram, Counter,
+    CounterVec, Encoder, Histogram, TextEncoder,
 };
 use serde_derive::Deserialize;
 use slog::{error, info, Logger};
@@ -26,6 +26,7 @@ pub static OBJECT_COUNT: &str = "object_count";
 pub static ERROR_COUNT: &str = "error_count";
 pub static REQUEST_COUNT: &str = "request_count";
 pub static BYTES_COUNT: &str = "bytes_count";
+pub static ASSIGNMENT_TIME: &str = "assignment_time";
 
 #[derive(Clone, Deserialize)]
 pub struct ConfigMetrics {
@@ -58,6 +59,7 @@ impl Default for ConfigMetrics {
 pub enum Metrics {
     MetricsCounterVec(CounterVec),
     MetricsCounter(Counter),
+    MetricsHistogram(Histogram),
 }
 
 lazy_static! {
@@ -111,6 +113,21 @@ pub fn counter_inc_by<S: ::std::hash::BuildHasher>(
         Some(metric) => {
             if let Metrics::MetricsCounter(c) = metric {
                 c.inc_by(num);
+            }
+        }
+        None => error!(slog_scope::logger(), "Invalid metric: {}", key),
+    }
+}
+
+pub fn histogram_observe<S: ::std::hash::BuildHasher>(
+    metrics: &HashMap<&'static str, Metrics, S>,
+    key: &str,
+    val: f64,
+) {
+    match metrics.get(key) {
+        Some(metric) => {
+            if let Metrics::MetricsHistogram(h) = metric {
+                h.observe(val);
             }
         }
         None => error!(slog_scope::logger(), "Invalid metric: {}", key),
@@ -184,12 +201,21 @@ pub fn register_metrics(labels: &ConfigMetrics) -> MetricsMap {
 
     // Track total number of bytes transferred.
     let bytes_counter =
-        register_counter!(
-            opts!(BYTES_COUNT, "Bytes transferred.").const_labels(const_labels)
-        )
+        register_counter!(opts!(BYTES_COUNT, "Bytes transferred.")
+            .const_labels(const_labels.clone()))
         .expect("failed to register bytes_count counter");
 
     metrics.insert(BYTES_COUNT, Metrics::MetricsCounter(bytes_counter));
+
+    let assignment_times = register_histogram!(histogram_opts!(
+        ASSIGNMENT_TIME,
+        "Assignment completion time"
+    )
+    .const_labels(const_labels))
+    .expect("failed to register assignment_times counter");
+
+    metrics
+        .insert(ASSIGNMENT_TIME, Metrics::MetricsHistogram(assignment_times));
 
     metrics
 }

@@ -32,10 +32,7 @@ use joyent_rust_utils::file::calculate_md5;
 use libmanta::moray::MantaObjectShark;
 
 use crate::common::{AssignmentPayload, ObjectSkippedReason, Task, TaskStatus};
-use crate::metrics::{
-    self, counter_inc_by, counter_vec_inc, ConfigMetrics, MetricsMap,
-    BYTES_COUNT, ERROR_COUNT, OBJECT_COUNT, REQUEST_COUNT,
-};
+use crate::metrics::{self, *};
 
 use reqwest::{Client, StatusCode};
 use rusqlite;
@@ -1073,6 +1070,8 @@ fn process_assignment(
 
     let active_workers = min(len, pool.max_count());
 
+    let start = std::time::Instant::now();
+
     for _ in 0..active_workers {
         let asn = Arc::clone(&assignment);
         let fl = Arc::clone(&failures);
@@ -1086,6 +1085,12 @@ fn process_assignment(
     }
     pool.join();
 
+    let done = start.elapsed().as_secs_f64();
+
+    if let Some(m) = metrics.clone() {
+        histogram_observe(&m, ASSIGNMENT_TIME, done);
+    }
+
     let failed = if failures.lock().unwrap().is_empty() {
         None
     } else {
@@ -1095,7 +1100,10 @@ fn process_assignment(
     assignment.write().unwrap().stats.state =
         AgentAssignmentState::Complete(failed);
 
-    info!("Finished processing assignment {}.", &uuid);
+    info!(
+        "Finished processing assignment {} in {} seconds.",
+        uuid, done
+    );
     assignment_complete(assignments, uuid);
 }
 
