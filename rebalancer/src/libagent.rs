@@ -32,11 +32,7 @@ use joyent_rust_utils::file::calculate_md5;
 use libmanta::moray::MantaObjectShark;
 
 use crate::common::{AssignmentPayload, ObjectSkippedReason, Task, TaskStatus};
-use crate::metrics::{
-    self, counter_inc_by, counter_vec_inc, histogram_observe, ConfigMetrics,
-    MetricsMap, ASSIGNMENT_TIME, BYTES_COUNT, ERROR_COUNT, OBJECT_COUNT,
-    REQUEST_COUNT,
-};
+use crate::metrics::{self, *};
 
 use reqwest::{Client, StatusCode};
 use rusqlite;
