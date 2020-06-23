@@ -3055,6 +3055,11 @@ fn metadata_update_worker_dynamic(
             };
             metadata_update_assignment(&job_action, ace, &mut client_hash);
         }
+
+        debug!(
+            "Exiting metadata update worker: {:?}",
+            thread::current().id()
+        );
     }
 }
 
