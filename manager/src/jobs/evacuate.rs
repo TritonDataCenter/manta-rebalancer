@@ -3048,7 +3048,7 @@ fn metadata_update_worker_dynamic(
                     DyanmicWorkerMsg::Stop => {
                         debug!("Received stop message, exiting");
                         break;
-                    },
+                    }
                 },
                 Steal::Retry => continue,
                 Steal::Empty => break,
@@ -3403,8 +3403,10 @@ fn update_dynamic_metadata_threads(
     let EvacuateJobUpdateMessage::SetMetadataThreads(new_worker_count) = eum;
     let difference: i32 = new_worker_count as i32 - *max_thread_count as i32;
 
-    debug!("Updating metadata update thread count.  Need to stop {} threads",
-           difference.abs());
+    debug!(
+        "Updating metadata update thread count.  Need to stop {} threads",
+        difference.abs()
+    );
 
     // If the difference is negative then we need to
     // reduce our running thread count, so inject
@@ -3521,7 +3523,7 @@ fn metadata_update_broker_dynamic(
                 if total_jobs >= pool.max_count() {
                     trace!(
                         "Total threads ({}) exceeds max thread count for pool \
-                        ({}) not starting new thread",
+                         ({}) not starting new thread",
                         total_jobs,
                         pool.max_count()
                     );
