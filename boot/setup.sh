@@ -32,4 +32,7 @@ cp /opt/smartdc/rebalancer/etc/postgresql.conf /var/pgsql/data/postgresql.conf
 manta_common2_setup_log_rotation "rebalancer"
 manta_common2_setup_end
 
+# Set path for rebalancer-adm
+export PATH=$PATH:/opt/smartdc/rebalancer/bin
+
 exit 0
