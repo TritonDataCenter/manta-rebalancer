@@ -3512,6 +3512,7 @@ fn metadata_update_broker_dynamic(
                 // If all the pools threads are devoted to workers there's
                 // really no reason to queue up a new worker.
                 let total_jobs = pool.active_count() + pool.queued_count();
+                trace!("Total dynamic metadata update threads: {}", total_jobs);
                 if total_jobs >= pool.max_count() {
                     trace!(
                         "Total threads ({}) exceeds max thread count for pool \
