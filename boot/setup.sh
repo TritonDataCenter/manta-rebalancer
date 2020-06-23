@@ -33,6 +33,6 @@ manta_common2_setup_log_rotation "rebalancer"
 manta_common2_setup_end
 
 # Set path for rebalancer-adm
-export PATH=$PATH:/opt/smartdc/rebalancer/bin
+echo "export PATH=$PATH:/opt/smartdc/rebalancer/bin" >> ~/.bashrc
 
 exit 0
