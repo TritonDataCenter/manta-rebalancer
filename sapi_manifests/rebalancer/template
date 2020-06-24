@@ -1,12 +1,63 @@
 {
+
+    {{#REBALANCER_AGENT_WORKERS_PER_ASSIGNMENT}}
+    workers_per_assignment = {{REBALANCER_AGENT_WORKERS_PER_ASSIGNMENT}}
+    {{/REBALANCER_AGENT_WORKERS_PER_ASSIGNMENT}}
+    {{^REBALANCER_AGENT_WORKERS_PER_ASSIGNMENT}}
+    workers_per_assignment = 1
+    {{/REBALANCER_AGENT_WORKERS_PER_ASSIGNMENT}}
+
     "options": {
+
+        {{#REBALANCER_MAX_TASKS_PER_ASSIGNMENT}}
+        "max_tasks_per_assignment": {{REBALANCER_MAX_TASKS_PER_ASSIGNMENT}},
+        {{/REBALANCER_MAX_TASKS_PER_ASSIGNMENT}}
+        {{^REBALANCER_MAX_TASKS_PER_ASSIGNMENT}}
         "max_tasks_per_assignment": 50,
-        "max_metadata_update_threads": 2,
+        {{/REBALANCER_MAX_TASKS_PER_ASSIGNMENT}}
+
+        {{#REBALANCER_MAX_METADATA_UPDATE_THREADS}}
+        "max_metadata_update_threads": {{REBALANCER_MAX_METADATA_UPDATE_THREADS}},
+        {{/REBALANCER_MAX_METADATA_UPDATE_THREADS}}
+        {{^REBALANCER_MAX_METADATA_UPDATE_THREADS}}
+        "max_metadata_update_threads": 10,
+        {{/REBALANCER_MAX_METADATA_UPDATE_THREADS}}
+
+        {{#REBALANCER_MAX_SHARKS}}
+        "max_sharks": {{REBALANCER_MAX_SHARKS}},
+        {{/REBALANCER_MAX_SHARKS}}
+        {{^REBALANCER_MAX_SHARKS}}
         "max_sharks": 5,
+        {{/REBALANCER_MAX_SHARKS}}
+
+        {{#REBALANCER_USE_STATIC_MD_UPDATE_THREADS}}
+        "use_static_md_update_threads": true,
+        {{/REBALANCER_USE_STATIC_MD_UPDATE_THREADS}}
+        {{^REBALANCER_USE_STATIC_MD_UPDATE_THREADS}}
         "use_static_md_update_threads": false,
+        {{/REBALANCER_USE_STATIC_MD_UPDATE_THREADS}}
+
+        {{#REBALANCER_STATIC_QUEUE_DEPTH}}
+        "static_queue_depth": {{REBALANCER_STATIC_QUEUE_DEPTH}},
+        {{/REBALANCER_STATIC_QUEUE_DEPTH}}
+        {{^REBALANCER_STATIC_QUEUE_DEPTH}}
         "static_queue_depth": 10,
+        {{/REBALANCER_STATIC_QUEUE_DEPTH}}
+
+        {{#REBALANCER_MAX_ASSIGNMENT_AGE}}
+        "max_assignment_age": {{REBALANCER_MAX_ASSIGNMENT_AGE}},
+        {{/REBALANCER_MAX_ASSIGNMENT_AGE}}
+        {{^REBALANCER_MAX_ASSIGNMENT_AGE}}
         "max_assignment_age": 600,
-        "use_batched_updates": true
+        {{/REBALANCER_MAX_ASSIGNMENT_AGE}}
+
+
+        {{#REBALANCER_USE_BATCHED_UPDATES}}
+        "use_batched_updates": {{REBALANCER_USE_BATCHED_UPDATES}}
+        {{/REBALANCER_USE_BATCHED_UPDATES}}
+        {{^REBALANCER_USE_BATCHED_UPDATES}}
+        "use_batched_updates": false
+        {{/REBALANCER_USE_BATCHED_UPDATES}}
     },
     "listen_port": 80,
     "domain_name": "{{DOMAIN_NAME}}",
