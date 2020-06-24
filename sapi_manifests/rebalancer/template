@@ -46,7 +46,7 @@
 
 
         {{#REBALANCER_USE_BATCHED_UPDATES}}
-        "use_batched_updates": {{REBALANCER_USE_BATCHED_UPDATES}}
+        "use_batched_updates": true
         {{/REBALANCER_USE_BATCHED_UPDATES}}
         {{^REBALANCER_USE_BATCHED_UPDATES}}
         "use_batched_updates": false
