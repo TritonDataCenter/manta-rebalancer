@@ -34,9 +34,9 @@ use crate::storinfo::{self as mod_storinfo, SharkSource, StorageNode};
 
 use std::collections::hash_map::Entry::{Occupied, Vacant};
 use std::collections::HashMap;
-use std::convert::TryInto;
+use std::convert::{TryFrom, TryInto};
 use std::error::Error as _Error;
-use std::io::{ErrorKind, Write};
+use std::io::Write;
 use std::str::FromStr;
 use std::string::ToString;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -72,6 +72,7 @@ use diesel::pg::{Pg, PgConnection, PgValue};
 use diesel::prelude::*;
 use diesel::serialize::{self, IsNull, Output, ToSql};
 use diesel::sql_types;
+use sharkspotter::SharkspotterMessage;
 
 // Note: The ordering of the fields in this table must match the ordering of
 // the fields in 'struct EvacuateObject'
@@ -320,13 +321,6 @@ pub fn create_evacuateobjects_table(
 
 struct FiniMsg;
 
-#[derive(Debug)]
-pub struct SharkSpotterObject {
-    pub shard: i32,
-    pub object: Value,
-    pub etag: String,
-}
-
 impl Default for EvacuateObjectStatus {
     fn default() -> Self {
         EvacuateObjectStatus::Unprocessed
@@ -401,24 +395,6 @@ impl Arbitrary for EvacuateObject {
             status,
             skipped_reason,
             error,
-        }
-    }
-}
-
-impl EvacuateObject {
-    fn from_parts(
-        manta_object: Value,
-        id: ObjectId,
-        etag: String,
-        shard: i32,
-    ) -> Self {
-        Self {
-            assignment_id: String::new(),
-            id,
-            object: manta_object,
-            shard,
-            etag,
-            ..Default::default()
         }
     }
 }
@@ -520,6 +496,64 @@ pub struct EvacuateJob {
 
     /// TESTING ONLY
     pub max_objects: Option<u32>,
+}
+
+impl TryFrom<SharkspotterMessage> for EvacuateObject {
+    type Error = EvacuateObject;
+
+    fn try_from(ss_msg: SharkspotterMessage) -> Result<Self, Self::Error> {
+        // For now we consider a poorly formatted moray object or a
+        // missing objectId to be critical failures.  We cannot
+        // insert an evacuate object without an objectId.
+        let manta_object =
+            sharkspotter::manta_obj_from_moray_obj(&ss_msg.value)
+                .expect("manta obj from moray obj");
+
+        let id = common::get_objectId_from_value(&manta_object)
+            .expect("object ID from manta object Value");
+
+        let mut eobj = EvacuateObject {
+            id,
+            object: manta_object,
+            ..Default::default()
+        };
+
+        // If we fail to get the etag then we can't rebalance this
+        // object.  We give the caller back what we have and let it decide
+        // what to do.
+        let etag = match ss_msg.value.get("_etag") {
+            Some(tag) => match serde_json::to_string(tag) {
+                Ok(t) => t.replace("\"", ""),
+                Err(e) => {
+                    error!("Cannot convert etag to string: {}", e);
+                    eobj.status = EvacuateObjectStatus::Error;
+                    eobj.error = Some(EvacuateObjectError::BadMorayObject);
+
+                    return Err(eobj);
+                }
+            },
+            None => {
+                error!("Missing etag: {:?}", ss_msg);
+                eobj.status = EvacuateObjectStatus::Error;
+                eobj.error = Some(EvacuateObjectError::BadMorayObject);
+                return Err(eobj);
+            }
+        };
+
+        // TODO: build a test for this
+        if ss_msg.shard > std::i32::MAX as u32 {
+            error!("Found shard number over int32 max for: {}", eobj.id);
+
+            eobj.status = EvacuateObjectStatus::Error;
+            eobj.error = Some(EvacuateObjectError::BadShardNumber);
+            return Err(eobj);
+        }
+
+        eobj.shard = ss_msg.shard as i32;
+        eobj.etag = etag;
+
+        Ok(eobj)
+    }
 }
 
 impl EvacuateJob {
@@ -1823,19 +1857,18 @@ fn _calculate_available_mb(
 /// prematurely the sender.send() method will return a SenderError and that
 /// needs to be handled properly.
 fn start_sharkspotter(
-    obj_tx: crossbeam::Sender<EvacuateObject>,
+    obj_tx: crossbeam::Sender<SharkspotterMessage>,
     domain: &str,
     job_action: Arc<EvacuateJob>,
     min_shard: u32,
     max_shard: u32,
 ) -> Result<thread::JoinHandle<Result<(), Error>>, Error> {
-    let max_objects = job_action.max_objects;
     let shark = &job_action.from_shark.manta_storage_id;
     let config = sharkspotter::config::Config {
         domain: String::from(domain),
         min_shard,
         max_shard,
-        shark: String::from(shark.as_str()),
+        sharks: vec![shark.to_string()],
         ..Default::default()
     };
 
@@ -1846,124 +1879,8 @@ fn start_sharkspotter(
     thread::Builder::new()
         .name(String::from("sharkspotter"))
         .spawn(move || {
-            let mut count = 0;
-            sharkspotter::run(config, log, move |moray_object, shard| {
-                trace!("Sharkspotter discovered object: {:#?}", &moray_object);
-                count += 1;
-                // while testing, limit the number of objects processed for now
-                if let Some(max) = max_objects {
-                    if count > max {
-                        return Err(std::io::Error::new(
-                            ErrorKind::Interrupted,
-                            "Max Objects Limit Reached",
-                        ));
-                    }
-                }
-
-                // For now we consider a poorly formatted moray object or a
-                // missing objectId to be critical failures.  We cannot
-                // insert an evacuate object without an objectId.
-                let manta_object_value =
-                    match sharkspotter::manta_obj_from_moray_obj(&moray_object)
-                    {
-                        Ok(o) => o,
-                        Err(e) => {
-                            return Err(std::io::Error::new(
-                                ErrorKind::Other,
-                                e,
-                            ))
-                        }
-                    };
-
-                let id = match common::get_objectId_from_value(
-                    &manta_object_value,
-                ) {
-                    Ok(id_str) => id_str,
-                    Err(e) => {
-                        return Err(std::io::Error::new(ErrorKind::Other, e));
-                    }
-                };
-
-                // If we fail to get the etag then we can't rebalance this
-                // object, but we return Ok(()) because we want to keep
-                // scanning for other objects.
-                let etag = match moray_object.get("_etag") {
-                    Some(tag) => match serde_json::to_string(tag) {
-                        Ok(t) => t.replace("\"", ""),
-                        Err(e) => {
-                            error!("Cannot convert etag to string: {}", e);
-                            _insert_bad_moray_object(
-                                &job_action,
-                                manta_object_value,
-                                id,
-                            );
-                            return Ok(());
-                        }
-                    },
-                    None => {
-                        _insert_bad_moray_object(
-                            &job_action,
-                            manta_object_value,
-                            id,
-                        );
-                        return Ok(());
-                    }
-                };
-
-                // TODO: build a test for this
-                if shard > std::i32::MAX as u32 {
-                    error!("Found shard number over int32 max for: {}", id);
-
-                    let eobj = EvacuateObject {
-                        id,
-                        object: manta_object_value,
-                        status: EvacuateObjectStatus::Error,
-                        error: Some(EvacuateObjectError::BadShardNumber),
-                        etag,
-                        ..Default::default()
-                    };
-
-                    job_action.insert_into_db(&eobj);
-
-                    return Err(std::io::Error::new(
-                        ErrorKind::Other,
-                        "Exceeded max number of shards",
-                    ));
-                }
-
-                let eobj = EvacuateObject::from_parts(
-                    manta_object_value,
-                    id.clone(),
-                    etag,
-                    shard as i32,
-                );
-
-                obj_tx
-                    .send(eobj)
-                    .map_err(CrossbeamError::from)
-                    .map_err(|e| {
-                        error!("Sharkspotter: Error sending object: {}", e);
-                        job_action.mark_object_error(
-                            &id,
-                            EvacuateObjectError::InternalError,
-                        );
-                        std::io::Error::new(ErrorKind::Other, e.description())
-                    })
-            })
-            .map_err(|e| {
-                if e.kind() == ErrorKind::Interrupted {
-                    if let Some(max) = max_objects {
-                        if count > max {
-                            return InternalError::new(
-                                Some(InternalErrorCode::MaxObjectsLimit),
-                                "Max Objects Limit Reached",
-                            )
-                            .into();
-                        }
-                    }
-                }
-                e.into()
-            })
+            sharkspotter::run_multithreaded(config, log, obj_tx)
+                .map_err(Error::from)
         })
         .map_err(Error::from)
 }
@@ -2008,11 +1925,7 @@ fn _msg_all_assignment_threads(
 
     shark_hash.iter().for_each(|(shark_id, she)| {
         if let Err(e) = she.tx.send(command.clone()) {
-            error!(
-                "Error stopping shark ({}) assignments: {}",
-                shark_id,
-                CrossbeamError::from(e)
-            );
+            error!("Error stopping shark ({}) assignments: {}", shark_id, e);
             // TODO: join?
             // This is a little funky.  We cant send
             // anything to the thread, but we need it to
@@ -2096,7 +2009,7 @@ fn _stop_join_some_assignment_threads(
 fn assignment_manager_impl<S>(
     full_assignment_tx: crossbeam::Sender<Assignment>,
     checker_fini_tx: crossbeam_channel::Sender<FiniMsg>,
-    obj_rx: crossbeam_channel::Receiver<EvacuateObject>,
+    obj_rx: crossbeam_channel::Receiver<SharkspotterMessage>,
     job_action: Arc<EvacuateJob>,
     storinfo: Arc<S>,
 ) -> impl Fn() -> Result<(), Error>
@@ -2105,6 +2018,8 @@ where
 {
     move || {
         let mut done = false;
+        let mut object_count = 0;
+        let max_objects = job_action.max_objects;
         let max_sharks = job_action.config.options.max_sharks;
         let max_tasks_per_assignment =
             job_action.config.options.max_tasks_per_assignment;
@@ -2194,10 +2109,33 @@ where
             // end loop
             for _ in 0..max_tasks_per_assignment * max_sharks {
                 // Get an object
+                if let Some(max) = max_objects {
+                    if object_count >= max {
+                        info!(
+                            "Hit max objects count ({}).  Sending last \
+                             assignments and exiting",
+                            max
+                        );
+                        done = true;
+                        break;
+                    }
+                }
+
                 let mut eobj = match obj_rx.recv() {
                     Ok(obj) => {
-                        trace!("Received object {:#?}", &obj);
-                        obj
+                        let eo: EvacuateObject =
+                            match EvacuateObject::try_from(obj) {
+                                Ok(o) => o,
+                                Err(e) => {
+                                    job_action.insert_into_db(&e);
+                                    continue;
+                                }
+                            };
+
+                        trace!("Received object {:#?}", &eo);
+                        object_count += 1;
+
+                        eo
                     }
                     Err(e) => {
                         warn!("Didn't receive object. {}\n", e);
@@ -2289,7 +2227,7 @@ where
 fn start_assignment_manager<S>(
     full_assignment_tx: crossbeam::Sender<Assignment>,
     checker_fini_tx: crossbeam_channel::Sender<FiniMsg>,
-    obj_rx: crossbeam_channel::Receiver<EvacuateObject>,
+    obj_rx: crossbeam_channel::Receiver<SharkspotterMessage>,
     job_action: Arc<EvacuateJob>,
     storinfo: Arc<S>,
 ) -> Result<thread::JoinHandle<Result<(), Error>>, Error>
@@ -3665,6 +3603,21 @@ mod tests {
         static ref INITIALIZED: Mutex<bool> = Mutex::new(false);
     }
 
+    #[derive(Deserialize, Serialize)]
+    struct TestMorayObject {
+        _value: String,
+        _etag: String,
+    }
+
+    impl TestMorayObject {
+        fn new(manta_object: String, etag: String) -> Self {
+            Self {
+                _value: manta_object,
+                _etag: etag,
+            }
+        }
+    }
+
     fn unit_test_init() {
         let mut init = INITIALIZED.lock().unwrap();
         if *init {
@@ -3754,7 +3707,7 @@ mod tests {
         ret
     }
 
-    fn create_test_evacuate_job() -> EvacuateJob {
+    fn create_test_evacuate_job(max_objects: usize) -> EvacuateJob {
         let mut config = Config::default();
         let from_shark = String::from("1.stor.domain");
 
@@ -3766,7 +3719,7 @@ mod tests {
             &config,
             &Uuid::new_v4().to_string(),
             Some(update_rx),
-            Some(100),
+            Some(max_objects as u32),
         )
         .expect("initialize evacuate job");
 
@@ -3781,25 +3734,31 @@ mod tests {
     }
 
     fn start_test_obj_generator_thread(
-        obj_tx: crossbeam_channel::Sender<EvacuateObject>,
+        obj_tx: crossbeam_channel::Sender<SharkspotterMessage>,
         test_objects: HashMap<String, MantaObject>,
+        from_shark: String,
     ) -> thread::JoinHandle<()> {
         thread::Builder::new()
             .name(String::from("test object generator thread"))
             .spawn(move || {
-                for (id, o) in test_objects.into_iter() {
+                for (_, o) in test_objects.into_iter() {
                     let shard = 1;
                     let etag = String::from("Fake_etag");
                     let mobj_value =
-                        serde_json::to_value(o.clone()).expect("mobj value");
+                        serde_json::to_string(&o).expect("mobj value");
 
-                    let eobj = EvacuateObject::from_parts(
-                        mobj_value,
-                        id.clone(),
-                        etag,
+                    let moray_value = serde_json::to_value(
+                        TestMorayObject::new(mobj_value, etag),
+                    )
+                    .expect("moray value");
+
+                    let ssobj = SharkspotterMessage {
+                        value: moray_value,
+                        shark: from_shark.clone(),
                         shard,
-                    );
-                    match obj_tx.send(eobj) {
+                    };
+
+                    match obj_tx.send(ssobj) {
                         Ok(()) => (),
                         Err(e) => {
                             error!(
@@ -3938,6 +3897,11 @@ mod tests {
     #[test]
     fn available_mb() {
         unit_test_init();
+
+        let num_objects = 100;
+        let mut g = StdThreadGen::new(10);
+        let mut test_objects = HashMap::new();
+
         struct MockStorinfo;
 
         impl MockStorinfo {
@@ -3980,7 +3944,7 @@ mod tests {
         let storinfo = Arc::new(storinfo);
 
         // Create the job
-        let mut job_action = create_test_evacuate_job();
+        let mut job_action = create_test_evacuate_job(num_objects);
         job_action.config.max_fill_percentage = 90;
         let job_action = Arc::new(job_action);
 
@@ -3990,9 +3954,6 @@ mod tests {
         let (checker_fini_tx, _checker_fini_rx) = crossbeam::bounded(1);
 
         // Generate 100 x 1MiB objects for a total of 100MiB on sharks 1 and 2.
-        let mut g = StdThreadGen::new(10);
-        let mut test_objects = HashMap::new();
-        let num_objects = 100;
         for _ in 0..num_objects {
             let mut mobj = MantaObject::arbitrary(&mut g);
             let mut sharks = vec![];
@@ -4021,8 +3982,11 @@ mod tests {
         .expect("manager_thread");
 
         // Generator Thread
-        let generator_thread_handle =
-            start_test_obj_generator_thread(obj_tx, test_objects.clone());
+        let generator_thread_handle = start_test_obj_generator_thread(
+            obj_tx,
+            test_objects.clone(),
+            job_action.from_shark.manta_storage_id.clone(),
+        );
 
         // Verification Thread
         let builder = thread::Builder::new();
@@ -4090,7 +4054,7 @@ mod tests {
 
         // Now rerun the job, except this time simulate failure for every
         // assignment.
-        let mut job_action = create_test_evacuate_job();
+        let mut job_action = create_test_evacuate_job(num_objects);
         job_action.config.max_fill_percentage = 90;
         let job_action = Arc::new(job_action);
 
@@ -4128,8 +4092,11 @@ mod tests {
         assert_eq!(pre_available_mb, 100);
 
         // Generator Thread
-        let generator_thread_handle =
-            start_test_obj_generator_thread(obj_tx, test_objects.clone());
+        let generator_thread_handle = start_test_obj_generator_thread(
+            obj_tx,
+            test_objects.clone(),
+            job_action.from_shark.manta_storage_id.clone(),
+        );
 
         // Verification Thread
         let builder = thread::Builder::new();
@@ -4198,6 +4165,12 @@ mod tests {
         use rand::Rng;
 
         unit_test_init();
+
+        let num_objects = 1000;
+        let mut g = StdThreadGen::new(10);
+        let mut rng = rand::thread_rng();
+        let mut test_objects = HashMap::new();
+
         struct NoSkipStorinfo;
         impl NoSkipStorinfo {
             fn new() -> Self {
@@ -4226,7 +4199,7 @@ mod tests {
             }
         }
 
-        let job_action = Arc::new(create_test_evacuate_job());
+        let job_action = Arc::new(create_test_evacuate_job(num_objects));
 
         let storinfo = NoSkipStorinfo::new();
         let storinfo = Arc::new(storinfo);
@@ -4236,13 +4209,6 @@ mod tests {
         let (checker_fini_tx, checker_fini_rx) = crossbeam::bounded(1);
         let (md_update_tx, _) = crossbeam::bounded(1);
 
-        let mut test_objects = HashMap::new();
-
-        let mut g = StdThreadGen::new(10);
-
-        let mut rng = rand::thread_rng();
-
-        let num_objects = 1000;
         for _ in 0..num_objects {
             let mut mobj = MantaObject::arbitrary(&mut g);
             let mut sharks = vec![];
@@ -4280,8 +4246,11 @@ mod tests {
         )
         .expect("start assignment manager");
 
-        let generator_thread_handle =
-            start_test_obj_generator_thread(obj_tx, test_objects_copy);
+        let generator_thread_handle = start_test_obj_generator_thread(
+            obj_tx,
+            test_objects_copy,
+            job_action.from_shark.manta_storage_id.clone(),
+        );
 
         let verification_objects = test_objects.clone();
         let builder = thread::Builder::new();
@@ -4389,18 +4358,20 @@ mod tests {
     #[test]
     fn assignment_processing_test() {
         unit_test_init();
+
+        let num_objects = 100;
         let mut g = StdThreadGen::new(10);
+        let mut eobjs = vec![];
 
         // Evacuate Job Action
-        let job_action = create_test_evacuate_job();
+        let job_action = create_test_evacuate_job(num_objects);
 
         // New Assignment
         let mut assignment = Assignment::new(StorageNode::arbitrary(&mut g));
         let uuid = assignment.id.clone();
 
         // Create some EvacuateObjects
-        let mut eobjs = vec![];
-        for _ in 0..100 {
+        for _ in 0..num_objects {
             let mobj = MantaObject::arbitrary(&mut g);
             let mobj_value = serde_json::to_value(mobj).expect("mobj_value");
             let shard = 1;
@@ -4408,8 +4379,13 @@ mod tests {
             let id =
                 common::get_objectId_from_value(&mobj_value).expect("objectId");
 
-            let mut eobj =
-                EvacuateObject::from_parts(mobj_value, id, etag, shard);
+            let mut eobj = EvacuateObject {
+                id,
+                object: mobj_value,
+                shard,
+                etag,
+                ..Default::default()
+            };
 
             eobj.assignment_id = uuid.clone();
             eobjs.push(eobj);
@@ -4509,7 +4485,7 @@ mod tests {
         let (checker_fini_tx, _) = crossbeam::bounded(1);
         let (_, obj_rx) = crossbeam::bounded(5);
 
-        let job_action = Arc::new(create_test_evacuate_job());
+        let job_action = Arc::new(create_test_evacuate_job(99));
 
         let assignment_manager_handle = match start_assignment_manager(
             full_assignment_tx,
@@ -4622,6 +4598,10 @@ mod tests {
     fn full_test() {
         unit_test_init();
 
+        let num_objects: usize = 100;
+        let mut g = StdThreadGen::new(10);
+        let mut test_objects = HashMap::new();
+
         struct MockStorinfo;
 
         impl MockStorinfo {
@@ -4656,12 +4636,7 @@ mod tests {
         let (checker_fini_tx, checker_fini_rx) = crossbeam::bounded(1);
 
         // Job Action
-        let job_action = Arc::new(create_test_evacuate_job());
-
-        // Test Objects
-        let mut test_objects = HashMap::new();
-        let mut g = StdThreadGen::new(10);
-        let num_objects = 100;
+        let job_action = Arc::new(create_test_evacuate_job(num_objects));
 
         for _ in 0..num_objects {
             let mobj = MantaObject::arbitrary(&mut g);
@@ -4669,8 +4644,11 @@ mod tests {
         }
 
         // Threads
-        let obj_generator_th =
-            start_test_obj_generator_thread(obj_tx, test_objects.clone());
+        let obj_generator_th = start_test_obj_generator_thread(
+            obj_tx,
+            test_objects.clone(),
+            job_action.from_shark.manta_storage_id.clone(),
+        );
 
         let metadata_update_thread =
             start_metadata_update_broker(Arc::clone(&job_action), md_update_rx)
