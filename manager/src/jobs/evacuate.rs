@@ -3045,13 +3045,18 @@ fn metadata_update_worker_dynamic(
             let ace = match queue_front.steal() {
                 Steal::Success(dwm) => match dwm {
                     DyanmicWorkerMsg::Data(a) => a,
-                    DyanmicWorkerMsg::Stop => break,
+                    DyanmicWorkerMsg::Stop => {
+                        debug!("Received stop message, exiting");
+                        break;
+                    }
                 },
                 Steal::Retry => continue,
                 Steal::Empty => break,
             };
             metadata_update_assignment(&job_action, ace, &mut client_hash);
         }
+
+        debug!("Exiting metadata update worker.");
     }
 }
 
@@ -3392,8 +3397,13 @@ fn update_dynamic_metadata_threads(
     // If we add any additional messages we have to use match
     // statements.
     let JobUpdateMessage::Evacuate(eum) = msg;
-    let EvacuateJobUpdateMessage::SetMetadataThreads(worker_count) = eum;
-    let difference: i32 = *max_thread_count as i32 - worker_count as i32;
+    let EvacuateJobUpdateMessage::SetMetadataThreads(new_worker_count) = eum;
+    let difference: i32 = new_worker_count as i32 - *max_thread_count as i32;
+
+    info!(
+        "Updating metadata update thread count from {} to {}.",
+        *max_thread_count, new_worker_count
+    );
 
     // If the difference is negative then we need to
     // reduce our running thread count, so inject
@@ -3404,7 +3414,7 @@ fn update_dynamic_metadata_threads(
     for _ in difference..0 {
         queue_back.push(DyanmicWorkerMsg::Stop);
     }
-    *max_thread_count = worker_count;
+    *max_thread_count = new_worker_count;
     pool.set_num_threads(*max_thread_count);
 
     info!(
@@ -3506,10 +3516,13 @@ fn metadata_update_broker_dynamic(
                 // If all the pools threads are devoted to workers there's
                 // really no reason to queue up a new worker.
                 let total_jobs = pool.active_count() + pool.queued_count();
+                trace!("Total dynamic metadata update threads: {}", total_jobs);
                 if total_jobs >= pool.max_count() {
                     trace!(
-                        "Reached max thread count for pool not starting \
-                         new thread"
+                        "Total threads ({}) exceeds max thread count for pool \
+                         ({}) not starting new thread",
+                        total_jobs,
+                        pool.max_count()
                     );
                     continue;
                 }
