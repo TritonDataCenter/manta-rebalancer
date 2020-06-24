@@ -3056,10 +3056,7 @@ fn metadata_update_worker_dynamic(
             metadata_update_assignment(&job_action, ace, &mut client_hash);
         }
 
-        debug!(
-            "Exiting metadata update worker: {:?}",
-            thread::current().id()
-        );
+        debug!("Exiting metadata update worker.");
     }
 }
 
@@ -3403,14 +3400,10 @@ fn update_dynamic_metadata_threads(
     let EvacuateJobUpdateMessage::SetMetadataThreads(new_worker_count) = eum;
     let difference: i32 = new_worker_count as i32 - *max_thread_count as i32;
 
-    debug!(
-        "Updating metadata update thread count to {}.",
-        new_worker_count
+    info!(
+        "Updating metadata update thread count from {} to {}.",
+        *max_thread_count, new_worker_count
     );
-
-    if difference < 0 {
-        debug!("Need to stop {} threads", difference.abs());
-    }
 
     // If the difference is negative then we need to
     // reduce our running thread count, so inject
