@@ -3404,9 +3404,13 @@ fn update_dynamic_metadata_threads(
     let difference: i32 = new_worker_count as i32 - *max_thread_count as i32;
 
     debug!(
-        "Updating metadata update thread count.  Need to stop {} threads",
-        difference.abs()
+        "Updating metadata update thread count to {}.",
+        new_worker_count
     );
+
+    if difference < 0 {
+        debug!("Need to stop {} threads", difference.abs());
+    }
 
     // If the difference is negative then we need to
     // reduce our running thread count, so inject
