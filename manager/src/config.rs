@@ -15,11 +15,12 @@ use std::io::BufReader;
 use std::sync::{Arc, Barrier, Mutex};
 
 use crossbeam_channel::TrySendError;
-use serde::Deserialize;
+use serde::{de, de::Error as de_Error, Deserialize, Deserializer};
 use signal_hook::{self, iterator::Signals};
 
 use rebalancer::error::Error;
 use rebalancer::util;
+use slog::Level;
 use std::thread;
 use std::thread::JoinHandle;
 
@@ -107,6 +108,33 @@ pub struct Config {
 
     #[serde(default = "Config::default_max_fill_percentage")]
     pub max_fill_percentage: u32,
+
+    // This is left as an Option<Level> instead of a Level because we cannot
+    // derive the Default trait for a type that was not declared in this crate.
+    #[serde(deserialize_with = "log_level_deserialize", default)]
+    pub log_level: Option<Level>,
+}
+
+fn log_level_deserialize<'de, D>(
+    deserializer: D,
+) -> Result<Option<Level>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let s = String::deserialize(deserializer)?.to_lowercase();
+    match s.as_str() {
+        "critical" | "crit" => Ok(Some(Level::Critical)),
+        "error" => Ok(Some(Level::Error)),
+        "warning" | "warn" => Ok(Some(Level::Warning)),
+        "info" => Ok(Some(Level::Info)),
+        "debug" => Ok(Some(Level::Debug)),
+        "trace" => Ok(Some(Level::Trace)),
+        _ => Err(D::Error::invalid_value(
+            de::Unexpected::Str(s.as_str()),
+            &"slog Level string",
+        )),
+        // TODO: error
+    }
 }
 
 impl Config {
@@ -297,7 +325,7 @@ mod tests {
         *init = true;
 
         thread::spawn(move || {
-            let _guard = util::init_global_logger();
+            let _guard = util::init_global_logger(None);
             loop {
                 // Loop around ::park() in the event of spurious wake ups.
                 std::thread::park();

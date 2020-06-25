@@ -129,7 +129,7 @@ mod tests {
 
     #[test]
     fn bad_job_id() {
-        let _guard = util::init_global_logger();
+        let _guard = util::init_global_logger(None);
         let uuid = Uuid::new_v4();
         assert!(get_status(uuid).is_err());
     }
@@ -138,7 +138,7 @@ mod tests {
     fn get_status_test() {
         use crate::jobs::evacuate::evacuateobjects::dsl::*;
 
-        let _guard = util::init_global_logger();
+        let _guard = util::init_global_logger(None);
         let uuid = Uuid::new_v4();
         let mut g = StdThreadGen::new(10);
         let mut obj_vec = vec![];
@@ -165,7 +165,7 @@ mod tests {
     fn get_status_zero_value_test() {
         use crate::jobs::evacuate::evacuateobjects::dsl::*;
 
-        let _guard = util::init_global_logger();
+        let _guard = util::init_global_logger(None);
         let uuid = Uuid::new_v4();
         let mut g = StdThreadGen::new(10);
         let mut obj_vec = vec![];

@@ -3627,7 +3627,7 @@ mod tests {
         metrics_init(rebalancer::metrics::ConfigMetrics::default());
 
         thread::spawn(move || {
-            let _guard = util::init_global_logger();
+            let _guard = util::init_global_logger(None);
             let addr = format!("{}:{}", "0.0.0.0", 7878);
 
             // The reason that we call gotham::start() to start the agent as

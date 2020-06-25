@@ -576,7 +576,7 @@ mod test {
 
     #[test]
     fn basic() {
-        let _guard = util::init_global_logger();
+        let _guard = util::init_global_logger(None);
         let config = Config::parse_config(&Some("src/config.json".to_string()))
             .expect("parse config");
 
