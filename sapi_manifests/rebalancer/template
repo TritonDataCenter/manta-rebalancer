@@ -9,11 +9,20 @@
         "use_batched_updates": true
     },
     "listen_port": 80,
+
+    {{#REBALANCER_LOG_LEVEL}}
+    "log_level": {{REBALANCER_LOG_LEVEL}},
+    {{/REBALANCER_LOG_LEVEL}}
+    {{^REBALANCER_LOG_LEVEL}}
     "log_level": "debug",
+    {{/REBALANCER_LOG_LEVEL}}
+
     "domain_name": "{{DOMAIN_NAME}}",
+
     {{#MUSKIE_MAX_UTILIZATION_PCT}}
     "max_fill_precentage": {{MUSKIE_MAX_UTILIZATION_PCT}},
     {{/MUSKIE_MAX_UTILIZATION_PCT}}
+
     {{#SNAPLINK_CLEANUP_REQUIRED}}
     "snaplink_cleanup_required": true,
     {{/SNAPLINK_CLEANUP_REQUIRED}}

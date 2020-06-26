@@ -559,11 +559,10 @@ fn main() {
 
     let config_file = matches.value_of("config_file").map(|s| s.to_string());
     let config = Config::parse_config(&config_file)
-        .map_err(|e| {
+        .unwrap_or_else(|e| {
             println!("Error parsing config file: {}", e);
             std::process::exit(1);
-        })
-        .unwrap();
+        });
 
     let _guard = util::init_global_logger(Some(config.log_level));
 
