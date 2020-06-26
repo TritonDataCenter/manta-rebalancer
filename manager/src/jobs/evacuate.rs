@@ -2177,6 +2177,8 @@ where
 
                 let shark_id = shark_hash_entry.shark.manta_storage_id.clone();
 
+                debug!("Sending {} to {}", eobj.id, shark_id);
+
                 // Send the evacuate object to the
                 // shark_assignment_generator.
                 if let Err(e) = shark_hash_entry
