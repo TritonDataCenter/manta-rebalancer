@@ -24,7 +24,7 @@
         {{/REBALANCER_MAX_SHARKS}}
 
         {{#REBALANCER_USE_STATIC_MD_UPDATE_THREADS}}
-        "use_static_md_update_threads": true,
+        "use_static_md_update_threads": {{REBALANCER_USE_STATIC_MD_UPDATE_THREADS}},
         {{/REBALANCER_USE_STATIC_MD_UPDATE_THREADS}}
         {{^REBALANCER_USE_STATIC_MD_UPDATE_THREADS}}
         "use_static_md_update_threads": false,
@@ -46,7 +46,7 @@
 
 
         {{#REBALANCER_USE_BATCHED_UPDATES}}
-        "use_batched_updates": true
+        "use_batched_updates": {{REBALANCER_USE_BATCHED_UPDATES}}
         {{/REBALANCER_USE_BATCHED_UPDATES}}
         {{^REBALANCER_USE_BATCHED_UPDATES}}
         "use_batched_updates": false
