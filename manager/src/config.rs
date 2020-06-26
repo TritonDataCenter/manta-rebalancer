@@ -87,7 +87,7 @@ impl Default for ConfigOptions {
     }
 }
 
-#[derive(Deserialize, Default, Debug, Clone)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct Config {
     pub domain_name: String,
 
@@ -109,31 +109,43 @@ pub struct Config {
     #[serde(default = "Config::default_max_fill_percentage")]
     pub max_fill_percentage: u32,
 
-    // This is left as an Option<Level> instead of a Level because we cannot
-    // derive the Default trait for a type that was not declared in this crate.
-    #[serde(deserialize_with = "log_level_deserialize", default)]
-    pub log_level: Option<Level>,
+    #[serde(
+        deserialize_with = "log_level_deserialize",
+        default = "Config::default_log_level"
+    )]
+    pub log_level: Level,
 }
 
-fn log_level_deserialize<'de, D>(
-    deserializer: D,
-) -> Result<Option<Level>, D::Error>
+impl Default for Config {
+    fn default() -> Self {
+        Config {
+            domain_name: String::new(),
+            shards: vec![],
+            snaplink_cleanup_required: false,
+            options: ConfigOptions::default(),
+            listen_port: 80,
+            max_fill_percentage: 100,
+            log_level: Level::Debug,
+        }
+    }
+}
+
+fn log_level_deserialize<'de, D>(deserializer: D) -> Result<Level, D::Error>
 where
     D: Deserializer<'de>,
 {
     let s = String::deserialize(deserializer)?.to_lowercase();
     match s.as_str() {
-        "critical" | "crit" => Ok(Some(Level::Critical)),
-        "error" => Ok(Some(Level::Error)),
-        "warning" | "warn" => Ok(Some(Level::Warning)),
-        "info" => Ok(Some(Level::Info)),
-        "debug" => Ok(Some(Level::Debug)),
-        "trace" => Ok(Some(Level::Trace)),
+        "critical" | "crit" => Ok(Level::Critical),
+        "error" => Ok(Level::Error),
+        "warning" | "warn" => Ok(Level::Warning),
+        "info" => Ok(Level::Info),
+        "debug" => Ok(Level::Debug),
+        "trace" => Ok(Level::Trace),
         _ => Err(D::Error::invalid_value(
             de::Unexpected::Str(s.as_str()),
             &"slog Level string",
         )),
-        // TODO: error
     }
 }
 
@@ -154,6 +166,10 @@ impl Config {
 
     fn default_max_fill_percentage() -> u32 {
         100
+    }
+
+    fn default_log_level() -> Level {
+        Level::Debug
     }
 
     pub fn parse_config(config_path: &Option<String>) -> Result<Config, Error> {

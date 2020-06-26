@@ -565,7 +565,7 @@ fn main() {
         })
         .unwrap();
 
-    let _guard = util::init_global_logger(config.log_level);
+    let _guard = util::init_global_logger(Some(config.log_level));
 
     let config = Arc::new(Mutex::new(config));
 
