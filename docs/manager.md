@@ -217,6 +217,20 @@ The rebalancer manager requires certain  service configuration parameters in
 `etc/config.json`.  This file is populated by the config-agent using
 `sapi_manifests/rebalancer/template` as a template.
 
+### Job Options
+These options can be updated by SAPI.
+|Option | Description | Default|
+| --- | --- | ---|
+|REBALANCER_MAX_TASKS_PER_ASSIGNMENT | Maximum number of tasks that will be added to a single assignment before it is sent to the agent for processing. | 50 |
+|REBALANCER_MAX_METADATA_UPDATE_THREADS| The maximum number of metadata update threads.  For static this number of threads will be spun up at the beginning of a job and remain at that level for the duration of the job.  For dynamic threads this is the maximum number that will run concurrently.| 10 |
+|REBALANCER_MAX_SHARKS|The maximum number of destination sharks that will be considered for assignments. | 5 |
+|REBALANCER_USE_STATIC_MD_UPDATE_THREADS| Use static metadata update threads instead of dynamic metadata update threadpool. | false |
+|REBALANCER_STATIC_QUEUE_DEPTH| The maximum size of the queue for post processing assignments (updating metadata). | 10 |
+|REBALANCER_MAX_ASSIGNMENT_AGE|The maximum amount of time that an assignment for a given shark will wait to be filled up in seconds.  The timer starts after the first task is added to the assignment.| 600 |
+|REBALANCER_USE_BATCHED_UPDATES|Update the metadata of objects in a batch instead of one by one.| false |
+
+
+
 ### Service Parameters
 
 | Param                | Type   | Description                        |
