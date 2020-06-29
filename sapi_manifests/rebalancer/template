@@ -11,7 +11,7 @@
     "listen_port": 80,
 
     {{#REBALANCER_LOG_LEVEL}}
-    "log_level": {{REBALANCER_LOG_LEVEL}},
+    "log_level": "{{REBALANCER_LOG_LEVEL}}",
     {{/REBALANCER_LOG_LEVEL}}
     {{^REBALANCER_LOG_LEVEL}}
     "log_level": "debug",
