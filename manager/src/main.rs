@@ -544,15 +544,6 @@ fn router(config: Arc<Mutex<Config>>) -> Router {
 }
 
 fn main() {
-    let _guard = util::init_global_logger();
-
-    info!("Initializing...");
-
-    if let Err(e) = jobs::create_job_database() {
-        error!("Error creating Jobs database: {}", e);
-        return;
-    }
-
     let matches: ArgMatches = App::new("rebalancer")
         .version("0.1.0")
         .about("Rebalancer")
@@ -567,14 +558,22 @@ fn main() {
         .get_matches();
 
     let config_file = matches.value_of("config_file").map(|s| s.to_string());
-    let config = Arc::new(Mutex::new(
-        Config::parse_config(&config_file)
-            .map_err(|e| {
-                error!("Error parsing config: {}", e);
-                std::process::exit(1);
-            })
-            .unwrap(),
-    ));
+    let config = Config::parse_config(&config_file)
+        .unwrap_or_else(|e| {
+            println!("Error parsing config file: {}", e);
+            std::process::exit(1);
+        });
+
+    let _guard = util::init_global_logger(Some(config.log_level));
+
+    let config = Arc::new(Mutex::new(config));
+
+    info!("Initializing...");
+
+    if let Err(e) = jobs::create_job_database() {
+        error!("Error creating Jobs database: {}", e);
+        return;
+    }
 
     let addr = format!(
         "0.0.0.0:{}",
@@ -612,7 +611,7 @@ mod tests {
         *init = true;
 
         thread::spawn(move || {
-            let _guard = util::init_global_logger();
+            let _guard = util::init_global_logger(None);
             loop {
                 std::thread::sleep(std::time::Duration::from_millis(1))
             }

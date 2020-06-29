@@ -41,7 +41,7 @@ fn usage() {
 }
 
 fn main() {
-    let _guard = util::init_global_logger();
+    let _guard = util::init_global_logger(None);
     let args: Vec<String> = env::args().collect();
     let len = args.len();
 
@@ -142,7 +142,7 @@ pub mod agenttests {
         });
 
         thread::spawn(move || {
-            let _guard = util::init_global_logger();
+            let _guard = util::init_global_logger(None);
             gotham::start(addr, router);
         });
         *init = true;

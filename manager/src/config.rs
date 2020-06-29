@@ -15,11 +15,12 @@ use std::io::BufReader;
 use std::sync::{Arc, Barrier, Mutex};
 
 use crossbeam_channel::TrySendError;
-use serde::Deserialize;
+use serde::{de, de::Error as de_Error, Deserialize, Deserializer};
 use signal_hook::{self, iterator::Signals};
 
 use rebalancer::error::Error;
 use rebalancer::util;
+use slog::Level;
 use std::thread;
 use std::thread::JoinHandle;
 
@@ -86,7 +87,7 @@ impl Default for ConfigOptions {
     }
 }
 
-#[derive(Deserialize, Default, Debug, Clone)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct Config {
     pub domain_name: String,
 
@@ -107,6 +108,45 @@ pub struct Config {
 
     #[serde(default = "Config::default_max_fill_percentage")]
     pub max_fill_percentage: u32,
+
+    #[serde(
+        deserialize_with = "log_level_deserialize",
+        default = "Config::default_log_level"
+    )]
+    pub log_level: Level,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Config {
+            domain_name: String::new(),
+            shards: vec![],
+            snaplink_cleanup_required: false,
+            options: ConfigOptions::default(),
+            listen_port: 80,
+            max_fill_percentage: 100,
+            log_level: Level::Debug,
+        }
+    }
+}
+
+fn log_level_deserialize<'de, D>(deserializer: D) -> Result<Level, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let s = String::deserialize(deserializer)?.to_lowercase();
+    match s.as_str() {
+        "critical" | "crit" => Ok(Level::Critical),
+        "error" => Ok(Level::Error),
+        "warning" | "warn" => Ok(Level::Warning),
+        "info" => Ok(Level::Info),
+        "debug" => Ok(Level::Debug),
+        "trace" => Ok(Level::Trace),
+        _ => Err(D::Error::invalid_value(
+            de::Unexpected::Str(s.as_str()),
+            &"slog Level string",
+        )),
+    }
 }
 
 impl Config {
@@ -126,6 +166,10 @@ impl Config {
 
     fn default_max_fill_percentage() -> u32 {
         100
+    }
+
+    fn default_log_level() -> Level {
+        Level::Debug
     }
 
     pub fn parse_config(config_path: &Option<String>) -> Result<Config, Error> {
@@ -297,7 +341,7 @@ mod tests {
         *init = true;
 
         thread::spawn(move || {
-            let _guard = util::init_global_logger();
+            let _guard = util::init_global_logger(None);
             loop {
                 // Loop around ::park() in the event of spurious wake ups.
                 std::thread::park();
