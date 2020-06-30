@@ -492,6 +492,9 @@ pub struct EvacuateJob {
 
     pub md_update_time: AtomicU64,
 
+    // Timer starts when first object is found and stops at the end of the job.
+    pub object_movement_start_time: Mutex<Option<std::time::Instant>>,
+
     pub update_rx: Option<crossbeam_channel::Receiver<JobUpdateMessage>>,
 
     /// TESTING ONLY
@@ -590,6 +593,7 @@ impl EvacuateJob {
             get_client: reqwest::Client::new(),
             update_rx,
             bytes_transferred: AtomicU64::new(0),
+            object_movement_start_time: Mutex::new(None),
             md_update_time: AtomicU64::new(0),
         })
     }
@@ -738,6 +742,15 @@ impl EvacuateJob {
             "Evacuate Job total metadata update time: {}us",
             job_action.md_update_time.load(Ordering::SeqCst)
         );
+
+        if let Some(start_time) =
+            *job_action.object_movement_start_time.lock().unwrap()
+        {
+            debug!(
+                "Evacuate Job object movement time: {} seconds",
+                start_time.elapsed().as_secs()
+            );
+        }
 
         ret
     }
@@ -2131,6 +2144,13 @@ where
                                     continue;
                                 }
                             };
+
+                        if object_count == 0 {
+                            *job_action
+                                .object_movement_start_time
+                                .lock()
+                                .unwrap() = Some(std::time::Instant::now());
+                        }
 
                         trace!("Received object {:#?}", &eo);
                         object_count += 1;
