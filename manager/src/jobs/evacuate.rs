@@ -733,12 +733,12 @@ impl EvacuateJob {
                 set_run_error(&mut ret, e);
             });
 
-        debug!(
+        info!(
             "Evacuate Job transferred {} bytes",
             job_action.bytes_transferred.load(Ordering::SeqCst)
         );
 
-        debug!(
+        info!(
             "Evacuate Job total metadata update time: {}us",
             job_action.md_update_time.load(Ordering::SeqCst)
         );
@@ -746,7 +746,7 @@ impl EvacuateJob {
         if let Some(start_time) =
             *job_action.object_movement_start_time.lock().unwrap()
         {
-            debug!(
+            info!(
                 "Evacuate Job object movement time: {} seconds",
                 start_time.elapsed().as_secs()
             );
