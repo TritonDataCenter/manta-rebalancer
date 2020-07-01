@@ -28,6 +28,8 @@ function rebalancer_delegated_dataset
             fatal "failed to set mountpoint"
     fi
 
-    chmod 755 ${REBAL_ROOT}
-    mkdir -p ${REBAL_ROOT}/pg
+    chmod 777 ${REBAL_ROOT}
+    mkdir -p ${REBAL_ROOT}/pg/data
+    chown postgres:postgres ${REBAL_ROOT}/pg/data
+    sudo -u postgres initdb -D ${REBAL_ROOT}/pg/data
 }
