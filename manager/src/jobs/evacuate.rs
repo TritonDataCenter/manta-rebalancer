@@ -743,15 +743,6 @@ impl EvacuateJob {
             job_action.md_update_time.load(Ordering::SeqCst)
         );
 
-        if let Some(start_time) =
-            *job_action.object_movement_start_time.lock().unwrap()
-        {
-            info!(
-                "Evacuate Job object movement time: {} seconds",
-                start_time.elapsed().as_secs()
-            );
-        }
-
         ret
     }
 
@@ -2129,6 +2120,21 @@ where
                              assignments and exiting",
                             max
                         );
+
+                        let mut start_time = job_action
+                            .object_movement_start_time
+                            .lock()
+                            .unwrap();
+
+                        if let Some(st) = *start_time {
+                            info!(
+                                "Evacuate Job object movement time: {} seconds",
+                                st.elapsed().as_secs()
+                            );
+                        }
+
+                        *start_time = None;
+
                         done = true;
                         break;
                     }
