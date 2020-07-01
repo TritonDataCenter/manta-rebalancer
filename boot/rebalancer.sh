@@ -14,6 +14,8 @@
 # Common steps to enable a rebalancer service in a zone.
 
 REBAL_ROOT=/rebalancer
+SUDO=/opt/local/bin/sudo
+INITDB=/opt/local/bin/initdb
 
 # Sets up delegated dataset at /$REBAL_ROOT/rebalancer
 function rebalancer_delegated_dataset
@@ -31,5 +33,5 @@ function rebalancer_delegated_dataset
     chmod 777 ${REBAL_ROOT}
     mkdir -p ${REBAL_ROOT}/pg/data
     chown postgres:postgres ${REBAL_ROOT}/pg/data
-    sudo -u postgres initdb -D ${REBAL_ROOT}/pg/data
+    $SUDO -u postgres $INITDB -D ${REBAL_ROOT}/pg/data
 }
