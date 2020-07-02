@@ -30,6 +30,7 @@ use diesel::serialize::{self, IsNull, Output, ToSql};
 use diesel::sql_types;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+use std::time::SystemTime;
 
 pub type StorageId = String; // Hostname
 pub type AssignmentId = String; // UUID
@@ -67,6 +68,8 @@ pub struct Job {
     action: JobAction,
     state: JobState,
     config: Config,
+    start_time: Option<SystemTime>,
+    end_time: Option<SystemTime>,
     pub update_tx: Option<crossbeam_channel::Sender<JobUpdateMessage>>,
 }
 
@@ -171,6 +174,8 @@ impl JobBuilder {
             state: JobState::Setup,
             config: self.config,
             update_tx: self.update_tx,
+            start_time: None,
+            end_time: None,
         };
 
         job.insert_into_db()?;
@@ -205,14 +210,18 @@ pub struct JobDbEntry {
     pub id: String,
     pub action: JobActionDbEntry,
     pub state: JobState,
+    pub start_time: Option<SystemTime>,
+    pub end_time: Option<SystemTime>,
 }
 
 table! {
-    use diesel::sql_types::Text;
+    use diesel::sql_types::{Text, Nullable, Timestamp};
     jobs (id) {
         id -> Text,
         action -> Text,
         state -> Text,
+        start_time -> Nullable<Timestamp>,
+        end_time -> Nullable<Timestamp>,
     }
 }
 
@@ -399,12 +408,14 @@ impl Job {
     }
 
     pub fn run(mut self) -> Result<(), Error> {
+        debug!("Starting job {:#?}", &self);
+        info!("Starting Job: {}", self.id.to_string());
+
+        let now = std::time::Instant::now();
         let job_id = self.id.to_string();
 
+        self.start_time = Some(std::time::SystemTime::now());
         self.update_state(JobState::Running)?;
-        debug!("Starting job {:#?}", &self);
-        info!("Starting Job: {}", &job_id);
-        let now = std::time::Instant::now();
 
         let result = match self.action {
             JobAction::Evacuate(job_action) => {
@@ -466,6 +477,8 @@ impl Job {
             }
         };
 
+        self.end_time = Some(std::time::SystemTime::now());
+
         update_job_db_state(job_id, &self.state)?;
         ret
     }
@@ -475,6 +488,8 @@ impl Job {
             id: self.id.to_string(),
             action: self.action.to_db_entry(),
             state: self.state.clone(),
+            start_time: self.start_time.clone(),
+            end_time: self.end_time.clone(),
         }
     }
 
@@ -560,7 +575,9 @@ pub fn create_job_database() -> Result<(), Error> {
             CREATE TABLE IF NOT EXISTS jobs(
                 id TEXT PRIMARY KEY,
                 action TEXT CHECK(action IN ({})) NOT NULL,
-                state TEXT CHECK(state IN ({})) NOT NULL
+                state TEXT CHECK(state IN ({})) NOT NULL,
+                start_time TIMESTAMP,
+                end_time TIMESTAMP
             );
         ",
         action_check, state_check,
