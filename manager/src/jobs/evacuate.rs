@@ -2126,14 +2126,12 @@ where
                             .lock()
                             .unwrap();
 
-                        if let Some(st) = *start_time {
+                        if let Some(st) = start_time.take() {
                             info!(
                                 "Evacuate Job object movement time: {} seconds",
                                 st.elapsed().as_secs()
                             );
                         }
-
-                        *start_time = None;
 
                         done = true;
                         break;
