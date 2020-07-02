@@ -488,8 +488,8 @@ impl Job {
             id: self.id.to_string(),
             action: self.action.to_db_entry(),
             state: self.state.clone(),
-            start_time: self.start_time.clone(),
-            end_time: self.end_time.clone(),
+            start_time: self.start_time,
+            end_time: self.end_time,
         }
     }
 
