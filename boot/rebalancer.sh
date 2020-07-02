@@ -17,7 +17,8 @@ REBAL_ROOT=/rebalancer
 SUDO=/opt/local/bin/sudo
 INITDB=/opt/local/bin/initdb
 
-# Sets up delegated dataset at /$REBAL_ROOT/rebalancer
+# Sets up delegated dataset at /$REBAL_ROOT/rebalancer and configures directory
+# for use of postgresql.
 function rebalancer_delegated_dataset
 {
     local ZONE_UUID=$(zonename)
@@ -28,10 +29,12 @@ function rebalancer_delegated_dataset
     if [[ ${mountpoint} != ${REBAL_ROOT} ]]; then
         zfs set mountpoint=${REBAL_ROOT} ${ZONE_DATASET} || \
             fatal "failed to set mountpoint"
+        chmod 777 ${REBAL_ROOT}
     fi
 
-    chmod 777 ${REBAL_ROOT}
-    mkdir -p ${REBAL_ROOT}/pg/data
-    chown postgres:postgres ${REBAL_ROOT}/pg/data
-    $SUDO -u postgres $INITDB -D ${REBAL_ROOT}/pg/data
+    if [ ! -d "${REBAL_ROOT}/pg/data" ]; then
+        mkdir -p ${REBAL_ROOT}/pg/data
+        chown postgres:postgres ${REBAL_ROOT}/pg/data
+        $SUDO -u postgres $INITDB -D ${REBAL_ROOT}/pg/data
+    fi
 }
