@@ -9,8 +9,7 @@
 # Copyright 2020 Joyent, Inc.
 #
 
-export PS4='[\D{%FT%TZ}] ${BASH_SOURCE}:${LINENO}:
-${FUNCNAME[0]:+${FUNCNAME[0]}(): }'
+export PS4='[\D{%FT%TZ}] ${BASH_SOURCE}:${LINENO}: ${FUNCNAME[0]:+${FUNCNAME[0]}(): }'
 set -o xtrace
 # Dev Note: Attempt to get away with using 'errexit'. I'm not sure how ready
 # the manta-scripts are for this.
