@@ -1,5 +1,5 @@
 #!/bin/bash
-# 
+#
 # This Source Code Form is subject to the terms of the Mozilla Public
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at http://mozilla.org/MPL/2.0/.
@@ -38,7 +38,6 @@ cp /opt/smartdc/rebalancer/etc/postgresql.conf /rebalancer/pg/data/
 /usr/sbin/svcadm refresh $PGFMRI
 /usr/sbin/svcadm enable $PGFMRI
 /usr/sbin/svccfg import /opt/smartdc/rebalancer/smf/manifests/rebalancer.xml
-
 
 manta_common2_setup_log_rotation "rebalancer"
 manta_common2_setup_end
