@@ -10,7 +10,8 @@
 
 use super::evacuate::EvacuateObjectStatus;
 
-use crate::jobs::{JobDbEntry, REBALANCER_DB};
+use crate::jobs::evacuate::EvacuateJobDbConfig;
+use crate::jobs::{JobActionDbEntry, JobDbEntry, JobState, REBALANCER_DB};
 use crate::pg_db;
 use rebalancer::error::Error;
 
@@ -22,6 +23,8 @@ use diesel::result::ConnectionError;
 use diesel::sql_query;
 use diesel::sql_types::{BigInt, Text};
 use inflector::cases::titlecase::to_title_case;
+use libmanta::moray::MantaObjectShark;
+use serde::{Deserialize, Serialize};
 use strum::IntoEnumIterator;
 use uuid::Uuid;
 
@@ -43,24 +46,73 @@ struct StatusCount {
     count: i64,
 }
 
-pub fn get_status(uuid: Uuid) -> Result<HashMap<String, i64>, StatusError> {
+#[derive(Debug, Serialize)]
+#[serde(tag = "action")]
+pub enum JobStatusConfig {
+    Evacuate(JobConfigEvacuate),
+}
+
+#[derive(Debug, Serialize)]
+pub enum JobStatusResults {
+    Evacuate(JobStatusResultsEvacuate),
+}
+
+#[derive(Debug, Serialize)]
+pub struct JobStatus {
+    pub config: JobStatusConfig,
+    pub results: JobStatusResults,
+    pub state: JobState,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct JobConfigEvacuate {
+    from_shark: MantaObjectShark,
+}
+
+type JobStatusResultsEvacuate = HashMap<String, i64>;
+
+fn get_rebalancer_db_conn() -> Result<PgConnection, StatusError> {
+    pg_db::connect_or_create_db(REBALANCER_DB).map_err(|e| {
+        error!("Error connecting to rebalancer DB: {}", e);
+        StatusError::Unknown
+    })
+}
+
+fn get_job_db_entry(uuid: &Uuid) -> Result<JobDbEntry, StatusError> {
+    use crate::jobs::jobs::dsl::{id as job_id, jobs as jobs_db};
+
+    let job_uuid = uuid.to_string();
+    let conn = get_rebalancer_db_conn()?;
+
+    jobs_db
+        .filter(job_id.eq(&job_uuid))
+        .first(&conn)
+        .map_err(|e| {
+            error!("Could not find job ({}): {}", job_uuid, e);
+            StatusError::LookupError
+        })
+}
+
+fn get_job_db_conn_common(uuid: &Uuid) -> Result<PgConnection, StatusError> {
     let db_name = uuid.to_string();
+    pg_db::connect_db(&db_name).map_err(|e| {
+        if let Error::DieselConnection(conn_err) = &e {
+            if let ConnectionError::BadConnection(err) = conn_err {
+                error!("Status DB connection: {}", err);
+                return StatusError::DBExists;
+            }
+        }
+        error!("Unknown status DB connection error: {}", e);
+        StatusError::Unknown
+    })
+}
+
+fn get_evacaute_job_status(
+    uuid: &Uuid,
+) -> Result<JobStatusResultsEvacuate, StatusError> {
     let mut ret = HashMap::new();
     let mut total_count: i64 = 0;
-    let conn = match pg_db::connect_db(&db_name) {
-        Ok(c) => c,
-        Err(e) => {
-            if let Error::DieselConnection(conn_err) = &e {
-                if let ConnectionError::BadConnection(err) = conn_err {
-                    error!("Status DB connection: {}", err);
-                    return Err(StatusError::DBExists);
-                }
-            }
-
-            error!("Unknown status DB connection error: {}", e);
-            return Err(StatusError::Unknown);
-        }
-    };
+    let conn = get_job_db_conn_common(&uuid)?;
 
     // Unfortunately diesel doesn't have GROUP BY support yet, so we do a raw
     // query here.
@@ -90,17 +142,72 @@ pub fn get_status(uuid: Uuid) -> Result<HashMap<String, i64>, StatusError> {
     Ok(ret)
 }
 
+fn get_evacuate_job_config(
+    uuid: &Uuid,
+) -> Result<JobConfigEvacuate, StatusError> {
+    use crate::jobs::evacuate::config::dsl::config as config_table;
+    let conn = get_job_db_conn_common(&uuid)?;
+
+    let config: EvacuateJobDbConfig =
+        config_table.first(&conn).map_err(|e| {
+            error!("Could not find job config ({}): {}", uuid.to_string(), e);
+            StatusError::LookupError
+        })?;
+
+    let from_shark: MantaObjectShark =
+        serde_json::from_value(config.from_shark).map_err(|e| {
+            error!(
+                "Could not deserialize job config ({}): {}",
+                uuid.to_string(),
+                e
+            );
+            StatusError::Unknown
+        })?;
+
+    Ok(JobConfigEvacuate { from_shark })
+}
+
+fn get_job_status(
+    uuid: &Uuid,
+    action: &JobActionDbEntry,
+) -> Result<JobStatusResults, StatusError> {
+    match action {
+        JobActionDbEntry::Evacuate => {
+            Ok(JobStatusResults::Evacuate(get_evacaute_job_status(uuid)?))
+        }
+        _ => unreachable!(),
+    }
+}
+
+fn get_job_config(
+    uuid: &Uuid,
+    action: &JobActionDbEntry,
+) -> Result<JobStatusConfig, StatusError> {
+    match action {
+        JobActionDbEntry::Evacuate => {
+            Ok(JobStatusConfig::Evacuate(get_evacuate_job_config(&uuid)?))
+        }
+        _ => unreachable!(),
+    }
+}
+
+pub fn get_job(uuid: Uuid) -> Result<JobStatus, StatusError> {
+    let job_entry = get_job_db_entry(&uuid)?;
+    let results = get_job_status(&uuid, &job_entry.action)?;
+    let config = get_job_config(&uuid, &job_entry.action)?;
+
+    // get job config
+    Ok(JobStatus {
+        results,
+        config,
+        state: job_entry.state,
+    })
+}
+
 pub fn list_jobs() -> Result<Vec<JobDbEntry>, StatusError> {
     use crate::jobs::jobs::dsl::jobs as jobs_db;
 
-    let conn = match pg_db::connect_or_create_db(REBALANCER_DB) {
-        Ok(conn) => conn,
-        Err(e) => {
-            error!("Error connecting to rebalancer DB: {}", e);
-            return Err(StatusError::Unknown);
-        }
-    };
-
+    let conn = get_rebalancer_db_conn()?;
     let job_list = match jobs_db.load::<JobDbEntry>(&conn) {
         Ok(list) => list,
         Err(e) => {
@@ -115,7 +222,9 @@ pub fn list_jobs() -> Result<Vec<JobDbEntry>, StatusError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Config;
     use crate::jobs::evacuate::{self, EvacuateObject};
+    use crate::jobs::JobBuilder;
     use crate::pg_db;
     use quickcheck::{Arbitrary, StdThreadGen};
     use rebalancer::util;
@@ -131,7 +240,7 @@ mod tests {
     fn bad_job_id() {
         let _guard = util::init_global_logger(None);
         let uuid = Uuid::new_v4();
-        assert!(get_status(uuid).is_err());
+        assert!(get_job(uuid).is_err());
     }
 
     #[test]
@@ -139,12 +248,19 @@ mod tests {
         use crate::jobs::evacuate::evacuateobjects::dsl::*;
 
         let _guard = util::init_global_logger(None);
-        let uuid = Uuid::new_v4();
         let mut g = StdThreadGen::new(10);
         let mut obj_vec = vec![];
-        let conn = pg_db::create_and_connect_db(&uuid.to_string()).unwrap();
+        let config = Config::default();
+        let job_builder = JobBuilder::new(config);
 
-        evacuate::create_evacuateobjects_table(&conn).unwrap();
+        let job = job_builder
+            .evacuate("fake_shark".to_string(), Some(NUM_OBJS as u32))
+            .commit()
+            .unwrap();
+
+        let job_id = job.get_id();
+
+        let conn = pg_db::connect_or_create_db(&job_id.to_string()).unwrap();
 
         for _ in 0..NUM_OBJS {
             obj_vec.push(EvacuateObject::arbitrary(&mut g));
@@ -155,9 +271,11 @@ mod tests {
             .execute(&conn)
             .unwrap();
 
-        let count = get_status(uuid.clone()).unwrap();
+        let job_status = get_job(job_id).unwrap();
+        let JobStatusResults::Evacuate(evac_job_results) = job_status.results;
+        let count = *evac_job_results.get("Total").unwrap();
 
-        assert_eq!(*count.get("Total").unwrap(), NUM_OBJS);
+        assert_eq!(count, NUM_OBJS);
         println!("Get Status Test: {:#?}", count);
     }
 
@@ -166,12 +284,18 @@ mod tests {
         use crate::jobs::evacuate::evacuateobjects::dsl::*;
 
         let _guard = util::init_global_logger(None);
-        let uuid = Uuid::new_v4();
         let mut g = StdThreadGen::new(10);
         let mut obj_vec = vec![];
-        let conn = pg_db::create_and_connect_db(&uuid.to_string()).unwrap();
 
-        evacuate::create_evacuateobjects_table(&conn).unwrap();
+        let config = Config::default();
+        let job_builder = JobBuilder::new(config);
+        let job = job_builder
+            .evacuate("fake_shark".to_string(), Some(NUM_OBJS as u32))
+            .commit()
+            .unwrap();
+
+        let job_id = job.get_id();
+        let conn = pg_db::connect_db(&job_id.to_string()).unwrap();
 
         for _ in 0..NUM_OBJS {
             let mut obj = EvacuateObject::arbitrary(&mut g);
@@ -186,10 +310,13 @@ mod tests {
             .execute(&conn)
             .unwrap();
 
-        let count = get_status(uuid.clone()).unwrap();
+        let job_status = get_job(job_id).unwrap();
+        let JobStatusResults::Evacuate(evac_job_results) = job_status.results;
+        let total_count = *evac_job_results.get("Total").unwrap();
+        let post_processing_count =
+            *evac_job_results.get("Post Processing").unwrap();
 
-        assert_eq!(*count.get("Total").unwrap(), NUM_OBJS);
-        assert_eq!(*count.get("Post Processing").unwrap(), 0);
-        println!("Zero Value Test: {:#?}", count);
+        assert_eq!(total_count, NUM_OBJS);
+        assert_eq!(post_processing_count, 0);
     }
 }

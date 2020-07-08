@@ -20,7 +20,7 @@ libmanta = { git = "https://github.com/joyent/rust-libmanta", features = ["postg
 mime = "0.3.13"
 moray = { git = "https://github.com/joyent/rust-moray", features = ["postgres"], tag = "v0.10.0" }
 sharkspotter = { git = "https://github.com/joyent/rust-sharkspotter", features = ["postgres"], tag = "v0.13.1" }
-diesel = { version = "1.4.2", features = ["postgres"] }
+diesel = { version = "1.4.2", features = ["postgres", "serde_json"] }
 rand = "0.7.0"
 reqwest = "0.9.24"
 strum = "0.16.0"
