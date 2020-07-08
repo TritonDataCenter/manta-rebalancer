@@ -53,6 +53,7 @@ pub enum JobStatusConfig {
 }
 
 #[derive(Debug, Serialize)]
+#[serde(untagged)]
 pub enum JobStatusResults {
     Evacuate(JobStatusResultsEvacuate),
 }
