@@ -224,7 +224,7 @@ pub fn list_jobs() -> Result<Vec<JobDbEntry>, StatusError> {
 mod tests {
     use super::*;
     use crate::config::Config;
-    use crate::jobs::evacuate::{self, EvacuateObject};
+    use crate::jobs::evacuate::EvacuateObject;
     use crate::jobs::JobBuilder;
     use crate::pg_db;
     use quickcheck::{Arbitrary, StdThreadGen};
