@@ -67,6 +67,8 @@ type MorayClientHash = HashMap<u32, MorayClient>;
 
 // --- Diesel Stuff, TODO This should be refactored --- //
 
+const EVACUATE_OBJECTS_DB: &str = "evacuateobjects";
+
 use diesel::deserialize::{self, FromSql};
 use diesel::pg::{Pg, PgConnection, PgValue};
 use diesel::prelude::*;
@@ -279,10 +281,10 @@ fn create_table_common(
     // restarting jobs.
     let drop_query = format!("DROP TABLE {}", table_name);
 
-    conn.execute(&drop_query).unwrap_or_else(|e| {
+    if let Err(e) = conn.execute(&drop_query) {
         debug!("Table doesn't exist: {}", e);
-        0
-    });
+    }
+
     conn.execute(&create_query).map_err(Error::from)
 }
 
@@ -300,7 +302,10 @@ fn create_config_table(conn: &PgConnection) -> Result<usize, Error> {
 // rebalancer database's jobs table is because this keeps all the
 // information for the evacuate job in a single location.  Doing so makes
 // backing up the database after completion much easier.
-fn update_evacuate_config(conn: &PgConnection, from_shark: &MantaObjectShark) {
+fn update_evacuate_config_impl(
+    conn: &PgConnection,
+    from_shark: &MantaObjectShark,
+) -> Result<usize, Error> {
     use self::config::dsl::{config as config_table, id as config_id};
 
     let from_shark_value =
@@ -316,17 +321,22 @@ fn update_evacuate_config(conn: &PgConnection, from_shark: &MantaObjectShark) {
         .do_update()
         .set(&value)
         .execute(conn)
-        .unwrap();
+        .map_err(Error::from)?;
 
     if updated_records != 1 {
-        error!(
+        let msg = format!(
             "Error updating evacuate job configuration.  Expected 1 record \
              to be updated, found {}",
             updated_records
         );
+
+        error!("{}", msg);
+        return Err(
+            InternalError::new(Some(InternalErrorCode::DbQuery), msg).into()
+        );
     };
 
-    assert_eq!(updated_records, 1);
+    Ok(updated_records)
 }
 
 fn build_skipped_strings() -> Vec<String> {
@@ -383,7 +393,7 @@ pub fn create_evacuateobjects_table(
         status_check, skipped_check, error_check
     );
 
-    create_table_common(conn, "evacuateobjects", &create_query)?;
+    create_table_common(conn, EVACUATE_OBJECTS_DB, &create_query)?;
 
     conn.execute(
         "CREATE INDEX assignment_id on evacuateobjects (assignment_id);",
@@ -656,7 +666,7 @@ impl EvacuateJob {
 
         from_shark.manta_storage_id = storage_id;
 
-        update_evacuate_config(&conn, &from_shark);
+        update_evacuate_config_impl(&conn, &from_shark)?;
 
         Ok(Self {
             config: config.to_owned(),
@@ -694,15 +704,15 @@ impl EvacuateJob {
         Ok(())
     }
 
-    fn update_evacuate_config(&self) {
+    fn update_evacuate_config(&self) -> Result<usize, Error> {
         let locked_conn = self.conn.lock().expect("DB conn lock");
 
-        update_evacuate_config(&*locked_conn, &self.from_shark);
+        update_evacuate_config_impl(&*locked_conn, &self.from_shark)
     }
 
     pub fn run(mut self) -> Result<(), Error> {
         self.validate()?;
-        self.update_evacuate_config();
+        self.update_evacuate_config()?;
 
         let mut ret = Ok(());
 

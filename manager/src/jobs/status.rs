@@ -257,11 +257,12 @@ mod tests {
         let job = job_builder
             .evacuate("fake_shark".to_string(), Some(NUM_OBJS as u32))
             .commit()
-            .unwrap();
+            .expect("job builder");
 
         let job_id = job.get_id();
 
-        let conn = pg_db::connect_or_create_db(&job_id.to_string()).unwrap();
+        let conn = pg_db::connect_or_create_db(&job_id.to_string())
+            .expect("db connect");
 
         for _ in 0..NUM_OBJS {
             obj_vec.push(EvacuateObject::arbitrary(&mut g));
@@ -270,11 +271,11 @@ mod tests {
         diesel::insert_into(evacuateobjects)
             .values(obj_vec.clone())
             .execute(&conn)
-            .unwrap();
+            .expect("diesel insert");
 
-        let job_status = get_job(job_id).unwrap();
+        let job_status = get_job(job_id).expect("get job status");
         let JobStatusResults::Evacuate(evac_job_results) = job_status.results;
-        let count = *evac_job_results.get("Total").unwrap();
+        let count = *evac_job_results.get("Total").expect("Total count");
 
         assert_eq!(count, NUM_OBJS);
         println!("Get Status Test: {:#?}", count);
@@ -293,10 +294,10 @@ mod tests {
         let job = job_builder
             .evacuate("fake_shark".to_string(), Some(NUM_OBJS as u32))
             .commit()
-            .unwrap();
+            .expect("job builder");
 
         let job_id = job.get_id();
-        let conn = pg_db::connect_db(&job_id.to_string()).unwrap();
+        let conn = pg_db::connect_db(&job_id.to_string()).expect("db connect");
 
         for _ in 0..NUM_OBJS {
             let mut obj = EvacuateObject::arbitrary(&mut g);
@@ -309,13 +310,14 @@ mod tests {
         diesel::insert_into(evacuateobjects)
             .values(obj_vec.clone())
             .execute(&conn)
-            .unwrap();
+            .expect("diesel insert");
 
-        let job_status = get_job(job_id).unwrap();
+        let job_status = get_job(job_id).expect("get job status");
         let JobStatusResults::Evacuate(evac_job_results) = job_status.results;
-        let total_count = *evac_job_results.get("Total").unwrap();
-        let post_processing_count =
-            *evac_job_results.get("Post Processing").unwrap();
+        let total_count = *evac_job_results.get("Total").expect("Total count");
+        let post_processing_count = *evac_job_results
+            .get("Post Processing")
+            .expect("Post Processing count");
 
         assert_eq!(total_count, NUM_OBJS);
         assert_eq!(post_processing_count, 0);
