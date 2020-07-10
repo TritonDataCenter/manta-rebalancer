@@ -707,7 +707,7 @@ impl EvacuateJob {
     fn update_evacuate_config(&self) -> Result<usize, Error> {
         let locked_conn = self.conn.lock().expect("DB conn lock");
 
-        update_evacuate_config_impl(&*locked_conn, &self.from_shark)
+        update_evacuate_config_impl(&locked_conn, &self.from_shark)
     }
 
     pub fn run(mut self) -> Result<(), Error> {
