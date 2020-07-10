@@ -46,26 +46,26 @@ struct StatusCount {
     count: i64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "action")]
 pub enum JobStatusConfig {
     Evacuate(JobConfigEvacuate),
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum JobStatusResults {
     Evacuate(JobStatusResultsEvacuate),
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct JobStatus {
     pub config: JobStatusConfig,
     pub results: JobStatusResults,
     pub state: JobState,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct JobConfigEvacuate {
     from_shark: MantaObjectShark,
 }

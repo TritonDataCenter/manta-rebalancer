@@ -712,7 +712,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
 
         let ret = response.read_utf8_body().expect("response body");
-        let pretty_response: HashMap<String, usize> =
+        let pretty_response: JobStatus =
             serde_json::from_str(&ret).expect("job status hash");
         println!("{:#?}", pretty_response);
     }
