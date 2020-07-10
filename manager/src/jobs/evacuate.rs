@@ -67,6 +67,8 @@ type MorayClientHash = HashMap<u32, MorayClient>;
 
 // --- Diesel Stuff, TODO This should be refactored --- //
 
+const EVACUATE_OBJECTS_DB: &str = "evacuateobjects";
+
 use diesel::deserialize::{self, FromSql};
 use diesel::pg::{Pg, PgConnection, PgValue};
 use diesel::prelude::*;
@@ -91,10 +93,25 @@ table! {
     }
 }
 
+table! {
+    use diesel::sql_types::{Integer, Jsonb};
+    config {
+        id -> Integer,
+        from_shark -> Jsonb,
+    }
+}
+
 #[derive(Insertable, Queryable, Identifiable)]
 #[table_name = "evacuateobjects"]
 struct UpdateEvacuateObject<'a> {
     id: &'a str,
+}
+
+#[derive(Clone, Debug, Insertable, AsChangeset, Queryable, Serialize)]
+#[table_name = "config"]
+pub struct EvacuateJobDbConfig {
+    id: i32,
+    pub from_shark: Value,
 }
 
 // The fields in this struct are a subset of those found in
@@ -254,11 +271,75 @@ enum MetadataClientOption<'a> {
     Hash(&'a mut MorayClientHash),
 }
 
-pub fn create_evacuateobjects_table(
+fn create_table_common(
     conn: &PgConnection,
+    table_name: &str,
+    create_query: &str,
 ) -> Result<usize, Error> {
-    let status_strings = EvacuateObjectStatus::variants();
-    let error_strings = EvacuateObjectError::variants();
+    // TODO: check if table exists first and if so issue warning.  We may
+    // need to handle this a bit more gracefully in the future for
+    // restarting jobs.
+    let drop_query = format!("DROP TABLE {}", table_name);
+
+    if let Err(e) = conn.execute(&drop_query) {
+        debug!("Table doesn't exist: {}", e);
+    }
+
+    conn.execute(&create_query).map_err(Error::from)
+}
+
+fn create_config_table(conn: &PgConnection) -> Result<usize, Error> {
+    let create_query = "CREATE TABLE config(
+        id Integer PRIMARY KEY,
+        from_shark Jsonb
+    );";
+
+    create_table_common(conn, "config", create_query)
+}
+
+// We only want to store a single configuration entry for the evacaute job.
+// The reason we store it here instead of adding it on as a json blob to the
+// rebalancer database's jobs table is because this keeps all the
+// information for the evacuate job in a single location.  Doing so makes
+// backing up the database after completion much easier.
+fn update_evacuate_config_impl(
+    conn: &PgConnection,
+    from_shark: &MantaObjectShark,
+) -> Result<usize, Error> {
+    use self::config::dsl::{config as config_table, id as config_id};
+
+    let from_shark_value =
+        serde_json::to_value(from_shark).expect("MantaObjectShark to Value");
+    let value = EvacuateJobDbConfig {
+        id: 1,
+        from_shark: from_shark_value,
+    };
+
+    let updated_records = diesel::insert_into(config_table)
+        .values(&value)
+        .on_conflict(config_id)
+        .do_update()
+        .set(&value)
+        .execute(conn)
+        .map_err(Error::from)?;
+
+    if updated_records != 1 {
+        let msg = format!(
+            "Error updating evacuate job configuration.  Expected 1 record \
+             to be updated, found {}",
+            updated_records
+        );
+
+        error!("{}", msg);
+        return Err(
+            InternalError::new(Some(InternalErrorCode::DbQuery), msg).into()
+        );
+    };
+
+    Ok(updated_records)
+}
+
+fn build_skipped_strings() -> Vec<String> {
     let mut skipped_strings: Vec<String> = vec![];
 
     for reason in ObjectSkippedReason::iter() {
@@ -282,18 +363,19 @@ pub fn create_evacuateobjects_table(
         skipped_strings.push(reason);
     }
 
+    skipped_strings
+}
+
+pub fn create_evacuateobjects_table(
+    conn: &PgConnection,
+) -> Result<usize, Error> {
+    let status_strings = EvacuateObjectStatus::variants();
+    let error_strings = EvacuateObjectError::variants();
+    let skipped_strings = build_skipped_strings();
+
     let status_check = format!("'{}'", status_strings.join("', '"));
     let error_check = format!("'{}'", error_strings.join("', '"));
     let skipped_check = format!("'{}'", skipped_strings.join("', '"));
-
-    // TODO: check if table exists first and if so issue warning.  We may
-    // need to handle this a bit more gracefully in the future for
-    // restarting jobs...
-    conn.execute(r#"DROP TABLE evacuateobjects"#)
-        .unwrap_or_else(|e| {
-            debug!("Table doesn't exist: {}", e);
-            0
-        });
 
     let create_query = format!(
         "
@@ -310,7 +392,8 @@ pub fn create_evacuateobjects_table(
             );",
         status_check, skipped_check, error_check
     );
-    conn.execute(&create_query).map_err(Error::from)?;
+
+    create_table_common(conn, EVACUATE_OBJECTS_DB, &create_query)?;
 
     conn.execute(
         "CREATE INDEX assignment_id on evacuateobjects (assignment_id);",
@@ -579,7 +662,11 @@ impl EvacuateJob {
         };
 
         create_evacuateobjects_table(&conn)?;
+        create_config_table(&conn)?;
+
         from_shark.manta_storage_id = storage_id;
+
+        update_evacuate_config_impl(&conn, &from_shark)?;
 
         Ok(Self {
             config: config.to_owned(),
@@ -598,9 +685,10 @@ impl EvacuateJob {
         })
     }
 
-    pub fn create_table(&self) -> Result<usize, Error> {
+    pub fn create_tables(&self) -> Result<usize, Error> {
         let conn = self.conn.lock().expect("DB conn lock");
-        create_evacuateobjects_table(&*conn)
+        create_evacuateobjects_table(&*conn)?;
+        create_config_table(&*conn)
     }
 
     // This is not purely a validation function.  We do set the from_shark field
@@ -616,8 +704,15 @@ impl EvacuateJob {
         Ok(())
     }
 
+    fn update_evacuate_config(&self) -> Result<usize, Error> {
+        let locked_conn = self.conn.lock().expect("DB conn lock");
+
+        update_evacuate_config_impl(&locked_conn, &self.from_shark)
+    }
+
     pub fn run(mut self) -> Result<(), Error> {
         self.validate()?;
+        self.update_evacuate_config()?;
 
         let mut ret = Ok(());
 
@@ -3754,7 +3849,7 @@ mod tests {
         // EvacuateJob::validate(), but that calls into moray to get the DC
         // name.
         job_action.from_shark.datacenter = "dc1".into();
-        assert!(job_action.create_table().is_ok());
+        assert!(job_action.create_tables().is_ok());
 
         job_action
     }

@@ -121,6 +121,7 @@ pub enum InternalErrorCode {
     MetadataUpdateFailure, // Errors updating metadata in moray
     JobBuilderError,       // Errors building a Job
     MaxObjectsLimit,       // The max_objects limit has been reached
+    DbQuery,               // Unexpected result from a database query
 }
 
 impl fmt::Display for InternalError {

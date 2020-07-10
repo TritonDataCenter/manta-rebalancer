@@ -25,7 +25,7 @@ use jemallocator::Jemalloc;
 static GLOBAL: Jemalloc = Jemalloc;
 
 use manager::config::Config;
-use manager::jobs::status::StatusError;
+use manager::jobs::status::{JobStatus, StatusError};
 use manager::jobs::{
     self, JobActionDbEntry, JobBuilder, JobDbEntry, JobPayload, JobState,
     JobUpdateMessage,
@@ -69,11 +69,6 @@ lazy_static! {
 #[derive(Deserialize, StateData, StaticResponseExtender)]
 struct GetJobParams {
     uuid: String,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-struct JobStatus {
-    status: HashMap<String, usize>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -144,10 +139,10 @@ fn invalid_server_error(state: &State, msg: String) -> Response<Body> {
 }
 
 type GetJobFuture =
-    Box<dyn Future<Item = HashMap<String, i64>, Error = StatusError> + Send>;
+    Box<dyn Future<Item = JobStatus, Error = StatusError> + Send>;
 
-fn get_status(uuid: Uuid) -> GetJobFuture {
-    Box::new(match jobs::status::get_status(uuid) {
+fn get_job_status(uuid: Uuid) -> GetJobFuture {
+    Box::new(match jobs::status::get_job(uuid) {
         Ok(status) => future::ok(status),
         Err(e) => future::err(e),
     })
@@ -166,7 +161,7 @@ fn get_job(mut state: State) -> Box<HandlerFuture> {
         }
     };
 
-    Box::new(get_status(uuid).then(move |result| {
+    Box::new(get_job_status(uuid).then(move |result| {
         match result {
             Ok(job_status) => {
                 let ret = match serde_json::to_string(&job_status) {
@@ -717,7 +712,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
 
         let ret = response.read_utf8_body().expect("response body");
-        let pretty_response: HashMap<String, usize> =
+        let pretty_response: JobStatus =
             serde_json::from_str(&ret).expect("job status hash");
         println!("{:#?}", pretty_response);
     }
