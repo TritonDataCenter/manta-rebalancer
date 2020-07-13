@@ -211,6 +211,9 @@ Create an evacuate job:
 ```
 rebalancer-adm job create evacuate --shark=<storage server name> [--max_objects=<maximum number of ojects]
 ```
+**Note [MANTA-4462](https://jira.joyent.us/browse/MANTA-4462): Before an
+evacuate job is run, the target storage node must be manually set read-only. See
+[Operators Guide](https://github.com/joyent/manta-rebalancer/docs/operators_guide.md#marking-evacuate-target-read-only) for more details.**
 
 ## Manager Configuration Parameters
 The rebalancer manager requires certain  service configuration parameters in
