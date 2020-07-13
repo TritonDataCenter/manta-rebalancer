@@ -96,7 +96,14 @@ of 100 is not advised.
 
 
 ### Metrics
-_TODO_
+
+Rebalancer manager metrics can be accessed on port `8878` and the following
+metrics are exposed:
+
+* Request count, categorized by request type.
+* Object count, indicating the total number of objects which have been processed.
+* Error count, categorized by type of error observed.
+* Skipped object, count categorized by reason that an object was skipped.
 
 ### Marking evacuate target read-only
 When an evacuate job is run the target storage node needs to be marked read-only
@@ -287,4 +294,11 @@ $ svcs -L svc:/manta/application/rebalancer-agent:default
 See [agent documentation](https://github.com/joyent/manta-rebalancer/blob/master/docs/agent.md) for additional details.
 
 ### Metrics
-_TODO_
+Rebalancer agent metrics can be accessed on port `8878` and the following
+metrics are exposed:
+
+* Request count, categorized by request type.
+* Object count, indicating the total number of objects which have been processed.
+* Total bytes processed.
+* Error count, categorized by type of error observed.
+* Assignment processing times (in the form of a histogram).
