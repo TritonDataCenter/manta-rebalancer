@@ -210,7 +210,7 @@ with most Manta tooling, to perform upgrades across an entire region requires
 running the tooling in each DC separately.
 
 
-## example usage
+### Example usage
 
 The rest of this document is an example of running this tool in nightly-2
 (a small test Triton datacenter). Each subcommand has other options that are not
