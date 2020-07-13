@@ -141,8 +141,135 @@ psql -U postgres <job_uuid> < <job_uuid>.backup
 ## Rebalancer Agent
 
 ### Deployment
-_TODO_:
-    _insert rebalancer agent mako upgrade instructions_
+
+As part of [MANTA-5293](https://jira.joyent.us/browse/MANTA-5293) a new
+`manta-hotpatch-rebalancer-agent` tool was added to the headnode global zone.
+
+To install it requires a recent `sdcadm` and an update of your manta-deployment
+zone (a.k.a. the "manta0" zone):
+
+    sdcadm self-update --latest
+    sdcadm up manta
+
+Using the hotpatch tool should hopefully be obvious from its help output:
+
+    [root@headnode (nightly-2) ~]# manta-hotpatch-rebalancer-agent help
+    Hotpatch rebalancer-agent in deployed "storage" instances.
+    
+    Usage:
+        manta-hotpatch-rebalancer-agent [OPTIONS] COMMAND [ARGS...]
+        manta-hotpatch-rebalancer-agent help COMMAND
+    
+    Options:
+        -h, --help      Print this help and exit.
+        --version       Print version and exit.
+        -v, --verbose   Verbose trace logging.
+    
+    Commands:
+        help (?)        Help on a specific sub-command.
+    
+        list            List running rebalancer-agent versions.
+        avail           List newer available images for hotpatching rebalancer-agent.
+        deploy          Deploy the given rebalancer-agent image hotpatch to storage instances.
+        undeploy        Undo the rebalancer-agent hotpatch on storage instances.
+    
+    Use this tool to hotpatch the "rebalancer-agent" service that runs in each Manta
+    "storage" service instance. While hotpatching is discouraged, this tool exists
+    during active Rebalancer development because reprovisioning all "storage"
+    instances in a large datacenter solely for a rebalancer-agent fix can be
+    painful.
+    
+    Typical usage is:
+    
+    1. List the current version of all rebalancer-agents:
+            manta-hotpatch-rebalancer-agent list
+    
+    2. List available rebalancer-agent builds (in the "dev" channel of
+       updates.joyent.com) to import and use for hotpatching. This only lists
+       builds newer than the current oldest rebalancer-agent.
+            manta-hotpatch-rebalancer-agent avail
+       Alternatively a rebalancer-agent build can be manually imported
+       into the local IMGAPI.
+    
+    3. Hotpatch a rebalancer-agent image in all storage instances in this DC:
+            manta-hotpatch-rebalancer-agent deploy -a IMAGE-UUID
+    
+    4. If needed, revert any hotpatches and restore the storage image's original
+       rebalancer-agent.
+            manta-hotpatch-rebalancer-agent undeploy -a
+    
+Note that this tool only operates on instances in the current datacenter. As
+with most Manta tooling, to perform upgrades across an entire region requires
+running the tooling in each DC separately.
+
+
+## example usage
+
+The rest of this document is an example of running this tool in nightly-2
+(a small test Triton datacenter). Each subcommand has other options that are not
+all shown here, e.g. controlling concurrency, selecting particular storage
+instances to hotpatch, etc.
+
+The "list" command will show the current rebalancer-agent version and whether
+it is hotpatched in every storage node:
+
+    [root@headnode (nightly-2) ~]# manta-hotpatch-rebalancer-agent list
+    STORAGE NODE                          VERSION                                   HOTPATCHED
+    64052e9d-c379-44ae-9036-2293b88baa7c  0.1.0 (master-20200616T185217Z-g82b8008)  false
+    a83343ec-1d91-467b-b938-a0af7f86e92c  0.1.0 (master-20200616T185217Z-g82b8008)  false
+    a8aaa7c4-2699-40ed-83e5-aabec7d55b3d  0.1.0 (master-20200616T185217Z-g82b8008)  false
+
+The "avail" command lists any available rebalancer-agent builds at or newer
+than what is currently deployed:
+
+    [root@headnode (nightly-2) ~]# manta-hotpatch-rebalancer-agent avail
+    UUID                                  NAME                      VERSION                           PUBLISHED_AT
+    7a5529e2-3d8b-4c9c-84af-46a1f6e0bb95  mantav2-rebalancer-agent  master-20200617T234037Z-g6dc482c  2020-06-18T00:09:27.901Z
+    
+The "deploy" command does the hotpatching:
+
+    [root@headnode (nightly-2) ~]# manta-hotpatch-rebalancer-agent deploy 7a5529e2-3d8b-4c9c-84af-46a1f6e0bb95 -a
+    This will do the following:
+    - Import rebalancer-agent image 7a5529e2-3d8b-4c9c-84af-46a1f6e0bb95
+      (master-20200617T234037Z-g6dc482c) from updates.joyent.com.
+    - Hotpatch rebalancer-agent image 7a5529e2-3d8b-4c9c-84af-46a1f6e0bb95
+      (master-20200617T234037Z-g6dc482c) on all 3 storage instances in this DC
+    
+    Would you like to hotpatch? [y/N] y
+    Trace logging to "/var/tmp/manta-hotpatch-rebalancer-agent.20200619T180117Z.deploy.log"
+    Importing image 7a5529e2-3d8b-4c9c-84af-46a1f6e0bb95 from updates.joyent.com
+    Imported image
+    Hotpatched storage instance a8aaa7c4-2699-40ed-83e5-aabec7d55b3d
+    Hotpatched storage instance a83343ec-1d91-467b-b938-a0af7f86e92c
+    Hotpatching 3 storage insts       [================================================================>] 100%        3
+    Hotpatched storage instance 64052e9d-c379-44ae-9036-2293b88baa7c
+    Successfully hotpatched.
+    
+    [root@headnode (nightly-2) ~]# manta-hotpatch-rebalancer-agent list
+    STORAGE NODE                          VERSION                                   HOTPATCHED
+    64052e9d-c379-44ae-9036-2293b88baa7c  0.1.0 (master-20200617T234037Z-g6dc482c)  true
+    a83343ec-1d91-467b-b938-a0af7f86e92c  0.1.0 (master-20200617T234037Z-g6dc482c)  true
+    a8aaa7c4-2699-40ed-83e5-aabec7d55b3d  0.1.0 (master-20200617T234037Z-g6dc482c)  true
+
+The "undeploy" command can be used to revert back to the original
+rebalancer-agent in a storage instance (i.e. to undo any hotpatching):
+
+    [root@headnode (nightly-2) ~]# manta-hotpatch-rebalancer-agent undeploy -a
+    This will revert any rebalancer-agent hotpatches on all 3 storage instances in this DC
+    
+    Would you like to continue? [y/N] y
+    Trace logging to "/var/tmp/manta-hotpatch-rebalancer-agent.20200619T180148Z.undeploy.log"
+    Unhotpatched storage instance 64052e9d-c379-44ae-9036-2293b88baa7c
+    Unhotpatched storage instance a83343ec-1d91-467b-b938-a0af7f86e92c
+    Unhotpatching 3 storage insts     [================================================================>] 100%        3
+    Unhotpatched storage instance a8aaa7c4-2699-40ed-83e5-aabec7d55b3d
+    Successfully reverted hotpatches.
+    
+    [root@headnode (nightly-2) ~]# manta-hotpatch-rebalancer-agent list
+    STORAGE NODE                          VERSION                                   HOTPATCHED
+    64052e9d-c379-44ae-9036-2293b88baa7c  0.1.0 (master-20200616T185217Z-g82b8008)  false
+    a83343ec-1d91-467b-b938-a0af7f86e92c  0.1.0 (master-20200616T185217Z-g82b8008)  false
+    a8aaa7c4-2699-40ed-83e5-aabec7d55b3d  0.1.0 (master-20200616T185217Z-g82b8008)  false
 
 
 ### Configuration and Troubleshooting
