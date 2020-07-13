@@ -101,9 +101,11 @@ Rebalancer manager metrics can be accessed on port `8878` and the following
 metrics are exposed:
 
 * Request count, categorized by request type.
+* Total number of bytes processed.
 * Object count, indicating the total number of objects which have been processed.
 * Error count, categorized by type of error observed.
 * Skipped object, count categorized by reason that an object was skipped.
+* Assignment processing times (in the form of a histogram).
 
 ### Marking evacuate target read-only
 When an evacuate job is run the target storage node needs to be marked read-only
