@@ -52,7 +52,7 @@ static DEFAULT_STATIC_QUEUE_DEPTH: usize = 10;
 // destination sharks.
 static DEFAULT_MAX_ASSIGNMENT_AGE: u64 = 600;
 
-pub const MAX_TUNABLE_MD_UPDATE_THREADS: usize = 100;
+pub const MAX_TUNABLE_MD_UPDATE_THREADS: usize = 250;
 
 #[derive(Deserialize, Default, Debug, Clone)]
 pub struct Shard {
@@ -212,12 +212,14 @@ impl Config {
                                     continue;
                                 }
                             };
-                        let mut slcr = update_config
-                            .lock()
-                            .expect("Lock snaplink_cleanup_required");
+                        let mut config_lock =
+                            update_config.lock().expect("Lock update_config");
 
-                        *slcr = new_config;
-                        debug!("Configuration has been updated: {:#?}", *slcr);
+                        *config_lock = new_config;
+                        debug!(
+                            "Configuration has been updated: {:#?}",
+                            *config_lock
+                        );
                     }
                     Err(e) => {
                         warn!(
