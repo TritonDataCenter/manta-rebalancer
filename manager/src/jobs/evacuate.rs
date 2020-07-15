@@ -533,8 +533,10 @@ impl EvacuateJobUpdateMessage {
                 // finger.  It is still possible to set this number higher
                 // but only at the start of a job. See MANTA-5284.
                 if *num_threads > MAX_TUNABLE_MD_UPDATE_THREADS {
-                    return Err(String::from(
-                        "Cannot set metadata update threads above 100",
+                    return Err(format!(
+                        "Cannot set metadata update threads \
+                         above {}",
+                        MAX_TUNABLE_MD_UPDATE_THREADS
                     ));
                 }
             }

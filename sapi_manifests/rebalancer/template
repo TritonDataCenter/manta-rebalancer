@@ -68,7 +68,7 @@
     {{/MUSKIE_MAX_UTILIZATION_PCT}}
 
     {{#SNAPLINK_CLEANUP_REQUIRED}}
-    "snaplink_cleanup_required": true,
+    "snaplink_cleanup_required": {{SNAPLINK_CLEANUP_REQUIRED}},
     {{/SNAPLINK_CLEANUP_REQUIRED}}
     "shards": [{{#INDEX_MORAY_SHARDS}}
         {
