@@ -3636,6 +3636,8 @@ fn _update_broker_static(
         thread_handles.push(handle);
     }
 
+    metrics_gauge_set(MD_THREAD_GAUGE, num_threads);
+
     loop {
         let ace = match md_update_rx.recv() {
             Ok(ace) => ace,
@@ -3671,6 +3673,8 @@ fn _update_broker_static(
     for handle in thread_handles.into_iter() {
         handle.join().expect("join worker handle");
     }
+
+    metrics_gauge_set(MD_THREAD_GAUGE, 0);
     Ok(())
 }
 
