@@ -15,7 +15,7 @@ use hyper::{Request, Response};
 use lazy_static::lazy_static;
 use prometheus::{
     opts, register_counter, register_counter_vec, register_histogram, Counter,
-    CounterVec, Encoder, Histogram, TextEncoder,
+    CounterVec, Encoder, Gauge, Histogram, TextEncoder,
 };
 use serde_derive::Deserialize;
 use slog::{error, info, Logger};
@@ -59,12 +59,58 @@ impl Default for ConfigMetrics {
 pub enum Metrics {
     MetricsCounterVec(CounterVec),
     MetricsCounter(Counter),
+    MetricsGauge(Gauge),
     MetricsHistogram(Histogram),
 }
 
 lazy_static! {
     static ref METRICS_LABELS: Mutex<Option<HashMap<String, String>>> =
         Mutex::new(None);
+}
+
+pub fn gauge_inc<S: ::std::hash::BuildHasher>(
+    metrics: &HashMap<&'static str, Metrics, S>,
+    key: &str,
+) {
+    match metrics.get(key) {
+        Some(metric) => {
+            if let Metrics::MetricsGauge(g) = metric {
+                g.inc();
+            }
+        }
+        None => error!(slog_scope::logger(), "Invalid metric: {}", key),
+    }
+}
+
+pub fn gauge_dec<S: ::std::hash::BuildHasher>(
+    metrics: &HashMap<&'static str, Metrics, S>,
+    key: &str,
+) {
+    match metrics.get(key) {
+        Some(metric) => {
+            if let Metrics::MetricsGauge(g) = metric {
+                g.dec();
+            }
+        }
+        None => error!(slog_scope::logger(), "Invalid metric: {}", key),
+    }
+}
+
+pub fn gauge_set<S: ::std::hash::BuildHasher>(
+    metrics: &HashMap<&'static str, Metrics, S>,
+    key: &str,
+    val: usize,
+) {
+    let num = val as f64;
+
+    match metrics.get(key) {
+        Some(metric) => {
+            if let Metrics::MetricsGauge(g) = metric {
+                g.set(num);
+            }
+        }
+        None => error!(slog_scope::logger(), "Invalid metric: {}", key),
+    }
 }
 
 #[allow(irrefutable_let_patterns)]
