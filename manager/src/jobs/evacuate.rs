@@ -9,8 +9,9 @@
  */
 
 use crate::metrics::{
-    metrics_error_inc, metrics_object_inc_by, metrics_skip_inc,
-    metrics_skip_inc_by, ACTION_EVACUATE,
+    metrics_error_inc, metrics_gauge_dec, metrics_gauge_inc, metrics_gauge_set,
+    metrics_object_inc_by, metrics_skip_inc, metrics_skip_inc_by,
+    ACTION_EVACUATE, MD_THREAD_GAUGE,
 };
 use rebalancer::common::{
     self, AssignmentPayload, ObjectId, ObjectSkippedReason, Task, TaskStatus,
@@ -3089,6 +3090,8 @@ fn metadata_update_worker_dynamic(
         // metadata update worker threads.
         let mut client_hash: HashMap<u32, MorayClient> = HashMap::new();
 
+        metrics_gauge_inc(MD_THREAD_GAUGE);
+
         debug!(
             "Started metadata update worker: {:?}",
             thread::current().id()
@@ -3116,6 +3119,7 @@ fn metadata_update_worker_dynamic(
         }
 
         debug!("Exiting metadata update worker.");
+        metrics_gauge_dec(MD_THREAD_GAUGE);
     }
 }
 
@@ -3595,6 +3599,7 @@ fn metadata_update_broker_dynamic(
                 pool.execute(worker);
             }
             pool.join();
+            metrics_gauge_set(MD_THREAD_GAUGE, 0);
             Ok(())
         })
         .map_err(Error::from)

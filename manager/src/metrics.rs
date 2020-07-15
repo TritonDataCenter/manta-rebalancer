@@ -8,10 +8,10 @@
  * Copyright 2020 Joyent, Inc.
  */
 use lazy_static::lazy_static;
-use prometheus::{opts, register_counter_vec};
+use prometheus::{opts, register_counter_vec, register_gauge};
 use rebalancer::metrics::{
-    self, counter_vec_inc_by, Metrics, MetricsMap, ERROR_COUNT, OBJECT_COUNT,
-    REQUEST_COUNT,
+    self, counter_vec_inc_by, gauge_dec, gauge_inc, gauge_set, Metrics,
+    MetricsMap, ERROR_COUNT, OBJECT_COUNT, REQUEST_COUNT,
 };
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -54,6 +54,9 @@ pub static ACTION_EVACUATE: &str = "evacuate";
 // why it is defined here instead of where the common labels are.
 pub static SKIP_COUNT: &str = "skip_count";
 
+// Gauge for tracking the current number of active metadata update threads.
+pub static MD_THREAD_GAUGE: &str = "md_thread_gauge";
+
 // This method may come in handy if it is necessary to add more metrics to
 // our collector.
 pub fn metrics_get() -> &'static Mutex<Option<MetricsMap>> {
@@ -79,12 +82,21 @@ pub fn metrics_init(cfg: metrics::ConfigMetrics) {
     // Now create and register additional metrics exclusively used by the
     // rebalancer manger.
     let skip_counter = register_counter_vec!(
-        opts!(SKIP_COUNT, "Objects skipped.").const_labels(labels),
+        opts!(SKIP_COUNT, "Objects skipped.").const_labels(labels.clone()),
         &["reason"]
     )
     .expect("failed to register skip_count counter");
 
     metrics.insert(SKIP_COUNT, Metrics::MetricsCounterVec(skip_counter));
+
+    let md_thread_gauge = register_gauge!(opts!(
+        MD_THREAD_GAUGE,
+        "Number of currently active metadata threads."
+    )
+    .const_labels(labels))
+    .expect("failed to register metadata thread gauge");
+
+    metrics.insert(MD_THREAD_GAUGE, Metrics::MetricsGauge(md_thread_gauge));
 
     // Take the fully formed set of metrics and store it globally.
     let mut global_metrics = METRICS.lock().unwrap();
@@ -143,4 +155,19 @@ pub fn metrics_object_inc_by(action: Option<&str>, val: usize) {
 fn metrics_vec_inc_by(key: &str, bucket: Option<&str>, val: usize) {
     let metrics = METRICS.lock().unwrap().clone();
     counter_vec_inc_by(&metrics.expect("metrics"), key, bucket, val);
+}
+
+pub fn metrics_gauge_dec(key: &str) {
+    let metrics = METRICS.lock().unwrap().clone();
+    gauge_dec(&metrics.expect("metrics"), key);
+}
+
+pub fn metrics_gauge_inc(key: &str) {
+    let metrics = METRICS.lock().unwrap().clone();
+    gauge_inc(&metrics.expect("metrics"), key);
+}
+
+pub fn metrics_gauge_set(key: &str, val: usize) {
+    let metrics = METRICS.lock().unwrap().clone();
+    gauge_set(&metrics.expect("metrics"), key, val);
 }
