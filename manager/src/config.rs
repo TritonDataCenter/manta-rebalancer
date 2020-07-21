@@ -52,6 +52,9 @@ static DEFAULT_STATIC_QUEUE_DEPTH: usize = 10;
 // destination sharks.
 static DEFAULT_MAX_ASSIGNMENT_AGE: u64 = 600;
 
+// The chunk sized used when scanning the metadata tier.
+static DEFAULT_METADATA_READ_CHUNK_SIZE: usize = 500;
+
 pub const MAX_TUNABLE_MD_UPDATE_THREADS: usize = 250;
 
 #[derive(Deserialize, Default, Debug, Clone)]
@@ -71,6 +74,7 @@ pub struct ConfigOptions {
     pub static_queue_depth: usize,
     pub max_assignment_age: u64,
     pub use_batched_updates: bool,
+    pub md_read_chunk_size: usize,
 }
 
 impl Default for ConfigOptions {
@@ -83,6 +87,7 @@ impl Default for ConfigOptions {
             static_queue_depth: DEFAULT_STATIC_QUEUE_DEPTH,
             max_assignment_age: DEFAULT_MAX_ASSIGNMENT_AGE,
             use_batched_updates: true,
+            md_read_chunk_size: DEFAULT_METADATA_READ_CHUNK_SIZE,
         }
     }
 }
