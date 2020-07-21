@@ -52,7 +52,7 @@ static DEFAULT_STATIC_QUEUE_DEPTH: usize = 10;
 // destination sharks.
 static DEFAULT_MAX_ASSIGNMENT_AGE: u64 = 600;
 
-// The chunk sized used when scanning the metadata tier.
+// The chunk size used when scanning the metadata tier.
 static DEFAULT_METADATA_READ_CHUNK_SIZE: usize = 500;
 
 pub const MAX_TUNABLE_MD_UPDATE_THREADS: usize = 250;
