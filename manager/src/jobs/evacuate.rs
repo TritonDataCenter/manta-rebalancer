@@ -1971,6 +1971,7 @@ fn start_sharkspotter(
         min_shard,
         max_shard,
         sharks: vec![shark.to_string()],
+        chunk_size: job_action.config.options.md_read_chunk_size as u64,
         ..Default::default()
     };
 

@@ -46,11 +46,18 @@
 
 
         {{#REBALANCER_USE_BATCHED_UPDATES}}
-        "use_batched_updates": {{REBALANCER_USE_BATCHED_UPDATES}}
+        "use_batched_updates": {{REBALANCER_USE_BATCHED_UPDATES}},
         {{/REBALANCER_USE_BATCHED_UPDATES}}
         {{^REBALANCER_USE_BATCHED_UPDATES}}
-        "use_batched_updates": false
+        "use_batched_updates": false,
         {{/REBALANCER_USE_BATCHED_UPDATES}}
+
+        {{#REBALANCER_MD_READ_CHUNK_SIZE}}
+        "md_read_chunk_size": {{REBALANCER_MD_READ_CHUNK_SIZE}}
+        {{/REBALANCER_MD_READ_CHUNK_SIZE}}
+        {{^REBALANCER_MD_READ_CHUNK_SIZE}}
+        "md_read_chunk_size": 500
+        {{/REBALANCER_MD_READ_CHUNK_SIZE}}
     },
     "listen_port": 80,
 
