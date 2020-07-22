@@ -1,7 +1,7 @@
 // Copyright 2020 Joyent, Inc.
 
 use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Mutex;
 
 use gethostname::gethostname;
@@ -42,7 +42,7 @@ pub struct ConfigMetrics {
 impl Default for ConfigMetrics {
     fn default() -> Self {
         Self {
-            host: "127.0.0.1".into(),
+            host: Ipv4Addr::UNSPECIFIED.to_string(),
             port: 8878,
             datacenter: "development".into(),
             service: "1.rebalancer.localhost".into(),
