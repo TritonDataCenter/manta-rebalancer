@@ -24,7 +24,7 @@ static MANTA_BUCKET: &str = "manta";
 static MANTA_STORAGE_BUCKET: &str = "manta_storage";
 static MANTA_STORAGE_BUCKET_SHARD: u32 = 1;
 static MANTA_STORAGE_ID: &str = "manta_storage_id";
-static MANTA_OBJECT_ID: &str = "ObjectId";
+static MANTA_OBJECT_ID: &str = "objectId";
 
 // We can't use trust-dns-resolver here because it uses futures with a
 // block_on, and calling a block_on from within a block_on is not allowed.
@@ -167,7 +167,7 @@ pub fn get_object(
     match ret {
         Some(r) => Ok(r),
         None => {
-            let msg = format!("Error: Could not object {}", object_id);
+            let msg = format!("Error: Could not get object {}", object_id);
             error!("{}", &msg);
             Err(Error::from(InternalError::new(
                 Some(InternalErrorCode::ObjectNotFound),

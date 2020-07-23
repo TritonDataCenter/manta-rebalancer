@@ -33,6 +33,7 @@ use crate::moray_client;
 use crate::pg_db;
 use crate::storinfo::{self as mod_storinfo, SharkSource, StorageNode};
 
+use std::cell::Cell;
 use std::collections::hash_map::Entry::{Occupied, Vacant};
 use std::collections::HashMap;
 use std::convert::{TryFrom, TryInto};
@@ -431,6 +432,7 @@ struct SharkSpotterGenerator {
 struct FileGenerator {
     job_action: Arc<EvacuateJob>,
     directory: String,
+    object_count: Cell<u64>,
     obj_tx: crossbeam_channel::Sender<EvacuateObject>,
 }
 
@@ -642,8 +644,20 @@ impl FileGenerator {
                 .into());
             }
         };
+
+        // XXX maintain max objects counter here and in sharkspotter converstion
+        // function?
         let reader = BufReader::new(File::open(shard)?);
         for obj_id in reader.lines() {
+            if let Some(max) = self.job_action.max_objects {
+                if self.object_count.get() > max as u64 {
+                        // XXX Add some logging here
+                    return Ok(());
+                }
+            }
+
+            self.object_count.set(self.object_count.get() + 1);
+
             // XXX: put moray client function call here to get object from moray
             // if it fails try to put the object into the database as an
             // error anyway.
@@ -658,7 +672,7 @@ impl FileGenerator {
             let moray_obj =
                 moray_client::get_object(&mut mclient, obj_id.as_str())?;
 
-            let eobj = match EvacuateObject::try_from(moray_obj) {
+            let mut eobj = match EvacuateObject::try_from(moray_obj) {
                 Ok(obj) => obj,
                 Err(mut partial_obj) => {
                     //let mut insert_obj = partial_obj.clone();
@@ -673,6 +687,9 @@ impl FileGenerator {
                 }
             };
 
+            // XXX check shard number !> i32::MAX
+            eobj.shard = shard_num as i32;
+
             // XXX: mark eobj as error?
 
             let id = eobj.id.clone();
@@ -680,11 +697,8 @@ impl FileGenerator {
                 .send(eobj)
                 .map_err(CrossbeamError::from)
                 .map_err(|e| {
-                    error!("Error sending object: {}", e);
-                    self.job_action.mark_object_error(
-                        &id,
-                        EvacuateObjectError::InternalError,
-                    );
+                    warn!("Assignment manager no longer accepting objects: {}",
+                        e);
                     InternalError::new(
                         Some(InternalErrorCode::Crossbeam),
                         e.description(),
@@ -786,7 +800,7 @@ fn sharkspotter_message_translator(
         };
 
         if let Err(e) = evac_obj_tx.send(eobj) {
-            error!(
+            warn!(
                 "Assignment Manager thread shutdown before receiving all \
                  objects: {}",
                 e
@@ -2312,6 +2326,7 @@ fn start_generator_thread(
             let fgen = FileGenerator {
                 job_action: Arc::clone(&job_action), // XXX Used?
                 directory: directory.to_owned(),
+                object_count: Cell::new(0),
                 obj_tx,
             };
             fgen.generate()
@@ -4764,6 +4779,7 @@ mod tests {
         let fgen = FileGenerator {
             job_action: Arc::clone(&job_action),
             directory: test_path,
+            object_count: Cell::new(0),
             obj_tx,
         };
         let fgen_handle = fgen.generate().expect("generate");
