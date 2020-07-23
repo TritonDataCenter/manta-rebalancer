@@ -109,6 +109,7 @@ pub struct InternalError {
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub enum InternalErrorCode {
     Other,
+    InvalidJobAction,      // Invalid Job Action
     Crossbeam,             // An error relating to crossbeam
     StorinfoError,         // An error from Storinfo service
     AssignmentLookupError, // Could not lookup assignment in memory
@@ -122,6 +123,7 @@ pub enum InternalErrorCode {
     JobBuilderError,       // Errors building a Job
     MaxObjectsLimit,       // The max_objects limit has been reached
     DbQuery,               // Unexpected result from a database query
+    ObjectNotFound,        // Could not find object
 }
 
 impl fmt::Display for InternalError {

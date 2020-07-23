@@ -68,6 +68,7 @@ pub struct JobStatus {
 #[derive(Debug, Deserialize, Serialize)]
 pub struct JobConfigEvacuate {
     from_shark: MantaObjectShark,
+    // XXX: TODO Add source,
 }
 
 type JobStatusResultsEvacuate = HashMap<String, i64>;
@@ -224,7 +225,7 @@ pub fn list_jobs() -> Result<Vec<JobDbEntry>, StatusError> {
 mod tests {
     use super::*;
     use crate::config::Config;
-    use crate::jobs::evacuate::EvacuateObject;
+    use crate::jobs::evacuate::{EvacuateObject, ObjectSource};
     use crate::jobs::JobBuilder;
     use crate::pg_db;
     use quickcheck::{Arbitrary, StdThreadGen};
@@ -255,7 +256,11 @@ mod tests {
         let job_builder = JobBuilder::new(config);
 
         let job = job_builder
-            .evacuate("fake_shark".to_string(), Some(NUM_OBJS as u32))
+            .evacuate(
+                "fake_shark".to_string(),
+                ObjectSource::default(),
+                Some(NUM_OBJS as u32),
+            )
             .commit()
             .expect("job builder");
 
@@ -292,7 +297,11 @@ mod tests {
         let config = Config::default();
         let job_builder = JobBuilder::new(config);
         let job = job_builder
-            .evacuate("fake_shark".to_string(), Some(NUM_OBJS as u32))
+            .evacuate(
+                "fake_shark".to_string(),
+                ObjectSource::default(),
+                Some(NUM_OBJS as u32),
+            )
             .commit()
             .expect("job builder");
 

@@ -37,7 +37,9 @@ use std::collections::hash_map::Entry::{Occupied, Vacant};
 use std::collections::HashMap;
 use std::convert::{TryFrom, TryInto};
 use std::error::Error as _Error;
-use std::io::Write;
+use std::fs::{self, File};
+use std::io::{BufRead, BufReader, Write};
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::string::ToString;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -48,20 +50,31 @@ use std::time::Duration;
 use crossbeam_channel as crossbeam;
 use crossbeam_channel::TryRecvError;
 use crossbeam_deque::{Injector, Steal};
+use failure::Error as Failure;
+use failure::Fail;
+use lazy_static::lazy_static;
 use libmanta::moray::{MantaObject, MantaObjectShark};
 use moray::client::MorayClient;
 use moray::objects::{
     BatchPutOp, BatchRequest, Etag, MethodOptions as ObjectMethodOptions,
+    MorayObject,
 };
 use quickcheck::{Arbitrary, Gen};
 use quickcheck_helpers::random::string as random_string;
 use rand::seq::SliceRandom;
+use regex::Regex;
 use reqwest;
 use serde::{self, Deserialize, Serialize};
 use serde_json::Value;
+use sharkspotter::SharkspotterMessage;
 use strum::IntoEnumIterator;
 use threadpool::ThreadPool;
 use uuid::Uuid;
+
+lazy_static! {
+    static ref OBJ_FILE_RE: Regex =
+        Regex::new(r#"^shard_(?P<shard>\d+)\.objs$"#).expect("compile regex");
+}
 
 type EvacuateObjectValue = Value;
 type MorayClientHash = HashMap<u32, MorayClient>;
@@ -75,7 +88,6 @@ use diesel::pg::{Pg, PgConnection, PgValue};
 use diesel::prelude::*;
 use diesel::serialize::{self, IsNull, Output, ToSql};
 use diesel::sql_types;
-use sharkspotter::SharkspotterMessage;
 
 // Note: The ordering of the fields in this table must match the ordering of
 // the fields in 'struct EvacuateObject'
@@ -405,6 +417,385 @@ pub fn create_evacuateobjects_table(
 
 struct FiniMsg;
 
+trait ObjectGenerator {
+    fn generate(self) -> Result<thread::JoinHandle<Result<(), Error>>, Error>;
+}
+
+struct SharkSpotterGenerator {
+    job_action: Arc<EvacuateJob>,
+    min_shard: u32,
+    max_shard: u32,
+    obj_tx: crossbeam_channel::Sender<EvacuateObject>,
+}
+
+struct FileGenerator {
+    job_action: Arc<EvacuateJob>,
+    directory: String,
+    obj_tx: crossbeam_channel::Sender<EvacuateObject>,
+}
+
+#[derive(Debug, Fail)]
+enum FileGeneratorError {
+    #[fail(
+        display = "Filename ({})should be of the format <num>_shard.objs",
+        filename
+    )]
+    ImproperlyFormattedFilename { filename: String },
+    #[fail(
+        display = "Filename ({})should be of the format <num>_shard.objs",
+        dirname
+    )]
+    ImproperlyFormattedDirname { dirname: String },
+
+    #[fail(display = "Shark directory should not contain sub-directories")]
+    NestedDirectory,
+
+    #[fail(display = "Input path must end in a filename and not '..'")]
+    InvalidFileName,
+
+    #[fail(display = "Input path must be a directory")]
+    MissingDirectory,
+
+    #[fail(display = "Shark directory must be named as a storage node")]
+    InvalidDirName,
+}
+
+// --- File Generator Helpers --- //
+fn shard_num_from_pathbuf(shard_path_buf: &PathBuf) -> Result<u32, Error> {
+    let captures = shard_path_buf
+        .file_name()
+        .ok_or_else(|| {
+            InternalError::new(None, "failed to get filename from path")
+        })
+        .and_then(|filename| {
+            filename.to_str().ok_or_else(|| {
+                InternalError::new(None, "failed to convert filename to string")
+            })
+        })
+        .and_then(|file_str| {
+            debug!("capturing shard number on: {}", file_str);
+            OBJ_FILE_RE.captures(file_str).ok_or_else(|| {
+                InternalError::new(None, "failed to capture shard number")
+            })
+        })
+        .map_err(Error::from)?;
+
+    captures["shard"].parse::<u32>().map_err(Error::from)
+}
+
+impl FileGenerator {
+    /// Validate that the input directory is of the form:
+    /// <shark name>/
+    ///     <per_shard object file>
+    ///     <per_shard object file>
+    ///     <per_shard object file>
+    ///     ...
+    ///
+    /// or
+    /// <parent_dir>
+    ///     <shark name>/
+    ///         <per_shard object file>
+    ///         <per_shard object file>
+    ///         <per_shard object file>
+    ///         ...
+    ///
+    // Note that we do something very similar when we actually run the job.
+    // The reason we do this upfront is really to make sure all the files in
+    // the directory have valid names before we start rebalancing.
+    fn validate_directory(&self) -> Result<(), Failure> {
+        let dir = Path::new(self.directory.as_str());
+        if !dir.is_dir() {
+            return Err(FileGeneratorError::MissingDirectory.into());
+        }
+
+        let source_dir = self.get_source_dir()?;
+
+        for entry in fs::read_dir(source_dir.as_path())? {
+            let entry = entry?.path();
+            if entry.is_dir() {
+                return Err(FileGeneratorError::NestedDirectory.into());
+            } else if entry.is_file() {
+                let filename = match entry.file_name() {
+                    Some(f) => f.to_string_lossy().to_string(),
+                    None => {
+                        return Err(FileGeneratorError::InvalidFileName.into());
+                    }
+                };
+
+                // Does this filename match the format.
+                if !OBJ_FILE_RE.is_match(&filename) {
+                    return Err(
+                        FileGeneratorError::ImproperlyFormattedFilename {
+                            filename,
+                        }
+                        .into(),
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn walk_shards(&self) -> Result<(), Error> {
+        let dir = self.get_source_dir().map_err(|e| {
+            InternalError::new(
+                Some(InternalErrorCode::InvalidJobAction),
+                e.to_string(),
+            )
+        })?;
+        for shard in fs::read_dir(dir.as_path())? {
+            let shard = shard?.path();
+            self.walk_objects(shard)?
+        }
+        Ok(())
+    }
+
+    ///
+    /// We want to be flexible about the source directory.  It can be named
+    /// with either the short ID ("1.stor") or the full manta_storage_id
+    /// ("1.stor.domain.joyent.us")
+    ///
+    /// This function creates both possibilities, and puts them in a vector.
+    ///
+    /// If the user provided path ends in the shark name then we are done.
+    ///
+    /// If not then scan the path provided and check for either of the
+    /// possibilities noted above, and return the PathBuf for the first one
+    /// that matches.
+    ///
+    fn get_source_dir(&self) -> Result<PathBuf, Failure> {
+        let from_shark = &self.job_action.from_shark.manta_storage_id.clone();
+        let dir = Path::new(self.directory.as_str());
+        let mut possibilities = vec![from_shark.clone()];
+
+        // This should always be the case, but we want to be liberal with
+        // what we receive.  Also, we don't want a change elsewhere in the
+        // code to break this part.
+        if from_shark.contains(&self.job_action.config.domain_name) {
+            let re_str =
+                format!("^(?P<host>.*).{}", self.job_action.config.domain_name);
+            let host_only_re: Regex =
+                Regex::new(&re_str).expect("compile regex");
+
+            let host = match host_only_re.captures(&from_shark) {
+                Some(c) => c["host"].to_string(),
+                None => {
+                    return Err(FileGeneratorError::InvalidDirName.into());
+                }
+            };
+            possibilities.push(host);
+        }
+
+        // If the path provided ends in the shark name, just return that
+        // PathBuf.
+        for p in possibilities.iter() {
+            if dir.ends_with(p) {
+                return Ok(dir.to_path_buf());
+            }
+        }
+
+        debug!("Looking for {} in {:#?}", from_shark, dir);
+        // Find the per shark path in the path provided provided by the user
+        for subdir in fs::read_dir(dir)? {
+            let subdir = subdir?.path();
+            debug!("Checking {:?}", subdir);
+            let dirname = match subdir.file_name() {
+                Some(d) => d,
+                None => continue,
+            };
+            if possibilities.contains(&dirname.to_string_lossy().to_string()) {
+                return Ok(subdir);
+            }
+        }
+
+        // TODO: FileGeneratorError
+        Err(FileGeneratorError::ImproperlyFormattedDirname {
+            dirname: self.directory.clone(),
+        }
+        .into())
+    }
+
+    ///
+    /// Walk the objects in a single file named "shard_<shard_num>.objs"
+    ///
+    fn walk_objects(&self, shard: PathBuf) -> Result<(), Error> {
+        debug!("walking objects for shard: {:#?}", shard);
+
+        let shard_num = shard_num_from_pathbuf(&shard)?;
+
+        // TODO: Check for min & max shard?
+
+        let mut mclient = match moray_client::create_client(
+            shard_num,
+            &self.job_action.config.domain_name,
+        ) {
+            Ok(client) => client,
+            Err(e) => {
+                let msg = format!(
+                    "Failed to get Moray Client for shard {}: {}",
+                    shard_num, e
+                );
+                return Err(InternalError::new(
+                    Some(InternalErrorCode::BadMorayClient),
+                    msg,
+                )
+                .into());
+            }
+        };
+        let reader = BufReader::new(File::open(shard)?);
+        for obj_id in reader.lines() {
+            // XXX: put moray client function call here to get object from moray
+            // if it fails try to put the object into the database as an
+            // error anyway.
+
+            let obj_id = obj_id?;
+
+            // ----- refactor this into its own function that only returns a
+            // yes or no if the walk should continue
+
+            // XXX: this should be a critical failure?  We could not get the
+            // object... it could have been deleted?
+            let moray_obj =
+                moray_client::get_object(&mut mclient, obj_id.as_str())?;
+
+            let eobj = match EvacuateObject::try_from(moray_obj) {
+                Ok(obj) => obj,
+                Err(mut partial_obj) => {
+                    //let mut insert_obj = partial_obj.clone();
+
+                    partial_obj.id = obj_id.clone();
+                    partial_obj.shard = shard_num as i32;
+                    error!("Inserting Bad Object: {}", obj_id);
+
+                    self.job_action.insert_into_db(&partial_obj);
+
+                    continue;
+                }
+            };
+
+            // XXX: mark eobj as error?
+
+            let id = eobj.id.clone();
+            self.obj_tx
+                .send(eobj)
+                .map_err(CrossbeamError::from)
+                .map_err(|e| {
+                    error!("Error sending object: {}", e);
+                    self.job_action.mark_object_error(
+                        &id,
+                        EvacuateObjectError::InternalError,
+                    );
+                    InternalError::new(
+                        Some(InternalErrorCode::Crossbeam),
+                        e.description(),
+                    )
+                })
+                .map_err(Error::from)?;
+
+            // ---- refactor ---- //
+        }
+        Ok(())
+    }
+}
+
+impl ObjectGenerator for FileGenerator {
+    fn generate(self) -> Result<thread::JoinHandle<Result<(), Error>>, Error> {
+        thread::Builder::new()
+            .name(String::from("file_gen"))
+            .spawn(move || {
+                if let Err(e) = self.validate_directory() {
+                    return Err(InternalError::new(
+                        Some(InternalErrorCode::InvalidJobAction),
+                        e.to_string(),
+                    )
+                    .into());
+                }
+                self.walk_shards()
+            })
+            .map_err(Error::from)
+    }
+}
+
+impl ObjectGenerator for SharkSpotterGenerator {
+    fn generate(self) -> Result<thread::JoinHandle<Result<(), Error>>, Error> {
+        let job_action = self.job_action;
+        let domain = job_action.config.domain_name.clone();
+        let obj_tx = self.obj_tx;
+        let shark = &job_action.from_shark.manta_storage_id;
+        let (ss_obj_tx, ss_obj_rx) = crossbeam_channel::bounded(10);
+        let config = sharkspotter::config::Config {
+            domain,
+            min_shard: self.min_shard,
+            max_shard: self.max_shard,
+            sharks: vec![shark.to_string()],
+            chunk_size: job_action.config.options.md_read_chunk_size as u64,
+            ..Default::default()
+        };
+
+        debug!("Starting sharkspotter generator: {:?}", &config);
+
+        let log = slog_scope::logger();
+
+        thread::Builder::new()
+            .name(String::from("sharkspotter"))
+            .spawn(move || {
+                let ss_translate_handle = thread::Builder::new()
+                    .name(String::from("sharkspotter translator"))
+                    .spawn(move || {
+                        sharkspotter_message_translator(
+                            Arc::clone(&job_action),
+                            ss_obj_rx,
+                            obj_tx,
+                        );
+                    })
+                    .map_err(Error::from)?;
+
+                sharkspotter::run_multithreaded(config, log, ss_obj_tx)
+                    .map_err(Error::from)?;
+
+                ss_translate_handle
+                    .join()
+                    .expect("join sharkspotter translator");
+
+                Ok(())
+            })
+            .map_err(Error::from)
+    }
+}
+
+fn sharkspotter_message_translator(
+    job_action: Arc<EvacuateJob>,
+    ss_obj_rx: crossbeam_channel::Receiver<SharkspotterMessage>,
+    evac_obj_tx: crossbeam_channel::Sender<EvacuateObject>,
+) {
+    loop {
+        let ss_obj = match ss_obj_rx.recv() {
+            Ok(obj) => obj,
+            Err(e) => {
+                warn!("sharkspotter translator exiting: {}", e);
+                break;
+            }
+        };
+
+        let eobj = match EvacuateObject::try_from(ss_obj) {
+            Ok(obj) => obj,
+            Err(e) => {
+                job_action.insert_into_db(&e);
+                continue;
+            }
+        };
+
+        if let Err(e) = evac_obj_tx.send(eobj) {
+            error!(
+                "Assignment Manager thread shutdown before receiving all \
+                 objects: {}",
+                e
+            );
+            break;
+        }
+    }
+}
+
 impl Default for EvacuateObjectStatus {
     fn default() -> Self {
         EvacuateObjectStatus::Unprocessed
@@ -499,6 +890,40 @@ pub struct EvacuateDestShark {
 }
 
 ///
+/// Default source is SharkSpotter.  To specify a file source add the
+/// following to the params section of your evacuate job payload:
+///
+/// ```json
+/// "source": {
+///     "type": "file",
+///     "options": "/1.stor"
+/// }
+/// ```
+///
+/// To use the default sharkspotter source, simply leave this block out, or
+/// explicitly specify it like so:
+///
+/// ```json
+/// "source": {
+///     "type": "sharkspotter"
+/// }
+/// ```
+///
+#[derive(Deserialize, Serialize)]
+#[serde(tag = "type", content = "options")]
+#[serde(rename_all = "lowercase")]
+pub enum ObjectSource {
+    SharkSpotter,
+    File(String),
+}
+
+impl Default for ObjectSource {
+    fn default() -> ObjectSource {
+        ObjectSource::SharkSpotter
+    }
+}
+
+///
 /// ```
 /// use serde_json::json;
 /// use manager::jobs::evacuate::EvacuateJobUpdateMessage;
@@ -570,6 +995,8 @@ pub struct EvacuateJob {
 
     pub conn: Mutex<PgConnection>,
 
+    pub object_source: ObjectSource,
+
     pub post_client: reqwest::Client,
 
     pub get_client: reqwest::Client,
@@ -585,6 +1012,34 @@ pub struct EvacuateJob {
 
     /// TESTING ONLY
     pub max_objects: Option<u32>,
+}
+
+// Note that this does not add the shard number.
+impl TryFrom<MorayObject> for EvacuateObject {
+    type Error = EvacuateObject;
+
+    fn try_from(moray_object: MorayObject) -> Result<Self, Self::Error> {
+        let manta_object = moray_object.value.clone();
+        let etag = moray_object._etag;
+        let id =
+            common::get_objectId_from_value(&manta_object).map_err(|e| {
+                error!("Error getting objectId from manta value: {}", e);
+                EvacuateObject {
+                    object: manta_object.clone(),
+                    etag: etag.clone(),
+                    status: EvacuateObjectStatus::Error,
+                    error: Some(EvacuateObjectError::BadMantaObject),
+                    ..Default::default()
+                }
+            })?;
+
+        Ok(EvacuateObject {
+            id,
+            object: manta_object,
+            etag,
+            ..Default::default()
+        })
+    }
 }
 
 impl TryFrom<SharkspotterMessage> for EvacuateObject {
@@ -652,6 +1107,7 @@ impl EvacuateJob {
         storage_id: String,
         config: &Config,
         db_name: &str,
+        object_source: ObjectSource,
         update_rx: Option<crossbeam_channel::Receiver<JobUpdateMessage>>,
         max_objects: Option<u32>,
     ) -> Result<Self, Error> {
@@ -678,6 +1134,7 @@ impl EvacuateJob {
             assignments: RwLock::new(HashMap::new()),
             from_shark,
             conn: Mutex::new(conn),
+            object_source,
             max_objects,
             post_client: reqwest::Client::new(),
             get_client: reqwest::Client::new(),
@@ -724,8 +1181,6 @@ impl EvacuateJob {
 
         // get what the evacuate job needs from the config structure
         let domain = &job_action.config.domain_name;
-        let min_shard = job_action.config.min_shard_num();
-        let max_shard = job_action.config.max_shard_num();
 
         // TODO: How big should each channel be?
         // Set up channels for thread to communicate.
@@ -737,14 +1192,8 @@ impl EvacuateJob {
         // TODO: lock evacuating server to readonly
         // TODO: add thread barriers MANTA-4457
 
-        // start threads to process objects
-        let sharkspotter_thread = start_sharkspotter(
-            obj_tx,
-            domain.as_str(),
-            Arc::clone(&job_action),
-            min_shard,
-            max_shard,
-        )?;
+        let generator_thread =
+            start_generator_thread(Arc::clone(&job_action), obj_tx)?;
 
         let metadata_update_thread =
             start_metadata_update_broker(Arc::clone(&job_action), md_update_rx)
@@ -799,11 +1248,11 @@ impl EvacuateJob {
 
         storinfo.fini();
 
-        sharkspotter_thread
+        generator_thread
             .join()
-            .expect("Sharkspotter Thread")
+            .expect("Generator Thread")
             .unwrap_or_else(|e| {
-                error!("Error joining sharkspotter: {}\n", e);
+                error!("Error joining Generator Thread: {}\n", e);
                 set_run_error(&mut ret, e);
             });
 
@@ -1850,6 +2299,36 @@ impl ProcessAssignment for EvacuateJob {
     }
 }
 
+fn start_generator_thread(
+    job_action: Arc<EvacuateJob>,
+    obj_tx: crossbeam::Sender<EvacuateObject>,
+) -> Result<thread::JoinHandle<Result<(), Error>>, Error> {
+    let config = &job_action.config;
+    let min_shard = config.min_shard_num();
+    let max_shard = config.max_shard_num();
+
+    match &job_action.object_source {
+        ObjectSource::File(directory) => {
+            let fgen = FileGenerator {
+                job_action: Arc::clone(&job_action), // XXX Used?
+                directory: directory.to_owned(),
+                obj_tx,
+            };
+            fgen.generate()
+        }
+        ObjectSource::SharkSpotter => {
+            let shark_gen = SharkSpotterGenerator {
+                job_action: Arc::clone(&job_action),
+                min_shard,
+                max_shard,
+                obj_tx,
+            };
+            shark_gen.generate()
+        }
+    }
+}
+
+// XXX should be `_insert_bad_object`
 fn _insert_bad_moray_object(
     job_action: &EvacuateJob,
     object: Value,
@@ -1953,59 +2432,6 @@ fn _calculate_available_mb(
         0
     }
 }
-
-/// Start the sharkspotter thread and feed the objects into the assignment
-/// thread.  If the assignment thread (the rx side of the channel) exits
-/// prematurely the sender.send() method will return a SenderError and that
-/// needs to be handled properly.
-fn start_sharkspotter(
-    obj_tx: crossbeam::Sender<SharkspotterMessage>,
-    domain: &str,
-    job_action: Arc<EvacuateJob>,
-    min_shard: u32,
-    max_shard: u32,
-) -> Result<thread::JoinHandle<Result<(), Error>>, Error> {
-    let shark = &job_action.from_shark.manta_storage_id;
-    let config = sharkspotter::config::Config {
-        domain: String::from(domain),
-        min_shard,
-        max_shard,
-        sharks: vec![shark.to_string()],
-        chunk_size: job_action.config.options.md_read_chunk_size as u64,
-        ..Default::default()
-    };
-
-    debug!("Starting sharkspotter thread: {:?}", &config);
-
-    let log = slog_scope::logger();
-
-    thread::Builder::new()
-        .name(String::from("sharkspotter"))
-        .spawn(move || {
-            sharkspotter::run_multithreaded(config, log, obj_tx)
-                .map_err(Error::from)
-        })
-        .map_err(Error::from)
-}
-
-/// The assignment manager manages the destination sharks and
-/// posts assignments to the remora agents running on the destination sharks.
-/// Given a set of sharks that meet a set of parameters outlined by the
-/// configuration the assignment manager
-///     1. Initializes a new assignment with certain destination shark
-///     specific the parameters.
-///     2. Passes that assignment to the assignment generator thread which
-///     adds tasks and sends the assignment back to this thread.
-///     3. Post the assignment to the remora agent on the destination shark.
-///
-/// In the future another thread may be created to handle step 3.
-///
-/// Restrictions:
-/// * Only 1 outstanding assignment per storage node (could change this in
-/// the future, or make it tunable)
-/// * If all storage ndoes with availableMb > Some TBD threshold have an
-/// outstanding assignment, sleep/wait for an assignment to complete.
-///
 
 #[derive(Clone)]
 enum AssignmentMsg {
@@ -2112,7 +2538,7 @@ fn _stop_join_some_assignment_threads(
 fn assignment_manager_impl<S>(
     full_assignment_tx: crossbeam::Sender<Assignment>,
     checker_fini_tx: crossbeam_channel::Sender<FiniMsg>,
-    obj_rx: crossbeam_channel::Receiver<SharkspotterMessage>,
+    obj_rx: crossbeam_channel::Receiver<EvacuateObject>,
     job_action: Arc<EvacuateJob>,
     storinfo: Arc<S>,
 ) -> impl Fn() -> Result<(), Error>
@@ -2239,15 +2665,6 @@ where
 
                 let mut eobj = match obj_rx.recv() {
                     Ok(obj) => {
-                        let eo: EvacuateObject =
-                            match EvacuateObject::try_from(obj) {
-                                Ok(o) => o,
-                                Err(e) => {
-                                    job_action.insert_into_db(&e);
-                                    continue;
-                                }
-                            };
-
                         if object_count == 0 {
                             *job_action
                                 .object_movement_start_time
@@ -2255,10 +2672,10 @@ where
                                 .unwrap() = Some(std::time::Instant::now());
                         }
 
-                        trace!("Received object {:#?}", &eo);
+                        trace!("Received object {:#?}", &obj);
                         object_count += 1;
 
-                        eo
+                        obj
                     }
                     Err(e) => {
                         warn!("Didn't receive object. {}\n", e);
@@ -2349,10 +2766,27 @@ where
     }
 }
 
+/// The assignment manager manages the destination sharks and
+/// posts assignments to the remora agents running on the destination sharks.
+/// Given a set of sharks that meet a set of parameters outlined by the
+/// configuration the assignment manager
+///     1. Initializes a new assignment with certain destination shark
+///     specific the parameters.
+///     2. Passes that assignment to the assignment generator thread which
+///     adds tasks and sends the assignment back to this thread.
+///     3. Post the assignment to the remora agent on the destination shark.
+///
+/// In the future another thread may be created to handle step 3.
+///
+/// Restrictions:
+/// * Only 1 outstanding assignment per storage node (could change this in
+/// the future, or make it tunable)
+/// * If all storage ndoes with availableMb > Some TBD threshold have an
+/// outstanding assignment, sleep/wait for an assignment to complete.
 fn start_assignment_manager<S>(
     full_assignment_tx: crossbeam::Sender<Assignment>,
     checker_fini_tx: crossbeam_channel::Sender<FiniMsg>,
-    obj_rx: crossbeam_channel::Receiver<SharkspotterMessage>,
+    obj_rx: crossbeam_channel::Receiver<EvacuateObject>,
     job_action: Arc<EvacuateJob>,
     storinfo: Arc<S>,
 ) -> Result<thread::JoinHandle<Result<(), Error>>, Error>
@@ -3731,6 +4165,7 @@ mod tests {
     use rebalancer::metrics::MetricsMap;
     use rebalancer::util;
     use reqwest::Client;
+    use std::fs::OpenOptions;
 
     lazy_static! {
         static ref INITIALIZED: Mutex<bool> = Mutex::new(false);
@@ -3840,7 +4275,10 @@ mod tests {
         ret
     }
 
-    fn create_test_evacuate_job(max_objects: usize) -> EvacuateJob {
+    fn create_test_evacuate_job(
+        max_objects: Option<u32>,
+        source: ObjectSource,
+    ) -> EvacuateJob {
         let mut config = Config::default();
         let from_shark = String::from("1.stor.domain");
 
@@ -3851,8 +4289,9 @@ mod tests {
             from_shark,
             &config,
             &Uuid::new_v4().to_string(),
+            source,
             Some(update_rx),
-            Some(max_objects as u32),
+            max_objects,
         )
         .expect("initialize evacuate job");
 
@@ -3867,7 +4306,7 @@ mod tests {
     }
 
     fn start_test_obj_generator_thread(
-        obj_tx: crossbeam_channel::Sender<SharkspotterMessage>,
+        obj_tx: crossbeam_channel::Sender<EvacuateObject>,
         test_objects: HashMap<String, MantaObject>,
         from_shark: String,
     ) -> thread::JoinHandle<()> {
@@ -3891,7 +4330,10 @@ mod tests {
                         shard,
                     };
 
-                    match obj_tx.send(ssobj) {
+                    let eobj = EvacuateObject::try_from(ssobj)
+                        .expect("try_from ssobj");
+
+                    match obj_tx.send(eobj) {
                         Ok(()) => (),
                         Err(e) => {
                             error!(
@@ -4077,7 +4519,10 @@ mod tests {
         let storinfo = Arc::new(storinfo);
 
         // Create the job
-        let mut job_action = create_test_evacuate_job(num_objects);
+        let mut job_action = create_test_evacuate_job(
+            Some(num_objects),
+            ObjectSource::default(),
+        );
         job_action.config.max_fill_percentage = 90;
         let job_action = Arc::new(job_action);
 
@@ -4136,7 +4581,7 @@ mod tests {
 
                     assert_eq!(assignment.dest_shark.available_mb, 200);
 
-                    object_count += assignment.tasks.len();
+                    object_count += assignment.tasks.len() as u32;
                 }
 
                 let available_mb = verif_job_action
@@ -4162,13 +4607,16 @@ mod tests {
                         .expect("getting filtered objects");
 
                     assert_eq!(skipped_objs.len() as u64, available_mb);
-                    assert_eq!(num_objects - object_count, skipped_objs.len());
+                    assert_eq!(
+                        num_objects - object_count,
+                        skipped_objs.len() as u32
+                    );
 
                     let all_objects: Vec<EvacuateObject> = evacuateobjects
                         .load::<EvacuateObject>(&*locked_conn)
                         .expect("getting filtered objects");
 
-                    assert_eq!(all_objects.len(), num_objects);
+                    assert_eq!(all_objects.len() as u32, num_objects);
                 }
             })
             .expect("verification thread result");
@@ -4187,7 +4635,10 @@ mod tests {
 
         // Now rerun the job, except this time simulate failure for every
         // assignment.
-        let mut job_action = create_test_evacuate_job(num_objects);
+        let mut job_action = create_test_evacuate_job(
+            Some(num_objects),
+            ObjectSource::default(),
+        );
         job_action.config.max_fill_percentage = 90;
         let job_action = Arc::new(job_action);
 
@@ -4253,7 +4704,7 @@ mod tests {
                         AssignmentState::Assigned,
                     );
 
-                    object_count += assignment.tasks.len();
+                    object_count += assignment.tasks.len() as u32;
                 }
 
                 let available_mb = verif_job_action
@@ -4275,7 +4726,7 @@ mod tests {
                     .load::<EvacuateObject>(&*locked_conn)
                     .expect("getting filtered objects");
 
-                assert_eq!(skipped_objs.len(), num_objects);
+                assert_eq!(skipped_objs.len() as u32, num_objects);
             })
             .expect("verification thread result");
 
@@ -4290,6 +4741,94 @@ mod tests {
         verification_thread
             .join()
             .expect("verification thread handle");
+    }
+
+    fn run_file_object_source_test(
+        test_path: String,
+        from_shark: String,
+        expected_line_count: u32,
+    ) {
+        let (obj_tx, obj_rx) = crossbeam_channel::bounded(5);
+        let mut received_count = 0;
+
+        // Create the Evacuate Job Action
+        let mut job_action = create_test_evacuate_job(
+            None,
+            ObjectSource::File(test_path.clone()),
+        );
+
+        job_action.from_shark.manta_storage_id = from_shark;
+        let job_action = Arc::new(job_action);
+
+        // Start the Generator
+        let fgen = FileGenerator {
+            job_action: Arc::clone(&job_action),
+            directory: test_path,
+            obj_tx,
+        };
+        let fgen_handle = fgen.generate().expect("generate");
+
+        loop {
+            if let Ok(o) = obj_rx.recv() {
+                debug!("{}", o.id);
+                received_count += 1;
+            } else {
+                break;
+            }
+        }
+
+        assert_eq!(received_count, expected_line_count);
+
+        fgen_handle.join().expect("join fgen").expect("fgen result");
+    }
+
+    // Get a count of the lines for all the files in this directory.
+    fn total_shard_line_count(directory: &str) -> u32 {
+        let mut count = 0;
+        for shard in fs::read_dir(directory).expect("read dir") {
+            let shard = shard.expect("shard").path();
+            let f = OpenOptions::new()
+                .read(true)
+                .open(shard)
+                .expect("open file");
+            for _ in BufReader::new(f).lines() {
+                count += 1;
+            }
+        }
+        count
+    }
+
+    // XXX: TODO fix test files to use only object ids
+    #[test]
+    fn file_source_shark_dir() {
+        unit_test_init();
+
+        let test_path =
+            format!("{}/testfiles/1.stor", env!("CARGO_MANIFEST_DIR"));
+
+        let line_count = total_shard_line_count(&test_path);
+
+        run_file_object_source_test(
+            test_path,
+            "1.stor.fakedomain.us".into(),
+            line_count,
+        );
+    }
+
+    #[test]
+    fn file_source_parent_dir() {
+        unit_test_init();
+
+        let test_path = format!("{}/testfiles/", env!("CARGO_MANIFEST_DIR"));
+
+        let line_count =
+            total_shard_line_count(format!("{}/1.stor", &test_path).as_str());
+
+        run_file_object_source_test(
+            test_path,
+            "1.stor.fakedomain.us".into(),
+            line_count,
+        );
     }
 
     #[test]
@@ -4332,7 +4871,10 @@ mod tests {
             }
         }
 
-        let job_action = Arc::new(create_test_evacuate_job(num_objects));
+        let job_action = Arc::new(create_test_evacuate_job(
+            Some(num_objects),
+            ObjectSource::default(),
+        ));
 
         let storinfo = NoSkipStorinfo::new();
         let storinfo = Arc::new(storinfo);
@@ -4462,7 +5004,7 @@ mod tests {
                      percentage of Num Objects)",
                     skip_count - insufficient_space_skips
                 );
-                assert_eq!(task_count + skip_count, num_objects);
+                assert_eq!(task_count + skip_count, num_objects as usize);
             })
             .expect("verification thread");
 
@@ -4497,7 +5039,10 @@ mod tests {
         let mut eobjs = vec![];
 
         // Evacuate Job Action
-        let job_action = create_test_evacuate_job(num_objects);
+        let job_action = create_test_evacuate_job(
+            Some(num_objects),
+            ObjectSource::default(),
+        );
 
         // New Assignment
         let mut assignment = Assignment::new(StorageNode::arbitrary(&mut g));
@@ -4618,7 +5163,10 @@ mod tests {
         let (checker_fini_tx, _) = crossbeam::bounded(1);
         let (_, obj_rx) = crossbeam::bounded(5);
 
-        let job_action = Arc::new(create_test_evacuate_job(99));
+        let job_action = Arc::new(create_test_evacuate_job(
+            Some(99),
+            ObjectSource::default(),
+        ));
 
         let assignment_manager_handle = match start_assignment_manager(
             full_assignment_tx,
@@ -4731,7 +5279,7 @@ mod tests {
     fn full_test() {
         unit_test_init();
 
-        let num_objects: usize = 100;
+        let num_objects = 100;
         let mut g = StdThreadGen::new(10);
         let mut test_objects = HashMap::new();
 
@@ -4769,7 +5317,10 @@ mod tests {
         let (checker_fini_tx, checker_fini_rx) = crossbeam::bounded(1);
 
         // Job Action
-        let job_action = Arc::new(create_test_evacuate_job(num_objects));
+        let job_action = Arc::new(create_test_evacuate_job(
+            Some(num_objects),
+            ObjectSource::default(),
+        ));
 
         for _ in 0..num_objects {
             let mobj = MantaObject::arbitrary(&mut g);

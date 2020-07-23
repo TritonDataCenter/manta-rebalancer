@@ -9,6 +9,9 @@
  */
 
 #[macro_use]
+extern crate failure;
+
+#[macro_use]
 extern crate gotham_derive;
 
 #[macro_use]
@@ -395,7 +398,11 @@ impl Handler for JobCreateHandler {
                 };
 
                 let job = match job_builder
-                    .evacuate(evac_payload.from_shark, max_objects)
+                    .evacuate(
+                        evac_payload.from_shark,
+                        evac_payload.source,
+                        max_objects,
+                    )
                     .commit()
                 {
                     Ok(j) => j,
@@ -587,6 +594,7 @@ mod tests {
     use super::*;
     use gotham::test::{TestResponse, TestServer};
     use lazy_static::lazy_static;
+    use manager::jobs::evacuate::ObjectSource;
     use manager::jobs::{EvacuateJobPayload, JobPayload};
     use rebalancer::error::{Error, InternalError};
     use std::sync::Mutex;
@@ -693,7 +701,11 @@ mod tests {
         let config = config.lock().expect("lock config").clone();
         let job_builder = JobBuilder::new(config);
         let job = job_builder
-            .evacuate(String::from("fake_storage_id"), None)
+            .evacuate(
+                String::from("fake_storage_id"),
+                ObjectSource::default(),
+                None,
+            )
             .commit()
             .expect("Failed to create job");
         let job_id = job.get_id().to_string();
@@ -723,6 +735,7 @@ mod tests {
         let (_, test_server) = test_server_init();
         let job_payload = JobPayload::Evacuate(EvacuateJobPayload {
             from_shark: String::from("fake_storage_id"),
+            source: ObjectSource::default(),
             max_objects: Some(10),
         });
 
@@ -763,6 +776,7 @@ mod tests {
         // actual environment.
         let job_payload = JobPayload::Evacuate(EvacuateJobPayload {
             from_shark: String::from("fake_storage_id"),
+            source: ObjectSource::default(),
             max_objects: Some(10),
         });
         let job_id = create_job(&test_server, job_payload);

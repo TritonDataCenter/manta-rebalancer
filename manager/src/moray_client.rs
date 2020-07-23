@@ -11,7 +11,7 @@
 use libmanta::moray::MantaObjectShark;
 use moray::{
     client::MorayClient,
-    objects::{Etag, MethodOptions as ObjectMethodOptions},
+    objects::{Etag, MethodOptions as ObjectMethodOptions, MorayObject},
 };
 use rand::seq::SliceRandom;
 use rebalancer::common;
@@ -24,6 +24,7 @@ static MANTA_BUCKET: &str = "manta";
 static MANTA_STORAGE_BUCKET: &str = "manta_storage";
 static MANTA_STORAGE_BUCKET_SHARD: u32 = 1;
 static MANTA_STORAGE_ID: &str = "manta_storage_id";
+static MANTA_OBJECT_ID: &str = "ObjectId";
 
 // We can't use trust-dns-resolver here because it uses futures with a
 // block_on, and calling a block_on from within a block_on is not allowed.
@@ -146,4 +147,32 @@ pub fn put_object(
             Ok(())
         })
         .map_err(Error::from)
+}
+
+pub fn get_object(
+    mclient: &mut MorayClient,
+    object_id: &str,
+) -> Result<MorayObject, Error> {
+    let opts = ObjectMethodOptions::default();
+    let filter = format!("{}={}", MANTA_OBJECT_ID, object_id);
+    let mut ret: Option<MorayObject> = None;
+
+    mclient.find_objects(MANTA_BUCKET, &filter, &opts, |o| {
+        // XXX: Remove
+        dbg!(o);
+        ret = Some(o.to_owned());
+        Ok(())
+    })?;
+
+    match ret {
+        Some(r) => Ok(r),
+        None => {
+            let msg = format!("Error: Could not object {}", object_id);
+            error!("{}", &msg);
+            Err(Error::from(InternalError::new(
+                Some(InternalErrorCode::ObjectNotFound),
+                msg,
+            )))
+        }
+    }
 }

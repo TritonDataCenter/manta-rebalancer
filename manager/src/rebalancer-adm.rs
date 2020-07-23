@@ -9,6 +9,7 @@
  */
 
 use clap::{App, AppSettings, Arg, ArgMatches};
+use manager::jobs::evacuate::ObjectSource;
 use manager::jobs::{EvacuateJobPayload, JobPayload};
 use reqwest;
 use serde_json::Value;
@@ -83,9 +84,15 @@ fn job_create_evacuate(matches: &ArgMatches) -> Result<(), String> {
         },
     };
 
+    let source = match matches.value_of("file_source") {
+        None => ObjectSource::default(),
+        Some(path) => ObjectSource::File(path.to_string()),
+    };
+
     // Form the payload of the request.
     let job_payload = JobPayload::Evacuate(EvacuateJobPayload {
         from_shark: shark.to_owned(),
+        source,
         max_objects,
     });
 
@@ -129,7 +136,7 @@ fn process_subcmd_job(job_matches: &ArgMatches) -> Result<(), String> {
 }
 
 fn main() -> Result<(), String> {
-    let evacuate = App::new("evacuate")
+    let evacuate_subcommand = App::new("evacuate")
         .about("Create an evacuate job")
         .arg(
             Arg::with_name("shark")
@@ -137,6 +144,13 @@ fn main() -> Result<(), String> {
                 .long("shark")
                 .takes_value(true)
                 .required(true)
+                .help("Specifies a shark on which to run a job"),
+        )
+        .arg(
+            Arg::with_name("file_source")
+                .short("F")
+                .long("file_source")
+                .takes_value(true)
                 .help("Specifies a shark on which to run a job"),
         )
         .arg(
@@ -161,8 +175,6 @@ fn main() -> Result<(), String> {
                         .about("Get information on a specific job")
                         .arg(
                             Arg::with_name("uuid")
-                                .short("u")
-                                .long("uuid")
                                 .takes_value(true)
                                 .required(true)
                                 .help("Uuid of a job"),
@@ -178,7 +190,7 @@ fn main() -> Result<(), String> {
                         .about("Create a rebalancer job")
                         .setting(AppSettings::SubcommandRequiredElseHelp)
                         // Create evacuate job
-                        .subcommand(evacuate),
+                        .subcommand(evacuate_subcommand),
                 ),
         )
         .get_matches();

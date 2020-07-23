@@ -23,6 +23,7 @@ use std::fmt;
 use std::io::Write;
 use std::str::FromStr;
 
+use crate::jobs::evacuate::ObjectSource;
 use diesel::deserialize::{self, FromSql};
 use diesel::pg::{Pg, PgValue};
 use diesel::prelude::*;
@@ -55,6 +56,8 @@ pub enum JobPayload {
 pub struct EvacuateJobPayload {
     pub from_shark: String,
     pub max_objects: Option<u32>,
+    #[serde(default)]
+    pub source: ObjectSource,
 }
 
 #[derive(Debug)]
@@ -95,6 +98,7 @@ impl JobBuilder {
     pub fn evacuate(
         mut self,
         from_shark: String,
+        object_source: ObjectSource,
         max_objects: Option<u32>,
     ) -> JobBuilder {
         // A better approach here would be to create a thread in each job
@@ -120,6 +124,7 @@ impl JobBuilder {
             from_shark,
             &self.config,
             &self.id.to_string(),
+            object_source,
             rx,
             max_objects,
         ) {
@@ -584,7 +589,8 @@ mod test {
         assert_eq!(builder.state, JobState::Init);
 
         let from_shark = String::from("1.stor.domain");
-        let builder = builder.evacuate(from_shark, Some(1));
+        let builder =
+            builder.evacuate(from_shark, ObjectSource::default(), Some(1));
         assert_eq!(builder.state, JobState::Init);
 
         let job = builder.commit().expect("failed to create job");
