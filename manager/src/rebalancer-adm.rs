@@ -73,7 +73,7 @@ fn job_create_evacuate(matches: &ArgMatches) -> Result<(), String> {
     // Max objects is an optional argument.
     let max_objects = match matches.value_of("max_objects") {
         None => None,
-        Some(m) => match m.parse::<u32>() {
+        Some(m) => match m.parse::<u64>() {
             Ok(n) => Some(n),
             Err(e) => {
                 return Err(format!(

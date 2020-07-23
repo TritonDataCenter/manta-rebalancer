@@ -649,14 +649,13 @@ impl FileGenerator {
         // function?
         let reader = BufReader::new(File::open(shard)?);
         for obj_id in reader.lines() {
-            if let Some(max) = self.job_action.max_objects {
-                if self.object_count.get() > max as u64 {
-                        // XXX Add some logging here
-                    return Ok(());
-                }
+            let mut object_count = self.object_count.get();
+            if self.job_action.object_counter_check_inc(&mut object_count) {
+                // XXX Add some logging here
+                return Ok(());
             }
 
-            self.object_count.set(self.object_count.get() + 1);
+            self.object_count.set(object_count);
 
             // XXX: put moray client function call here to get object from moray
             // if it fails try to put the object into the database as an
@@ -681,6 +680,7 @@ impl FileGenerator {
                     partial_obj.shard = shard_num as i32;
                     error!("Inserting Bad Object: {}", obj_id);
 
+                    // XXX user helper function?
                     self.job_action.insert_into_db(&partial_obj);
 
                     continue;
@@ -690,15 +690,16 @@ impl FileGenerator {
             // XXX check shard number !> i32::MAX
             eobj.shard = shard_num as i32;
 
-            // XXX: mark eobj as error?
+            // XXX:  Insert eobj into database?
 
-            let id = eobj.id.clone();
             self.obj_tx
                 .send(eobj)
                 .map_err(CrossbeamError::from)
                 .map_err(|e| {
-                    warn!("Assignment manager no longer accepting objects: {}",
-                        e);
+                    warn!(
+                        "Assignment manager no longer accepting objects: {}",
+                        e
+                    );
                     InternalError::new(
                         Some(InternalErrorCode::Crossbeam),
                         e.description(),
@@ -777,11 +778,15 @@ impl ObjectGenerator for SharkSpotterGenerator {
     }
 }
 
+// A thin layer between sharkpotter and the assignment manager that handles
+// transforming the evacuate object, incrementing the object_counter and
+// checking if we've hit the max objects limit.
 fn sharkspotter_message_translator(
     job_action: Arc<EvacuateJob>,
     ss_obj_rx: crossbeam_channel::Receiver<SharkspotterMessage>,
     evac_obj_tx: crossbeam_channel::Sender<EvacuateObject>,
 ) {
+    let mut object_count = 0;
     loop {
         let ss_obj = match ss_obj_rx.recv() {
             Ok(obj) => obj,
@@ -790,6 +795,10 @@ fn sharkspotter_message_translator(
                 break;
             }
         };
+
+        if job_action.object_counter_check_inc(&mut object_count) {
+            break;
+        }
 
         let eobj = match EvacuateObject::try_from(ss_obj) {
             Ok(obj) => obj,
@@ -1025,7 +1034,7 @@ pub struct EvacuateJob {
     pub update_rx: Option<crossbeam_channel::Receiver<JobUpdateMessage>>,
 
     /// TESTING ONLY
-    pub max_objects: Option<u32>,
+    pub max_objects: Option<u64>,
 }
 
 // Note that this does not add the shard number.
@@ -1123,7 +1132,7 @@ impl EvacuateJob {
         db_name: &str,
         object_source: ObjectSource,
         update_rx: Option<crossbeam_channel::Receiver<JobUpdateMessage>>,
-        max_objects: Option<u32>,
+        max_objects: Option<u64>,
     ) -> Result<Self, Error> {
         let mut from_shark = MantaObjectShark::default();
         let conn = match pg_db::create_and_connect_db(db_name) {
@@ -1176,6 +1185,48 @@ impl EvacuateJob {
         self.from_shark = from_shark;
 
         Ok(())
+    }
+
+    // This method handles checking if we've hit the max objects limit and
+    // starting the object_movement timer as necessary
+    fn object_counter_check_inc(
+        &self,
+        object_count: &mut u64,
+    ) -> bool {
+        if let Some(max) = self.max_objects {
+            if *object_count >= max {
+                info!(
+                    "Hit max objects count ({}).  Sending last \
+                             assignments and exiting",
+                    max
+                );
+
+                let mut start_time = self
+                    .object_movement_start_time
+                    .lock()
+                    .unwrap();
+
+                if let Some(st) = start_time.take() {
+                    info!(
+                        "Evacuate Job object movement time: {} seconds",
+                        st.elapsed().as_secs()
+                    );
+                }
+
+                return true
+            }
+        }
+
+        if *object_count == 0 {
+            *self
+                .object_movement_start_time
+                .lock()
+                .unwrap() = Some(std::time::Instant::now());
+        }
+
+        *object_count += 1;
+
+        false
     }
 
     fn update_evacuate_config(&self) -> Result<usize, Error> {
@@ -2562,8 +2613,6 @@ where
 {
     move || {
         let mut done = false;
-        let mut object_count = 0;
-        let max_objects = job_action.max_objects;
         let max_sharks = job_action.config.options.max_sharks;
         let max_tasks_per_assignment =
             job_action.config.options.max_tasks_per_assignment;
@@ -2652,46 +2701,9 @@ where
             //      * send object to that shark's thread
             // end loop
             for _ in 0..max_tasks_per_assignment * max_sharks {
-                // Get an object
-                if let Some(max) = max_objects {
-                    if object_count >= max {
-                        info!(
-                            "Hit max objects count ({}).  Sending last \
-                             assignments and exiting",
-                            max
-                        );
-
-                        let mut start_time = job_action
-                            .object_movement_start_time
-                            .lock()
-                            .unwrap();
-
-                        if let Some(st) = start_time.take() {
-                            info!(
-                                "Evacuate Job object movement time: {} seconds",
-                                st.elapsed().as_secs()
-                            );
-                        }
-
-                        done = true;
-                        break;
-                    }
-                }
 
                 let mut eobj = match obj_rx.recv() {
-                    Ok(obj) => {
-                        if object_count == 0 {
-                            *job_action
-                                .object_movement_start_time
-                                .lock()
-                                .unwrap() = Some(std::time::Instant::now());
-                        }
-
-                        trace!("Received object {:#?}", &obj);
-                        object_count += 1;
-
-                        obj
-                    }
+                    Ok(obj) => obj,
                     Err(e) => {
                         warn!("Didn't receive object. {}\n", e);
                         info!("Sending last assignments");
@@ -4291,7 +4303,7 @@ mod tests {
     }
 
     fn create_test_evacuate_job(
-        max_objects: Option<u32>,
+        max_objects: Option<u64>,
         source: ObjectSource,
     ) -> EvacuateJob {
         let mut config = Config::default();
@@ -4596,7 +4608,7 @@ mod tests {
 
                     assert_eq!(assignment.dest_shark.available_mb, 200);
 
-                    object_count += assignment.tasks.len() as u32;
+                    object_count += assignment.tasks.len() as u64;
                 }
 
                 let available_mb = verif_job_action
@@ -4624,14 +4636,14 @@ mod tests {
                     assert_eq!(skipped_objs.len() as u64, available_mb);
                     assert_eq!(
                         num_objects - object_count,
-                        skipped_objs.len() as u32
+                        skipped_objs.len() as u64
                     );
 
                     let all_objects: Vec<EvacuateObject> = evacuateobjects
                         .load::<EvacuateObject>(&*locked_conn)
                         .expect("getting filtered objects");
 
-                    assert_eq!(all_objects.len() as u32, num_objects);
+                    assert_eq!(all_objects.len() as u64, num_objects);
                 }
             })
             .expect("verification thread result");
@@ -4719,7 +4731,7 @@ mod tests {
                         AssignmentState::Assigned,
                     );
 
-                    object_count += assignment.tasks.len() as u32;
+                    object_count += assignment.tasks.len() as u64;
                 }
 
                 let available_mb = verif_job_action
@@ -4741,7 +4753,7 @@ mod tests {
                     .load::<EvacuateObject>(&*locked_conn)
                     .expect("getting filtered objects");
 
-                assert_eq!(skipped_objs.len() as u32, num_objects);
+                assert_eq!(skipped_objs.len() as u64, num_objects);
             })
             .expect("verification thread result");
 

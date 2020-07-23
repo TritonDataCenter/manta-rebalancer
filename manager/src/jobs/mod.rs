@@ -55,7 +55,7 @@ pub enum JobPayload {
 #[derive(Serialize, Deserialize, Default)]
 pub struct EvacuateJobPayload {
     pub from_shark: String,
-    pub max_objects: Option<u32>,
+    pub max_objects: Option<u64>,
     #[serde(default)]
     pub source: ObjectSource,
 }
@@ -99,7 +99,7 @@ impl JobBuilder {
         mut self,
         from_shark: String,
         object_source: ObjectSource,
-        max_objects: Option<u32>,
+        max_objects: Option<u64>,
     ) -> JobBuilder {
         // A better approach here would be to create a thread in each job
         // that would listen for the job update messages and then based on

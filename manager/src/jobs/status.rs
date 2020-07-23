@@ -259,7 +259,7 @@ mod tests {
             .evacuate(
                 "fake_shark".to_string(),
                 ObjectSource::default(),
-                Some(NUM_OBJS as u32),
+                Some(NUM_OBJS as u64),
             )
             .commit()
             .expect("job builder");
@@ -300,7 +300,7 @@ mod tests {
             .evacuate(
                 "fake_shark".to_string(),
                 ObjectSource::default(),
-                Some(NUM_OBJS as u32),
+                Some(NUM_OBJS as u64),
             )
             .commit()
             .expect("job builder");
