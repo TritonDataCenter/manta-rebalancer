@@ -225,6 +225,7 @@ pub enum EvacuateObjectError {
     MetadataUpdateFailed,
     MissingSharks,
     BadContentLength,
+    MissingObject,
 }
 
 impl Arbitrary for EvacuateObjectError {
@@ -617,6 +618,71 @@ impl FileGenerator {
         .into())
     }
 
+    // return:
+    //  - Ok(()) to continue scanning
+    //  - Err(Error) to stop scanning
+    fn get_one_object(
+        &self,
+        mclient: &mut MorayClient,
+        obj_id: ObjectId,
+        shard_num: u32,
+    ) -> Result<(), Error> {
+        let shard_num = shard_num as i32;
+
+        let moray_obj = match moray_client::get_object(mclient, obj_id.as_str())
+        {
+            Ok(mobj) => mobj,
+            Err(e) => {
+                error!(
+                    "Attempt to rebalance missing object: {:#?} ({})",
+                    obj_id, e
+                );
+
+                let id_only_eobj = EvacuateObject {
+                    id: obj_id,
+                    shard: shard_num,
+                    status: EvacuateObjectStatus::Error,
+                    error: Some(EvacuateObjectError::MissingObject),
+                    ..Default::default()
+                };
+
+                self.job_action.insert_into_db(&id_only_eobj);
+
+                // Continue scanning
+                return Ok(());
+            }
+        };
+
+        let mut eobj = match EvacuateObject::try_from(moray_obj) {
+            Ok(obj) => obj,
+            Err(mut partial_obj) => {
+                partial_obj.id = obj_id.clone();
+                partial_obj.shard = shard_num;
+                error!("Inserting Bad Object: {}", obj_id);
+
+                self.job_action.insert_into_db(&partial_obj);
+
+                // Continue scanning
+                return Ok(());
+            }
+        };
+
+        // XXX check shard number !> i32::MAX
+        eobj.shard = shard_num;
+
+        self.obj_tx
+            .send(eobj)
+            .map_err(CrossbeamError::from)
+            .map_err(|e| {
+                warn!("Assignment manager no longer accepting objects: {}", e);
+                InternalError::new(
+                    Some(InternalErrorCode::Crossbeam),
+                    e.description(),
+                )
+            })
+            .map_err(Error::from)
+    }
+
     ///
     /// Walk the objects in a single file named "shard_<shard_num>.objs"
     ///
@@ -645,69 +711,26 @@ impl FileGenerator {
             }
         };
 
-        // XXX maintain max objects counter here and in sharkspotter converstion
-        // function?
         let reader = BufReader::new(File::open(shard)?);
         for obj_id in reader.lines() {
             let mut object_count = self.object_count.get();
+            let obj_id = obj_id?;
+
             if self.job_action.object_counter_check_inc(&mut object_count) {
-                // XXX Add some logging here
+                info!("Max objects limit reached");
                 return Ok(());
             }
 
             self.object_count.set(object_count);
 
-            // XXX: put moray client function call here to get object from moray
-            // if it fails try to put the object into the database as an
-            // error anyway.
-
-            let obj_id = obj_id?;
-
-            // ----- refactor this into its own function that only returns a
-            // yes or no if the walk should continue
-
-            // XXX: this should be a critical failure?  We could not get the
-            // object... it could have been deleted?
-            let moray_obj =
-                moray_client::get_object(&mut mclient, obj_id.as_str())?;
-
-            let mut eobj = match EvacuateObject::try_from(moray_obj) {
-                Ok(obj) => obj,
-                Err(mut partial_obj) => {
-                    //let mut insert_obj = partial_obj.clone();
-
-                    partial_obj.id = obj_id.clone();
-                    partial_obj.shard = shard_num as i32;
-                    error!("Inserting Bad Object: {}", obj_id);
-
-                    // XXX user helper function?
-                    self.job_action.insert_into_db(&partial_obj);
-
-                    continue;
-                }
-            };
-
-            // XXX check shard number !> i32::MAX
-            eobj.shard = shard_num as i32;
-
-            // XXX:  Insert eobj into database?
-
-            self.obj_tx
-                .send(eobj)
-                .map_err(CrossbeamError::from)
-                .map_err(|e| {
-                    warn!(
-                        "Assignment manager no longer accepting objects: {}",
-                        e
-                    );
-                    InternalError::new(
-                        Some(InternalErrorCode::Crossbeam),
-                        e.description(),
-                    )
-                })
-                .map_err(Error::from)?;
-
-            // ---- refactor ---- //
+            // There are a few different ways this function could fail.  In
+            // most ways it can handle it's own errors and allow this walk to
+            // continue.  If it fails in such a way that the walk shouldn't
+            // continue it returns Err(Error), in which case we return here.
+            if let Err(e) = self.get_one_object(&mut mclient, obj_id, shard_num)
+            {
+                return Err(e);
+            }
         }
         Ok(())
     }
@@ -797,6 +820,7 @@ fn sharkspotter_message_translator(
         };
 
         if job_action.object_counter_check_inc(&mut object_count) {
+            info!("Max objects limit reached");
             break;
         }
 
@@ -1189,22 +1213,17 @@ impl EvacuateJob {
 
     // This method handles checking if we've hit the max objects limit and
     // starting the object_movement timer as necessary
-    fn object_counter_check_inc(
-        &self,
-        object_count: &mut u64,
-    ) -> bool {
+    fn object_counter_check_inc(&self, object_count: &mut u64) -> bool {
         if let Some(max) = self.max_objects {
             if *object_count >= max {
                 info!(
                     "Hit max objects count ({}).  Sending last \
-                             assignments and exiting",
+                     assignments and exiting",
                     max
                 );
 
-                let mut start_time = self
-                    .object_movement_start_time
-                    .lock()
-                    .unwrap();
+                let mut start_time =
+                    self.object_movement_start_time.lock().unwrap();
 
                 if let Some(st) = start_time.take() {
                     info!(
@@ -1213,15 +1232,13 @@ impl EvacuateJob {
                     );
                 }
 
-                return true
+                return true;
             }
         }
 
         if *object_count == 0 {
-            *self
-                .object_movement_start_time
-                .lock()
-                .unwrap() = Some(std::time::Instant::now());
+            *self.object_movement_start_time.lock().unwrap() =
+                Some(std::time::Instant::now());
         }
 
         *object_count += 1;
@@ -2375,7 +2392,7 @@ fn start_generator_thread(
     match &job_action.object_source {
         ObjectSource::File(directory) => {
             let fgen = FileGenerator {
-                job_action: Arc::clone(&job_action), // XXX Used?
+                job_action: Arc::clone(&job_action),
                 directory: directory.to_owned(),
                 object_count: Cell::new(0),
                 obj_tx,
@@ -2392,41 +2409,6 @@ fn start_generator_thread(
             shark_gen.generate()
         }
     }
-}
-
-// XXX should be `_insert_bad_object`
-fn _insert_bad_moray_object(
-    job_action: &EvacuateJob,
-    object: Value,
-    id: ObjectId,
-) {
-    error!("Moray value missing etag {:#?}", object);
-    let eobj = EvacuateObject {
-        id,
-        object,
-        status: EvacuateObjectStatus::Error,
-        error: Some(EvacuateObjectError::BadMorayObject),
-        ..Default::default()
-    };
-
-    job_action.insert_into_db(&eobj);
-}
-
-fn _insert_bad_manta_object(
-    job_action: &EvacuateJob,
-    object: Value,
-    id: ObjectId,
-) {
-    error!("Moray value missing etag {:#?}", object);
-    let eobj = EvacuateObject {
-        id,
-        object,
-        status: EvacuateObjectStatus::Error,
-        error: Some(EvacuateObjectError::BadMantaObject),
-        ..Default::default()
-    };
-
-    job_action.insert_into_db(&eobj);
 }
 
 //
@@ -2701,7 +2683,6 @@ where
             //      * send object to that shark's thread
             // end loop
             for _ in 0..max_tasks_per_assignment * max_sharks {
-
                 let mut eobj = match obj_rx.recv() {
                     Ok(obj) => obj,
                     Err(e) => {
