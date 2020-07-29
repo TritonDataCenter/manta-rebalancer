@@ -170,6 +170,10 @@ pub enum ObjectSkippedReason {
     // as a destination for rebalance would reduce the failure domain.
     ObjectAlreadyInDatacenter,
 
+    // This object is not on the target shark.  Likely only used for evacuate
+    // jobs.
+    ObjectNotOnTarget,
+
     // Encountered some other http error (not 400 or 500) while attempting to
     // contact the source of the object.
     SourceOtherError,

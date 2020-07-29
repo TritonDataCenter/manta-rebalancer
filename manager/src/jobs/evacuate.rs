@@ -673,10 +673,12 @@ fn walk_obj_ids_in_file(
     debug!("walking objects for shard: {:#?}", shard_file);
 
     let shard_num = shard_num_from_pathbuf(&shard_file)?;
-
-    // TODO: Check for min & max shard?
-
     let reader = BufReader::new(File::open(shard_file)?);
+
+    let fn_shark_match = |s: &MantaObjectShark| {
+        s.manta_storage_id == job_action.from_shark.manta_storage_id
+    };
+
     for obj_id in reader.lines() {
         if job_action.object_counter_check_inc() {
             info!("Max objects limit reached");
@@ -688,7 +690,7 @@ fn walk_obj_ids_in_file(
         // There are a few different ways this function could fail.  In
         // most ways it can handle it's own errors and allow this walk to
         // continue.
-        let eobj = match retrieve_object(
+        let mut eobj = match retrieve_object(
             &job_action,
             &mut obj_getter,
             obj_id,
@@ -699,6 +701,16 @@ fn walk_obj_ids_in_file(
                 continue;
             }
         };
+
+        // If this object is not on the target shark, skip it.  We would
+        // catch this later in the process when we try to update metadata,
+        // but that would create cuft on the destination shark.
+        let sharks = common::get_sharks_from_value(&eobj.object)?;
+        if !sharks.iter().any(fn_shark_match) {
+            job_action
+                .skip_object(&mut eobj, ObjectSkippedReason::ObjectNotOnTarget);
+            continue;
+        }
 
         if let Err(e) =
             obj_tx
