@@ -158,8 +158,6 @@ pub fn get_object(
     let mut ret: Option<MorayObject> = None;
 
     mclient.find_objects(MANTA_BUCKET, &filter, &opts, |o| {
-        // XXX: Remove
-        dbg!(o);
         ret = Some(o.to_owned());
         Ok(())
     })?;

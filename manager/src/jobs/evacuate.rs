@@ -33,7 +33,6 @@ use crate::moray_client;
 use crate::pg_db;
 use crate::storinfo::{self as mod_storinfo, SharkSource, StorageNode};
 
-use std::cell::Cell;
 use std::collections::hash_map::Entry::{Occupied, Vacant};
 use std::collections::HashMap;
 use std::convert::{TryFrom, TryInto};
@@ -419,6 +418,121 @@ pub fn create_evacuateobjects_table(
 
 struct FiniMsg;
 
+type ObjectGetterArg = Box<dyn ObjectGetter + Send + 'static>;
+
+pub enum ObjectGetterType {
+    Moray,
+    File(String),
+}
+
+impl ObjectGetterType {
+    fn create(
+        &self,
+        from_shark: &str,
+        shard_num: u32,
+        domain: &str,
+    ) -> Result<Box<dyn ObjectGetter + Send + 'static>, Error> {
+        match self {
+            ObjectGetterType::File(path) => {
+                let shark_dir = path_buf_from_dirname(from_shark, path, domain)
+                    .map_err(|e| {
+                        InternalError::new(
+                            Some(InternalErrorCode::ObjectNotFound),
+                            format!(
+                                "Could not create getter for {}: {}",
+                                from_shark, e
+                            ),
+                        )
+                    })?;
+
+                let shard_file_string = format!(
+                    "{}/shard_{}.objs",
+                    shark_dir.to_string_lossy(),
+                    shard_num
+                );
+                let shard_file = Path::new(&shard_file_string).to_path_buf();
+                Ok(Box::new(FileObjectGetter { shard_file }))
+            }
+            ObjectGetterType::Moray => {
+                let mclient =
+                    match moray_client::create_client(shard_num, domain) {
+                        Ok(client) => client,
+                        Err(e) => {
+                            let msg = format!(
+                                "Failed to get Moray Client for shard {}: {}",
+                                shard_num, e
+                            );
+                            return Err(InternalError::new(
+                                Some(InternalErrorCode::BadMorayClient),
+                                msg,
+                            )
+                            .into());
+                        }
+                    };
+
+                Ok(Box::new(MorayObjectGetter { mclient }))
+            }
+        }
+    }
+}
+
+#[allow(clippy::ptr_arg)]
+trait ObjectGetter {
+    fn get_object(
+        &mut self,
+        object_id: &ObjectId,
+    ) -> Result<MorayObject, Error>;
+}
+
+struct FileObjectGetter {
+    shard_file: PathBuf,
+}
+
+impl ObjectGetter for FileObjectGetter {
+    fn get_object(
+        &mut self,
+        object_id: &ObjectId,
+    ) -> Result<MorayObject, Error> {
+        let shard_file = self.shard_file.clone();
+        let reader = BufReader::new(File::open(shard_file)?);
+        let msg = format!("Could not find object with id: {}", object_id);
+
+        for json_obj in reader.lines() {
+            let json_obj = json_obj?;
+
+            let moray_object: MorayObject =
+                serde_json::from_str(json_obj.as_str())?;
+
+            let manta_object = moray_object.value.clone();
+            let found_id = common::get_objectId_from_value(&manta_object)?;
+
+            if &found_id == object_id {
+                return Ok(moray_object);
+            }
+        }
+
+        error!("{}", msg);
+
+        Err(
+            InternalError::new(Some(InternalErrorCode::ObjectNotFound), msg)
+                .into(),
+        )
+    }
+}
+
+struct MorayObjectGetter {
+    mclient: MorayClient,
+}
+
+impl ObjectGetter for MorayObjectGetter {
+    fn get_object(
+        &mut self,
+        object_id: &ObjectId,
+    ) -> Result<MorayObject, Error> {
+        moray_client::get_object(&mut self.mclient, object_id)
+    }
+}
+
 trait ObjectGenerator {
     fn generate(self) -> Result<thread::JoinHandle<Result<(), Error>>, Error>;
 }
@@ -433,8 +547,8 @@ struct SharkSpotterGenerator {
 struct FileGenerator {
     job_action: Arc<EvacuateJob>,
     directory: String,
-    object_count: Cell<u64>,
     obj_tx: crossbeam_channel::Sender<EvacuateObject>,
+    getter: ObjectGetterType,
 }
 
 #[derive(Debug, Fail)]
@@ -484,6 +598,199 @@ fn shard_num_from_pathbuf(shard_path_buf: &PathBuf) -> Result<u32, Error> {
         .map_err(Error::from)?;
 
     captures["shard"].parse::<u32>().map_err(Error::from)
+}
+
+// Retrieve one object.  If an error occurs during the retrieval store what
+// we have of the object in the database and report failure back to the caller.
+fn retrieve_object(
+    job_action: &Arc<EvacuateJob>,
+    obj_getter: &mut ObjectGetterArg,
+    obj_id: ObjectId,
+    shard_num: u32,
+) -> Result<EvacuateObject, Error> {
+    let shard_num = shard_num as i32;
+
+    let moray_obj = match obj_getter.get_object(&obj_id) {
+        Ok(mobj) => mobj,
+        Err(e) => {
+            let msg = format!(
+                "Attempt to rebalance missing object: {:#?} ({})",
+                obj_id, e
+            );
+            error!("{}", msg);
+
+            let id_only_eobj = EvacuateObject {
+                id: obj_id,
+                shard: shard_num,
+                status: EvacuateObjectStatus::Error,
+                error: Some(EvacuateObjectError::MissingObject),
+                ..Default::default()
+            };
+
+            job_action.insert_into_db(&id_only_eobj);
+
+            // Continue scanning
+            return Err(InternalError::new(
+                Some(InternalErrorCode::ObjectNotFound),
+                msg,
+            )
+            .into());
+        }
+    };
+
+    let mut eobj = match EvacuateObject::try_from(moray_obj) {
+        Ok(obj) => obj,
+        Err(mut partial_obj) => {
+            partial_obj.id = obj_id.clone();
+            partial_obj.shard = shard_num;
+            error!("Inserting Bad Object: {}", obj_id);
+
+            job_action.insert_into_db(&partial_obj);
+
+            // Continue scanning
+            return Err(InternalError::new(
+                Some(InternalErrorCode::BadMantaObject),
+                "Could not convert \
+                 Moray Object into Evacuate Object"
+                    .to_string(),
+            )
+            .into());
+        }
+    };
+
+    // XXX check shard number !> i32::MAX
+    eobj.shard = shard_num;
+
+    Ok(eobj)
+}
+
+fn walk_obj_ids_in_file(
+    job_action: Arc<EvacuateJob>,
+    shard_file: PathBuf,
+    obj_tx: crossbeam_channel::Sender<EvacuateObject>,
+    mut obj_getter: Box<dyn ObjectGetter + Send + 'static>,
+) -> Result<(), Error> {
+    debug!("walking objects for shard: {:#?}", shard_file);
+
+    let shard_num = shard_num_from_pathbuf(&shard_file)?;
+
+    // TODO: Check for min & max shard?
+
+    let reader = BufReader::new(File::open(shard_file)?);
+    for obj_id in reader.lines() {
+        let obj_id = obj_id?;
+        // TODO: fix object counting XXX
+        /*
+        let mut object_count = self.object_count.inc_by(1);
+
+        if job_action.object_counter_check_inc(&mut object_count) {
+            info!("Max objects limit reached");
+            return Ok(());
+        }
+
+        self.object_count.set(object_count);
+         */
+
+        // There are a few different ways this function could fail.  In
+        // most ways it can handle it's own errors and allow this walk to
+        // continue.
+        let eobj = match retrieve_object(
+            &job_action,
+            &mut obj_getter,
+            obj_id,
+            shard_num,
+        ) {
+            Ok(o) => o,
+            Err(_) => {
+                continue;
+            }
+        };
+
+        if let Err(e) =
+            obj_tx
+                .send(eobj)
+                .map_err(CrossbeamError::from)
+                .map_err(|e| {
+                    warn!(
+                        "Assignment manager no longer accepting objects: {}",
+                        e
+                    );
+                    InternalError::new(
+                        Some(InternalErrorCode::Crossbeam),
+                        e.description(),
+                    )
+                })
+        {
+            return Err(e.into());
+        }
+    }
+    Ok(())
+}
+
+///
+/// We want to be flexible about the source directory.  It can be named
+/// with either the short ID ("1.stor") or the full manta_storage_id
+/// ("1.stor.domain.joyent.us")
+///
+/// This function creates both possibilities, and puts them in a vector.
+///
+/// If the user provided path ends in the shark name then we are done.
+///
+/// If not then scan the path provided and check for either of the
+/// possibilities noted above, and return the PathBuf for the first one
+/// that matches.
+///
+fn path_buf_from_dirname(
+    from_shark: &str,
+    directory: &str,
+    domain_name: &str,
+) -> Result<PathBuf, Failure> {
+    let dir = Path::new(directory);
+    let mut possibilities = vec![from_shark.to_string()];
+
+    // This should always be the case, but we want to be liberal with
+    // what we receive.  Also, we don't want a change elsewhere in the
+    // code to break this part.
+    if from_shark.contains(domain_name) {
+        let re_str = format!("^(?P<host>.*).{}", domain_name);
+        let host_only_re: Regex = Regex::new(&re_str).expect("compile regex");
+
+        let host = match host_only_re.captures(&from_shark) {
+            Some(c) => c["host"].to_string(),
+            None => {
+                return Err(FileGeneratorError::InvalidDirName.into());
+            }
+        };
+        possibilities.push(host);
+    }
+
+    // If the path provided ends in the shark name, just return that
+    // PathBuf.
+    for p in possibilities.iter() {
+        if dir.ends_with(p) {
+            return Ok(dir.to_path_buf());
+        }
+    }
+
+    debug!("Looking for {} in {:#?}", from_shark, dir);
+    // Find the per shark path in the path provided provided by the user
+    for subdir in fs::read_dir(dir)? {
+        let subdir = subdir?.path();
+        debug!("Checking {:?}", subdir);
+        let dirname = match subdir.file_name() {
+            Some(d) => d,
+            None => continue,
+        };
+        if possibilities.contains(&dirname.to_string_lossy().to_string()) {
+            return Ok(subdir);
+        }
+    }
+
+    // TODO: FileGeneratorError
+    Err(FileGeneratorError::ImproperlyFormattedDirname {
+        dirname: directory.to_string(),
+    }
+    .into())
 }
 
 impl FileGenerator {
@@ -540,199 +847,83 @@ impl FileGenerator {
     }
 
     fn walk_shards(&self) -> Result<(), Error> {
+        let max_threads =
+            self.job_action.config.options.max_metadata_read_threads;
+        let pool = threadpool::ThreadPool::with_name(
+            "File Generator".into(),
+            max_threads,
+        );
+
         let dir = self.get_source_dir().map_err(|e| {
             InternalError::new(
                 Some(InternalErrorCode::InvalidJobAction),
                 e.to_string(),
             )
         })?;
+
+        let success_map: Arc<Mutex<HashMap<u32, Option<String>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+
         for shard in fs::read_dir(dir.as_path())? {
             let shard = shard?.path();
-            self.walk_objects(shard)?
+            let job_action = Arc::clone(&self.job_action);
+            let obj_tx = self.obj_tx.clone();
+            let shard_num = shard_num_from_pathbuf(&shard)?;
+            let getter = self.getter.create(
+                job_action.from_shark.manta_storage_id.as_str(),
+                shard_num,
+                self.job_action.config.domain_name.as_str(),
+            )?;
+
+            let arc_success_map = Arc::clone(&success_map);
+
+            pool.execute(move || {
+                let mut msg = None;
+
+                info!("Spawning thread for {}", shard.to_string_lossy());
+                if let Err(e) =
+                    walk_obj_ids_in_file(job_action, shard, obj_tx, getter)
+                {
+                    error!("shard thread failed: {}", e);
+                    msg = Some(e.to_string());
+                }
+
+                arc_success_map
+                    .lock()
+                    .expect("success map lock")
+                    .insert(shard_num, msg);
+            });
         }
-        Ok(())
+
+        pool.join();
+
+        let mut found_error = false;
+        for elem in success_map.lock().expect("success map lock").values() {
+            if let Some(err) = elem {
+                error!("Shard thread encountered error: {}", err);
+                found_error = true;
+            }
+        }
+
+        if found_error {
+            Err(InternalError::new(
+                None,
+                "One or more shard threads failed".to_string(),
+            )
+            .into())
+        } else {
+            Ok(())
+        }
     }
 
-    ///
-    /// We want to be flexible about the source directory.  It can be named
-    /// with either the short ID ("1.stor") or the full manta_storage_id
-    /// ("1.stor.domain.joyent.us")
-    ///
-    /// This function creates both possibilities, and puts them in a vector.
-    ///
-    /// If the user provided path ends in the shark name then we are done.
-    ///
-    /// If not then scan the path provided and check for either of the
-    /// possibilities noted above, and return the PathBuf for the first one
-    /// that matches.
-    ///
     fn get_source_dir(&self) -> Result<PathBuf, Failure> {
         let from_shark = &self.job_action.from_shark.manta_storage_id.clone();
-        let dir = Path::new(self.directory.as_str());
-        let mut possibilities = vec![from_shark.clone()];
 
-        // This should always be the case, but we want to be liberal with
-        // what we receive.  Also, we don't want a change elsewhere in the
-        // code to break this part.
-        if from_shark.contains(&self.job_action.config.domain_name) {
-            let re_str =
-                format!("^(?P<host>.*).{}", self.job_action.config.domain_name);
-            let host_only_re: Regex =
-                Regex::new(&re_str).expect("compile regex");
-
-            let host = match host_only_re.captures(&from_shark) {
-                Some(c) => c["host"].to_string(),
-                None => {
-                    return Err(FileGeneratorError::InvalidDirName.into());
-                }
-            };
-            possibilities.push(host);
-        }
-
-        // If the path provided ends in the shark name, just return that
-        // PathBuf.
-        for p in possibilities.iter() {
-            if dir.ends_with(p) {
-                return Ok(dir.to_path_buf());
-            }
-        }
-
-        debug!("Looking for {} in {:#?}", from_shark, dir);
-        // Find the per shark path in the path provided provided by the user
-        for subdir in fs::read_dir(dir)? {
-            let subdir = subdir?.path();
-            debug!("Checking {:?}", subdir);
-            let dirname = match subdir.file_name() {
-                Some(d) => d,
-                None => continue,
-            };
-            if possibilities.contains(&dirname.to_string_lossy().to_string()) {
-                return Ok(subdir);
-            }
-        }
-
-        // TODO: FileGeneratorError
-        Err(FileGeneratorError::ImproperlyFormattedDirname {
-            dirname: self.directory.clone(),
-        }
-        .into())
-    }
-
-    // return:
-    //  - Ok(()) to continue scanning
-    //  - Err(Error) to stop scanning
-    fn get_one_object(
-        &self,
-        mclient: &mut MorayClient,
-        obj_id: ObjectId,
-        shard_num: u32,
-    ) -> Result<(), Error> {
-        let shard_num = shard_num as i32;
-
-        let moray_obj = match moray_client::get_object(mclient, obj_id.as_str())
-        {
-            Ok(mobj) => mobj,
-            Err(e) => {
-                error!(
-                    "Attempt to rebalance missing object: {:#?} ({})",
-                    obj_id, e
-                );
-
-                let id_only_eobj = EvacuateObject {
-                    id: obj_id,
-                    shard: shard_num,
-                    status: EvacuateObjectStatus::Error,
-                    error: Some(EvacuateObjectError::MissingObject),
-                    ..Default::default()
-                };
-
-                self.job_action.insert_into_db(&id_only_eobj);
-
-                // Continue scanning
-                return Ok(());
-            }
-        };
-
-        let mut eobj = match EvacuateObject::try_from(moray_obj) {
-            Ok(obj) => obj,
-            Err(mut partial_obj) => {
-                partial_obj.id = obj_id.clone();
-                partial_obj.shard = shard_num;
-                error!("Inserting Bad Object: {}", obj_id);
-
-                self.job_action.insert_into_db(&partial_obj);
-
-                // Continue scanning
-                return Ok(());
-            }
-        };
-
-        // XXX check shard number !> i32::MAX
-        eobj.shard = shard_num;
-
-        self.obj_tx
-            .send(eobj)
-            .map_err(CrossbeamError::from)
-            .map_err(|e| {
-                warn!("Assignment manager no longer accepting objects: {}", e);
-                InternalError::new(
-                    Some(InternalErrorCode::Crossbeam),
-                    e.description(),
-                )
-            })
-            .map_err(Error::from)
-    }
-
-    ///
-    /// Walk the objects in a single file named "shard_<shard_num>.objs"
-    ///
-    fn walk_objects(&self, shard: PathBuf) -> Result<(), Error> {
-        debug!("walking objects for shard: {:#?}", shard);
-
-        let shard_num = shard_num_from_pathbuf(&shard)?;
-
-        // TODO: Check for min & max shard?
-
-        let mut mclient = match moray_client::create_client(
-            shard_num,
-            &self.job_action.config.domain_name,
-        ) {
-            Ok(client) => client,
-            Err(e) => {
-                let msg = format!(
-                    "Failed to get Moray Client for shard {}: {}",
-                    shard_num, e
-                );
-                return Err(InternalError::new(
-                    Some(InternalErrorCode::BadMorayClient),
-                    msg,
-                )
-                .into());
-            }
-        };
-
-        let reader = BufReader::new(File::open(shard)?);
-        for obj_id in reader.lines() {
-            let mut object_count = self.object_count.get();
-            let obj_id = obj_id?;
-
-            if self.job_action.object_counter_check_inc(&mut object_count) {
-                info!("Max objects limit reached");
-                return Ok(());
-            }
-
-            self.object_count.set(object_count);
-
-            // There are a few different ways this function could fail.  In
-            // most ways it can handle it's own errors and allow this walk to
-            // continue.  If it fails in such a way that the walk shouldn't
-            // continue it returns Err(Error), in which case we return here.
-            if let Err(e) = self.get_one_object(&mut mclient, obj_id, shard_num)
-            {
-                return Err(e);
-            }
-        }
-        Ok(())
+        path_buf_from_dirname(
+            from_shark.as_str(),
+            self.directory.as_str(),
+            self.job_action.config.domain_name.as_str(),
+        )
     }
 }
 
@@ -748,7 +939,10 @@ impl ObjectGenerator for FileGenerator {
                     )
                     .into());
                 }
-                self.walk_shards()
+                self.walk_shards().map_err(|e| {
+                    error!("Error walking shards: {}", e);
+                    e
+                })
             })
             .map_err(Error::from)
     }
@@ -801,7 +995,7 @@ impl ObjectGenerator for SharkSpotterGenerator {
     }
 }
 
-// A thin layer between sharkpotter and the assignment manager that handles
+// A thin layer between sharkspotter and the assignment manager that handles
 // transforming the evacuate object, incrementing the object_counter and
 // checking if we've hit the max objects limit.
 fn sharkspotter_message_translator(
@@ -2394,8 +2588,8 @@ fn start_generator_thread(
             let fgen = FileGenerator {
                 job_action: Arc::clone(&job_action),
                 directory: directory.to_owned(),
-                object_count: Cell::new(0),
                 obj_tx,
+                getter: ObjectGetterType::Moray,
             };
             fgen.generate()
         }
@@ -4288,9 +4482,10 @@ mod tests {
         source: ObjectSource,
     ) -> EvacuateJob {
         let mut config = Config::default();
-        let from_shark = String::from("1.stor.domain");
+        let from_shark = String::from("1.stor.fakedomain.us");
 
         config.max_fill_percentage = 100;
+        config.domain_name = "fakedomain.us".to_string();
 
         let (_, update_rx) = crossbeam_channel::unbounded();
         let mut job_action = EvacuateJob::new(
@@ -4765,6 +4960,9 @@ mod tests {
             ObjectSource::File(test_path.clone()),
         );
 
+        let test_objs_path =
+            format!("{}/testfiles/objs/", env!("CARGO_MANIFEST_DIR"));
+
         job_action.from_shark.manta_storage_id = from_shark;
         let job_action = Arc::new(job_action);
 
@@ -4772,9 +4970,10 @@ mod tests {
         let fgen = FileGenerator {
             job_action: Arc::clone(&job_action),
             directory: test_path,
-            object_count: Cell::new(0),
             obj_tx,
+            getter: ObjectGetterType::File(test_objs_path),
         };
+
         let fgen_handle = fgen.generate().expect("generate");
 
         loop {
@@ -4786,9 +4985,9 @@ mod tests {
             }
         }
 
-        assert_eq!(received_count, expected_line_count);
-
         fgen_handle.join().expect("join fgen").expect("fgen result");
+
+        assert_eq!(received_count, expected_line_count);
     }
 
     // Get a count of the lines for all the files in this directory.
@@ -4807,7 +5006,6 @@ mod tests {
         count
     }
 
-    // XXX: TODO fix test files to use only object ids
     #[test]
     fn file_source_shark_dir() {
         unit_test_init();
