@@ -678,18 +678,12 @@ fn walk_obj_ids_in_file(
 
     let reader = BufReader::new(File::open(shard_file)?);
     for obj_id in reader.lines() {
-        let obj_id = obj_id?;
-        // TODO: fix object counting XXX
-        /*
-        let mut object_count = self.object_count.inc_by(1);
-
-        if job_action.object_counter_check_inc(&mut object_count) {
+        if job_action.object_counter_check_inc() {
             info!("Max objects limit reached");
             return Ok(());
         }
 
-        self.object_count.set(object_count);
-         */
+        let obj_id = obj_id?;
 
         // There are a few different ways this function could fail.  In
         // most ways it can handle it's own errors and allow this walk to
@@ -1003,7 +997,6 @@ fn sharkspotter_message_translator(
     ss_obj_rx: crossbeam_channel::Receiver<SharkspotterMessage>,
     evac_obj_tx: crossbeam_channel::Sender<EvacuateObject>,
 ) {
-    let mut object_count = 0;
     loop {
         let ss_obj = match ss_obj_rx.recv() {
             Ok(obj) => obj,
@@ -1013,7 +1006,7 @@ fn sharkspotter_message_translator(
             }
         };
 
-        if job_action.object_counter_check_inc(&mut object_count) {
+        if job_action.object_counter_check_inc() {
             info!("Max objects limit reached");
             break;
         }
@@ -1238,6 +1231,8 @@ pub struct EvacuateJob {
 
     pub object_source: ObjectSource,
 
+    pub object_count: AtomicU64,
+
     pub post_client: reqwest::Client,
 
     pub get_client: reqwest::Client,
@@ -1377,6 +1372,7 @@ impl EvacuateJob {
             conn: Mutex::new(conn),
             object_source,
             max_objects,
+            object_count: AtomicU64::new(0),
             post_client: reqwest::Client::new(),
             get_client: reqwest::Client::new(),
             update_rx,
@@ -1406,10 +1402,19 @@ impl EvacuateJob {
     }
 
     // This method handles checking if we've hit the max objects limit and
-    // starting the object_movement timer as necessary
-    fn object_counter_check_inc(&self, object_count: &mut u64) -> bool {
+    // starting the object_movement timer as necessary.
+    // Returns true if object_count is over the max_objects limit.
+    // Returns false otherwise.
+    fn object_counter_check_inc(&self) -> bool {
+        let count = self.object_count.fetch_add(1, Ordering::SeqCst);
+
+        if count == 0 {
+            *self.object_movement_start_time.lock().unwrap() =
+                Some(std::time::Instant::now());
+        }
+
         if let Some(max) = self.max_objects {
-            if *object_count >= max {
+            if count >= max {
                 info!(
                     "Hit max objects count ({}).  Sending last \
                      assignments and exiting",
@@ -1425,18 +1430,9 @@ impl EvacuateJob {
                         st.elapsed().as_secs()
                     );
                 }
-
                 return true;
             }
         }
-
-        if *object_count == 0 {
-            *self.object_movement_start_time.lock().unwrap() =
-                Some(std::time::Instant::now());
-        }
-
-        *object_count += 1;
-
         false
     }
 

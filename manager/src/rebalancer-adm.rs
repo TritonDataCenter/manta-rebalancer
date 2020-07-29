@@ -264,10 +264,10 @@ mod rebalancer_adm_tests {
         let err_msg = indoc!(
             "
             error: The following required arguments were not provided:
-                --uuid <uuid>
+                <uuid>
 
             USAGE:
-                rebalancer-adm job get --uuid <uuid>
+                rebalancer-adm job get <uuid>
             "
         );
 
