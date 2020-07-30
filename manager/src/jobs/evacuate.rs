@@ -495,22 +495,21 @@ impl ObjectGetter for FileObjectGetter {
     ) -> Result<MorayObject, Error> {
         let shard_file = self.shard_file.clone();
         let reader = BufReader::new(File::open(shard_file)?);
-        let msg = format!("Could not find object with id: {}", object_id);
+        let msg: String;
 
         for json_obj in reader.lines() {
             let json_obj = json_obj?;
-
             let moray_object: MorayObject =
                 serde_json::from_str(json_obj.as_str())?;
-
-            let manta_object = moray_object.value.clone();
-            let found_id = common::get_objectId_from_value(&manta_object)?;
+            let found_id =
+                common::get_objectId_from_value(&moray_object.value)?;
 
             if &found_id == object_id {
                 return Ok(moray_object);
             }
         }
 
+        msg = format!("Could not find object with id: {}", object_id);
         error!("{}", msg);
 
         Err(
@@ -664,16 +663,19 @@ fn retrieve_object(
     Ok(eobj)
 }
 
-fn walk_obj_ids_in_file(
+fn walk_obj_ids_in_file<P: AsRef<Path>>(
     job_action: Arc<EvacuateJob>,
-    shard_file: PathBuf,
+    shard_file: P,
     obj_tx: crossbeam_channel::Sender<EvacuateObject>,
     mut obj_getter: Box<dyn ObjectGetter + Send + 'static>,
 ) -> Result<(), Error> {
-    debug!("walking objects for shard: {:#?}", shard_file);
+    debug!(
+        "walking objects for shard: {:#?}",
+        shard_file.as_ref().to_path_buf()
+    );
 
-    let shard_num = shard_num_from_pathbuf(&shard_file)?;
-    let reader = BufReader::new(File::open(shard_file)?);
+    let shard_num = shard_num_from_pathbuf(&shard_file.as_ref().to_path_buf())?;
+    let reader = BufReader::new(File::open(shard_file.as_ref())?);
 
     let fn_shark_match = |s: &MantaObjectShark| {
         s.manta_storage_id == job_action.from_shark.manta_storage_id
@@ -972,8 +974,6 @@ impl ObjectGenerator for SharkSpotterGenerator {
 
         debug!("Starting sharkspotter generator: {:?}", &config);
 
-        let log = slog_scope::logger();
-
         thread::Builder::new()
             .name(String::from("sharkspotter"))
             .spawn(move || {
@@ -988,8 +988,12 @@ impl ObjectGenerator for SharkSpotterGenerator {
                     })
                     .map_err(Error::from)?;
 
-                sharkspotter::run_multithreaded(config, log, ss_obj_tx)
-                    .map_err(Error::from)?;
+                sharkspotter::run_multithreaded(
+                    config,
+                    slog_scope::logger(),
+                    ss_obj_tx,
+                )
+                .map_err(Error::from)?;
 
                 ss_translate_handle
                     .join()
