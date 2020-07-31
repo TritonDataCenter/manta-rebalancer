@@ -5046,9 +5046,8 @@ mod tests {
     }
 
     fn remove_one_line(source: &str, dest: &str) {
-        let reader = BufReader::new(
-            File::open(Path::new(source)).expect("file source"),
-        );
+        let reader =
+            BufReader::new(File::open(Path::new(source)).expect("file source"));
 
         let mut dest_file = File::create(Path::new(dest)).expect("file dest");
 
@@ -5060,9 +5059,10 @@ mod tests {
         lines.pop();
 
         for line in lines {
-            writeln!(&mut dest_file, "{}", line).expect("Write \
-            line");
-
+            writeln!(&mut dest_file, "{}", line).expect(
+                "Write \
+                 line",
+            );
         }
     }
 
@@ -5122,8 +5122,7 @@ mod tests {
             format!("{}/testfiles/objs/1.stor", env!("CARGO_MANIFEST_DIR"));
         let bad_objs_parent_path =
             format!("{}/testfiles/tmp", env!("CARGO_MANIFEST_DIR"));
-        let bad_objs_path =
-            format!("{}/1.stor", bad_objs_parent_path);
+        let bad_objs_path = format!("{}/1.stor", bad_objs_parent_path);
         fs::create_dir_all(&bad_objs_path).expect("create dir");
 
         for shard in 1..=2 {
