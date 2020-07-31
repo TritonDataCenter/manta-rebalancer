@@ -561,7 +561,7 @@ enum FileGeneratorError {
 
     #[fail(
         display = "Directory ({})should be of the format <storage_id>.stor or \
-        <storage_id>.stor.<domain>",
+                   <storage_id>.stor.<domain>",
         dirname
     )]
     ImproperlyFormattedDirname { dirname: String },
@@ -685,7 +685,6 @@ fn walk_obj_ids_in_file<P: AsRef<Path>>(
     let fn_shark_match = |s: &MantaObjectShark| {
         s.manta_storage_id == job_action.from_shark.manta_storage_id
     };
-
 
     for obj_id in reader.lines() {
         if job_action.object_counter_check_inc() {
@@ -4973,11 +4972,14 @@ mod tests {
 
     fn run_file_object_source_test(
         test_path: String,
+        test_objs_path: String,
         from_shark: String,
-        expected_line_count: u32,
-    ) {
+        func: fn(
+            fgen: FileGenerator,
+            obj_rx: crossbeam_channel::Receiver<EvacuateObject>,
+        ) -> u32,
+    ) -> u32 {
         let (obj_tx, obj_rx) = crossbeam_channel::bounded(5);
-        let mut received_count = 0;
 
         // Create the Evacuate Job Action
         let mut job_action = create_test_evacuate_job(
@@ -4986,9 +4988,6 @@ mod tests {
         );
 
         job_action.config.domain_name = "east.joyent.us".into();
-
-        let test_objs_path =
-            format!("{}/testfiles/objs/", env!("CARGO_MANIFEST_DIR"));
 
         job_action.from_shark.manta_storage_id = from_shark;
         let job_action = Arc::new(job_action);
@@ -5001,20 +5000,30 @@ mod tests {
             getter: ObjectGetterType::File(test_objs_path),
         };
 
-        let fgen_handle = fgen.generate().expect("generate");
+        func(fgen, obj_rx)
+    }
 
-        loop {
-            if let Ok(o) = obj_rx.recv() {
-                debug!("{}", o.id);
-                received_count += 1;
-            } else {
-                break;
+    fn get_basic_test_func() -> fn(
+        fgen: FileGenerator,
+        obj_rx: crossbeam_channel::Receiver<EvacuateObject>,
+    ) -> u32 {
+        move |fgen, obj_rx| {
+            let fgen_handle = fgen.generate().expect("generate");
+            let mut received_count = 0;
+
+            loop {
+                if let Ok(o) = obj_rx.recv() {
+                    debug!("{}", o.id);
+                    received_count += 1;
+                } else {
+                    break;
+                }
             }
+
+            fgen_handle.join().expect("join fgen").expect("fgen result");
+
+            received_count
         }
-
-        fgen_handle.join().expect("join fgen").expect("fgen result");
-
-        assert_eq!(received_count, expected_line_count);
     }
 
     // Get a count of the lines for all the files in this directory.
@@ -5039,14 +5048,20 @@ mod tests {
 
         let test_path =
             format!("{}/testfiles/1.stor", env!("CARGO_MANIFEST_DIR"));
+        let test_objs_path =
+            format!("{}/testfiles/objs/", env!("CARGO_MANIFEST_DIR"));
 
-        let line_count = total_shard_line_count(&test_path);
+        let expected_object_count = total_shard_line_count(&test_path);
+        let func = get_basic_test_func();
 
-        run_file_object_source_test(
+        let object_count = run_file_object_source_test(
             test_path,
+            test_objs_path,
             "1.stor.east.joyent.us".into(),
-            line_count,
+            func,
         );
+
+        assert_eq!(expected_object_count, object_count);
     }
 
     #[test]
@@ -5054,15 +5069,20 @@ mod tests {
         unit_test_init();
 
         let test_path = format!("{}/testfiles/", env!("CARGO_MANIFEST_DIR"));
-
-        let line_count =
+        let test_objs_path =
+            format!("{}/testfiles/objs/", env!("CARGO_MANIFEST_DIR"));
+        let expected_object_count =
             total_shard_line_count(format!("{}/1.stor", &test_path).as_str());
+        let func = get_basic_test_func();
 
-        run_file_object_source_test(
+        let object_count = run_file_object_source_test(
             test_path,
+            test_objs_path,
             "1.stor.east.joyent.us".into(),
-            line_count,
+            func,
         );
+
+        assert_eq!(expected_object_count, object_count);
     }
 
     #[test]
