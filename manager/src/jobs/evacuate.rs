@@ -4971,8 +4971,8 @@ mod tests {
     }
 
     fn run_file_object_source_test(
-        test_path: String,
-        test_objs_path: String,
+        test_path: &str,
+        test_objs_path: &str,
         from_shark: String,
         func: fn(
             fgen: FileGenerator,
@@ -4984,7 +4984,7 @@ mod tests {
         // Create the Evacuate Job Action
         let mut job_action = create_test_evacuate_job(
             None,
-            ObjectSource::File(test_path.clone()),
+            ObjectSource::File(test_path.to_string()),
         );
 
         job_action.config.domain_name = "east.joyent.us".into();
@@ -4995,10 +4995,13 @@ mod tests {
         // Start the Generator
         let fgen = FileGenerator {
             job_action: Arc::clone(&job_action),
-            directory: test_path,
+            directory: test_path.to_string(),
             obj_tx,
-            getter: ObjectGetterType::File(test_objs_path),
+            getter: ObjectGetterType::File(test_objs_path.to_string()),
         };
+
+        // XXX remove
+        println!("{}", test_objs_path);
 
         func(fgen, obj_rx)
     }
@@ -5042,6 +5045,27 @@ mod tests {
         count
     }
 
+    fn remove_one_line(source: &str, dest: &str) {
+        let reader = BufReader::new(
+            File::open(Path::new(source)).expect("file source"),
+        );
+
+        let mut dest_file = File::create(Path::new(dest)).expect("file dest");
+
+        let mut lines: Vec<String> = reader
+            .lines()
+            .map(|line| line.expect("read line"))
+            .collect();
+
+        lines.pop();
+
+        for line in lines {
+            writeln!(&mut dest_file, "{}", line).expect("Write \
+            line");
+
+        }
+    }
+
     #[test]
     fn file_source_shark_dir() {
         unit_test_init();
@@ -5055,8 +5079,8 @@ mod tests {
         let func = get_basic_test_func();
 
         let object_count = run_file_object_source_test(
-            test_path,
-            test_objs_path,
+            &test_path,
+            &test_objs_path,
             "1.stor.east.joyent.us".into(),
             func,
         );
@@ -5076,13 +5100,55 @@ mod tests {
         let func = get_basic_test_func();
 
         let object_count = run_file_object_source_test(
-            test_path,
-            test_objs_path,
+            &test_path,
+            &test_objs_path,
             "1.stor.east.joyent.us".into(),
             func,
         );
 
         assert_eq!(expected_object_count, object_count);
+    }
+
+    #[test]
+    fn file_source_missing_obj() {
+        unit_test_init();
+
+        let test_path = format!("{}/testfiles/", env!("CARGO_MANIFEST_DIR"));
+        let expected_object_count =
+            total_shard_line_count(format!("{}/1.stor", &test_path).as_str());
+        let func = get_basic_test_func();
+
+        let test_objs_path =
+            format!("{}/testfiles/objs/1.stor", env!("CARGO_MANIFEST_DIR"));
+        let bad_objs_parent_path =
+            format!("{}/testfiles/tmp", env!("CARGO_MANIFEST_DIR"));
+        let bad_objs_path =
+            format!("{}/1.stor", bad_objs_parent_path);
+        fs::create_dir_all(&bad_objs_path).expect("create dir");
+
+        for shard in 1..=2 {
+            let source = format!("{}/shard_{}.objs", test_objs_path, shard);
+            let destination = format!("{}/shard_{}.objs", bad_objs_path, shard);
+
+            remove_one_line(&source, &destination);
+        }
+
+        let object_count = run_file_object_source_test(
+            &test_path,
+            &bad_objs_path,
+            "1.stor.east.joyent.us".into(),
+            func,
+        );
+
+        // Clean up
+        for shard in 1..=2 {
+            let destination = format!("{}/shard_{}.objs", bad_objs_path, shard);
+            fs::remove_file(&destination).expect("remove file");
+        }
+        fs::remove_dir(bad_objs_path).expect("remove dir");
+        fs::remove_dir(bad_objs_parent_path).expect("remove parent dir");
+
+        assert_eq!(expected_object_count - 2, object_count);
     }
 
     #[test]
