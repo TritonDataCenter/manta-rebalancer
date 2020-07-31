@@ -52,6 +52,7 @@ use crossbeam_channel::TryRecvError;
 use crossbeam_deque::{Injector, Steal};
 use failure::Error as Failure;
 use failure::Fail;
+use fs3::FileExt;
 use lazy_static::lazy_static;
 use libmanta::moray::{MantaObject, MantaObjectShark};
 use moray::client::MorayClient;
@@ -553,12 +554,14 @@ struct FileGenerator {
 #[derive(Debug, Fail)]
 enum FileGeneratorError {
     #[fail(
-        display = "Filename ({})should be of the format <num>_shard.objs",
+        display = "Filename ({})should be of the format shard_<num>.objs",
         filename
     )]
     ImproperlyFormattedFilename { filename: String },
+
     #[fail(
-        display = "Filename ({})should be of the format <num>_shard.objs",
+        display = "Directory ({})should be of the format <storage_id>.stor or \
+        <storage_id>.stor.<domain>",
         dirname
     )]
     ImproperlyFormattedDirname { dirname: String },
@@ -675,16 +678,19 @@ fn walk_obj_ids_in_file<P: AsRef<Path>>(
     );
 
     let shard_num = shard_num_from_pathbuf(&shard_file.as_ref().to_path_buf())?;
-    let reader = BufReader::new(File::open(shard_file.as_ref())?);
+    let fd = File::open(shard_file.as_ref())?;
+    fd.try_lock_exclusive()?;
+    let reader = BufReader::new(fd);
 
     let fn_shark_match = |s: &MantaObjectShark| {
         s.manta_storage_id == job_action.from_shark.manta_storage_id
     };
 
+
     for obj_id in reader.lines() {
         if job_action.object_counter_check_inc() {
             info!("Max objects limit reached");
-            return Ok(());
+            break;
         }
 
         let obj_id = obj_id?;
@@ -780,8 +786,8 @@ fn path_buf_from_dirname(
         }
     }
 
-    debug!("Looking for {} in {:#?}", from_shark, dir);
-    // Find the per shark path in the path provided provided by the user
+    debug!("Looking for {:#?} in {:#?}", possibilities, dir);
+    // Find the per shark path in the parent directory provided by the user
     for subdir in fs::read_dir(dir)? {
         let subdir = subdir?.path();
         debug!("Checking {:?}", subdir);
@@ -854,6 +860,8 @@ impl FileGenerator {
         Ok(())
     }
 
+    // Spawn a thread for every per-shard file up to a maximum configurable
+    // amount.
     fn walk_shards(&self) -> Result<(), Error> {
         let max_threads =
             self.job_action.config.options.max_metadata_read_threads;
@@ -862,6 +870,9 @@ impl FileGenerator {
             max_threads,
         );
 
+        // This call gets the top level directory which we iterate over
+        // below.  Each thread will get a path like:
+        // `/user/specified/<shark name>/shard_#.objs`
         let dir = self.get_source_dir().map_err(|e| {
             InternalError::new(
                 Some(InternalErrorCode::InvalidJobAction),
@@ -905,6 +916,8 @@ impl FileGenerator {
 
         pool.join();
 
+        // Make sure we record any per-shard (per-thread) errors and report them
+        // back to the user.
         let mut found_error = false;
         for elem in success_map.lock().expect("success map lock").values() {
             if let Some(err) = elem {
@@ -4972,6 +4985,8 @@ mod tests {
             ObjectSource::File(test_path.clone()),
         );
 
+        job_action.config.domain_name = "east.joyent.us".into();
+
         let test_objs_path =
             format!("{}/testfiles/objs/", env!("CARGO_MANIFEST_DIR"));
 
@@ -5029,7 +5044,7 @@ mod tests {
 
         run_file_object_source_test(
             test_path,
-            "1.stor.fakedomain.us".into(),
+            "1.stor.east.joyent.us".into(),
             line_count,
         );
     }
@@ -5045,7 +5060,7 @@ mod tests {
 
         run_file_object_source_test(
             test_path,
-            "1.stor.fakedomain.us".into(),
+            "1.stor.east.joyent.us".into(),
             line_count,
         );
     }
