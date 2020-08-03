@@ -1,5 +1,5 @@
 [server]
-host = "0.0.0.0"
+host = "{{auto.MANTA_IP}}"
 {{#REBALANCER_AGENT_PORT}}
 port = {{REBALANCER_AGENT_PORT}}
 {{/REBALANCER_AGENT_PORT}}
