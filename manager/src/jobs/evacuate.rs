@@ -435,9 +435,11 @@ impl ObjectGetterType {
     fn create(
         &self,
         from_shark: &str,
-        shard_num: u32,
+        shard_num: i32,
         domain: &str,
     ) -> Result<Box<dyn ObjectGetter + Send + 'static>, Error> {
+        assert!(shard_num > 0);
+
         match self {
             ObjectGetterType::File(path) => {
                 let shark_dir = path_buf_from_dirname(from_shark, path, domain)
@@ -461,7 +463,8 @@ impl ObjectGetterType {
             }
             ObjectGetterType::Moray => {
                 let mclient =
-                    match moray_client::create_client(shard_num, domain) {
+                    match moray_client::create_client(shard_num as u32, domain)
+                    {
                         Ok(client) => client,
                         Err(e) => {
                             let msg = format!(
@@ -585,7 +588,7 @@ enum FileGeneratorError {
 }
 
 // --- File Generator Helpers --- //
-fn shard_num_from_pathbuf(shard_path_buf: &PathBuf) -> Result<u32, Error> {
+fn shard_num_from_pathbuf(shard_path_buf: &PathBuf) -> Result<i32, Error> {
     let captures = shard_path_buf
         .file_name()
         .ok_or_else(|| {
@@ -604,7 +607,18 @@ fn shard_num_from_pathbuf(shard_path_buf: &PathBuf) -> Result<u32, Error> {
         })
         .map_err(Error::from)?;
 
-    captures["shard"].parse::<u32>().map_err(Error::from)
+    let shard_num = captures["shard"].parse::<i32>()?;
+
+    if shard_num < 1 {
+        let msg = format!("Invalid shard number {}.  Must be > 0", shard_num);
+        return Err(InternalError::new(
+            Some(InternalErrorCode::InvalidJobParam),
+            msg,
+        )
+        .into());
+    }
+
+    Ok(shard_num)
 }
 
 // Retrieve one object.  If an error occurs during the retrieval store what
@@ -613,9 +627,9 @@ fn retrieve_object(
     job_action: &Arc<EvacuateJob>,
     obj_getter: &mut ObjectGetterArg,
     obj_id: ObjectId,
-    shard_num: u32,
+    shard_num: i32,
 ) -> Result<EvacuateObject, Error> {
-    let shard_num = shard_num as i32;
+    assert!(shard_num > 0);
 
     let moray_obj = match obj_getter.get_object(&obj_id) {
         Ok(mobj) => mobj,
@@ -665,7 +679,6 @@ fn retrieve_object(
         }
     };
 
-    // XXX check shard number !> i32::MAX
     eobj.shard = shard_num;
 
     Ok(eobj)
@@ -879,12 +892,12 @@ impl FileGenerator {
         // `/user/specified/<shark name>/shard_#.objs`
         let dir = self.get_source_dir().map_err(|e| {
             InternalError::new(
-                Some(InternalErrorCode::InvalidJobAction),
+                Some(InternalErrorCode::InvalidJobParam),
                 e.to_string(),
             )
         })?;
 
-        let success_map: Arc<Mutex<HashMap<u32, Option<String>>>> =
+        let success_map: Arc<Mutex<HashMap<i32, Option<String>>>> =
             Arc::new(Mutex::new(HashMap::new()));
 
         for shard in fs::read_dir(dir.as_path())? {
@@ -959,7 +972,7 @@ impl ObjectGenerator for FileGenerator {
             .spawn(move || {
                 if let Err(e) = self.validate_directory() {
                     return Err(InternalError::new(
-                        Some(InternalErrorCode::InvalidJobAction),
+                        Some(InternalErrorCode::InvalidJobParam),
                         e.to_string(),
                     )
                     .into());
@@ -5004,9 +5017,6 @@ mod tests {
             obj_tx,
             getter: ObjectGetterType::File(test_objs_path.to_string()),
         };
-
-        // XXX remove
-        println!("{}", test_objs_path);
 
         func(fgen, obj_rx)
     }

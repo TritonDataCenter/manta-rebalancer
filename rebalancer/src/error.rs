@@ -109,7 +109,7 @@ pub struct InternalError {
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub enum InternalErrorCode {
     Other,
-    InvalidJobAction,      // Invalid Job Action
+    InvalidJobParam,       // Invalid Job Action
     Crossbeam,             // An error relating to crossbeam
     StorinfoError,         // An error from Storinfo service
     AssignmentLookupError, // Could not lookup assignment in memory
