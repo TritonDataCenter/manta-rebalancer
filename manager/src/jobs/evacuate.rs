@@ -421,6 +421,11 @@ struct FiniMsg;
 
 type ObjectGetterArg = Box<dyn ObjectGetter + Send + 'static>;
 
+// The ObjectGetter is intended to provide alternate ways to retrieve up to
+// date object metadata records.  Currently moray is the source of truth for
+// all production applications but we may also want to save metadata to a
+// file in the future and read from that.  Currently the File variant is only
+// used for testing, but could be expanded in the future.
 pub enum ObjectGetterType {
     Moray,
     File(String),
