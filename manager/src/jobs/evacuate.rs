@@ -658,7 +658,9 @@ fn walk_obj_ids_in_file<P: AsRef<Path>>(
 
     let shard_num = shard_num_from_pathbuf(&shard_file.as_ref().to_path_buf())?;
     let fd = File::open(shard_file.as_ref())?;
-    fd.try_lock_exclusive()?;
+    // Removing for now.   We continue to see "Bad file number (os error 9)"
+    // errors in testing.
+    // fd.try_lock_exclusive()?;
     let reader = BufReader::new(fd);
 
     let fn_shark_match = |s: &MantaObjectShark| {
