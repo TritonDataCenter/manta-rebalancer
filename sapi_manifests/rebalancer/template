@@ -53,11 +53,18 @@
         {{/REBALANCER_USE_BATCHED_UPDATES}}
 
         {{#REBALANCER_MD_READ_CHUNK_SIZE}}
-        "md_read_chunk_size": {{REBALANCER_MD_READ_CHUNK_SIZE}}
+        "md_read_chunk_size": {{REBALANCER_MD_READ_CHUNK_SIZE}},
         {{/REBALANCER_MD_READ_CHUNK_SIZE}}
         {{^REBALANCER_MD_READ_CHUNK_SIZE}}
-        "md_read_chunk_size": 500
+        "md_read_chunk_size": 500,
         {{/REBALANCER_MD_READ_CHUNK_SIZE}}
+
+        {{#REBALANCER_MAX_METADATA_READ_THREADS}}
+        "max_metadata_read_threads": {{REBALANCER_MAX_METADATA_READ_THREADS}}
+        {{/REBALANCER_MAX_METADATA_READ_THREADS}}
+        {{^REBALANCER_MAX_METADATA_READ_THREADS}}
+        "max_metadata_read_threads": 50
+        {{/REBALANCER_MAX_METADATA_READ_THREADS}}
     },
     "listen_port": 80,
 
