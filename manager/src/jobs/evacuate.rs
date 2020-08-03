@@ -419,120 +419,66 @@ pub fn create_evacuateobjects_table(
 
 struct FiniMsg;
 
-type ObjectGetterArg = Box<dyn ObjectGetter + Send + 'static>;
+type ObjectResolverArg = Box<dyn ObjectResolver + Send + 'static>;
 
-// The ObjectGetter is intended to provide alternate ways to retrieve up to
+// The ObjectResolver is intended to provide alternate ways to retrieve up to
 // date object metadata records.  Currently moray is the source of truth for
 // all production applications but we may also want to save metadata to a
 // file in the future and read from that.  Currently the File variant is only
 // used for testing, but could be expanded in the future.
-pub enum ObjectGetterType {
-    Moray,
-    File(String),
+
+// We want to resolve objects concurrently, which means each thread having
+// it's own stateful resolver (e.g. a moray client).  We also want to specify
+// a resolver type and give it the necessary information to carry out its
+// duties at the beginning of the job.  Therefore before we spawn a thread we
+// create a unique ObjectResolver from a ObjectResolverBuilder (a template),
+// and pass that unique resolver to the thread.  This trait provides the
+// interface for creation of that per-thread resolver.
+#[allow(clippy::ptr_arg)]
+pub trait CreateObjectResolver {
+    fn create(&self, shard_num: i32) -> Result<ObjectResolverArg, Error>;
 }
 
-impl ObjectGetterType {
-    fn create(
-        &self,
-        from_shark: &str,
-        shard_num: i32,
-        domain: &str,
-    ) -> Result<Box<dyn ObjectGetter + Send + 'static>, Error> {
-        assert!(shard_num > 0);
+struct MorayObjectResolverBuilder {
+    domain: String,
+}
 
-        match self {
-            ObjectGetterType::File(path) => {
-                let shark_dir = path_buf_from_dirname(from_shark, path, domain)
-                    .map_err(|e| {
-                        InternalError::new(
-                            Some(InternalErrorCode::ObjectNotFound),
-                            format!(
-                                "Could not create getter for {}: {}",
-                                from_shark, e
-                            ),
-                        )
-                    })?;
-
-                let shard_file_string = format!(
-                    "{}/shard_{}.objs",
-                    shark_dir.to_string_lossy(),
-                    shard_num
+impl CreateObjectResolver for MorayObjectResolverBuilder {
+    fn create(&self, shard_num: i32) -> Result<ObjectResolverArg, Error> {
+        match moray_client::create_client(shard_num as u32, &self.domain) {
+            Ok(mclient) => Ok(Box::new(MorayObjectResolver { mclient })),
+            Err(e) => {
+                let msg = format!(
+                    "Failed to get Moray Client for shard {}: {}",
+                    shard_num, e
                 );
-                let shard_file = Path::new(&shard_file_string).to_path_buf();
-                Ok(Box::new(FileObjectGetter { shard_file }))
-            }
-            ObjectGetterType::Moray => {
-                let mclient =
-                    match moray_client::create_client(shard_num as u32, domain)
-                    {
-                        Ok(client) => client,
-                        Err(e) => {
-                            let msg = format!(
-                                "Failed to get Moray Client for shard {}: {}",
-                                shard_num, e
-                            );
-                            return Err(InternalError::new(
-                                Some(InternalErrorCode::BadMorayClient),
-                                msg,
-                            )
-                            .into());
-                        }
-                    };
-
-                Ok(Box::new(MorayObjectGetter { mclient }))
+                Err(InternalError::new(
+                    Some(InternalErrorCode::BadMorayClient),
+                    msg,
+                )
+                .into())
             }
         }
     }
 }
 
+// The object resolver looks up the metadata that corresponds to the object
+// ID provided.  These resolvers are unique to the thread they are running in.
+// Currently the code is structured to give each shard its own thread with
+// it's own resolver.
 #[allow(clippy::ptr_arg)]
-trait ObjectGetter {
+pub trait ObjectResolver {
     fn get_object(
         &mut self,
         object_id: &ObjectId,
     ) -> Result<MorayObject, Error>;
 }
 
-struct FileObjectGetter {
-    shard_file: PathBuf,
-}
-
-impl ObjectGetter for FileObjectGetter {
-    fn get_object(
-        &mut self,
-        object_id: &ObjectId,
-    ) -> Result<MorayObject, Error> {
-        let shard_file = self.shard_file.clone();
-        let reader = BufReader::new(File::open(shard_file)?);
-        let msg: String;
-
-        for json_obj in reader.lines() {
-            let json_obj = json_obj?;
-            let moray_object: MorayObject =
-                serde_json::from_str(json_obj.as_str())?;
-            let found_id =
-                common::get_objectId_from_value(&moray_object.value)?;
-
-            if &found_id == object_id {
-                return Ok(moray_object);
-            }
-        }
-
-        msg = format!("Could not find object with id: {}", object_id);
-        error!("{}", msg);
-
-        Err(
-            InternalError::new(Some(InternalErrorCode::ObjectNotFound), msg)
-                .into(),
-        )
-    }
-}
-
-struct MorayObjectGetter {
+struct MorayObjectResolver {
     mclient: MorayClient,
 }
 
-impl ObjectGetter for MorayObjectGetter {
+impl ObjectResolver for MorayObjectResolver {
     fn get_object(
         &mut self,
         object_id: &ObjectId,
@@ -541,10 +487,18 @@ impl ObjectGetter for MorayObjectGetter {
     }
 }
 
-trait ObjectGenerator {
-    fn generate(self) -> Result<thread::JoinHandle<Result<(), Error>>, Error>;
+// Anything implementing the ObjectGenerator trait generates EvacuateObjects
+// that are consumed by the rest of the evacuate job.  Currently these
+// EvacuateObjects are sent to the assignment manager via a crossbeam channel.
+pub trait ObjectGenerator {
+    fn generate_objects(
+        self,
+    ) -> Result<thread::JoinHandle<Result<(), Error>>, Error>;
 }
 
+// The SharkspotterGenerator uses sharkspotter crate to scan the entire
+// metadata tier for objects that belong to the `from_shark` specified in the
+// EvacuateJob.
 struct SharkSpotterGenerator {
     job_action: Arc<EvacuateJob>,
     min_shard: u32,
@@ -552,11 +506,18 @@ struct SharkSpotterGenerator {
     obj_tx: crossbeam_channel::Sender<EvacuateObject>,
 }
 
-struct FileGenerator {
+// The FileGenerator gets a directory where it looks for per-shark
+// subdirectories.  In each of these per-shark directories it expects to find
+// a per-shard file containing a simple list of object IDs to evacuate from
+// the specified shark (parent directory).  This structure takes a field,
+// `create_resolver` that will create a per-shard ObjectResolver that can be
+// used to lookup full object metadata for the list of IDs found in the
+// per-shard files.
+struct FileGenerator<C: CreateObjectResolver> {
     job_action: Arc<EvacuateJob>,
     directory: String,
     obj_tx: crossbeam_channel::Sender<EvacuateObject>,
-    getter: ObjectGetterType,
+    create_resolver: C,
 }
 
 #[derive(Debug, Fail)]
@@ -625,13 +586,13 @@ fn shard_num_from_pathbuf(shard_path_buf: &PathBuf) -> Result<i32, Error> {
 // we have of the object in the database and report failure back to the caller.
 fn retrieve_object(
     job_action: &Arc<EvacuateJob>,
-    obj_getter: &mut ObjectGetterArg,
+    obj_resolver: &mut ObjectResolverArg,
     obj_id: ObjectId,
     shard_num: i32,
 ) -> Result<EvacuateObject, Error> {
     assert!(shard_num > 0);
 
-    let moray_obj = match obj_getter.get_object(&obj_id) {
+    let moray_obj = match obj_resolver.get_object(&obj_id) {
         Ok(mobj) => mobj,
         Err(e) => {
             let msg = format!(
@@ -688,7 +649,7 @@ fn walk_obj_ids_in_file<P: AsRef<Path>>(
     job_action: Arc<EvacuateJob>,
     shard_file: P,
     obj_tx: crossbeam_channel::Sender<EvacuateObject>,
-    mut obj_getter: Box<dyn ObjectGetter + Send + 'static>,
+    mut obj_resolver: ObjectResolverArg,
 ) -> Result<(), Error> {
     debug!(
         "walking objects for shard: {:#?}",
@@ -717,7 +678,7 @@ fn walk_obj_ids_in_file<P: AsRef<Path>>(
         // continue.
         let mut eobj = match retrieve_object(
             &job_action,
-            &mut obj_getter,
+            &mut obj_resolver,
             obj_id,
             shard_num,
         ) {
@@ -824,7 +785,7 @@ fn path_buf_from_dirname(
     .into())
 }
 
-impl FileGenerator {
+impl<G: CreateObjectResolver> FileGenerator<G> {
     /// Validate that the input directory is of the form:
     /// <shark name>/
     ///     <per_shard object file>
@@ -879,7 +840,7 @@ impl FileGenerator {
 
     // Spawn a thread for every per-shard file up to a maximum configurable
     // amount.
-    fn walk_shards(&self) -> Result<(), Error> {
+    fn walk_shards(self) -> Result<(), Error> {
         let max_threads =
             self.job_action.config.options.max_metadata_read_threads;
         let pool = threadpool::ThreadPool::with_name(
@@ -905,11 +866,7 @@ impl FileGenerator {
             let job_action = Arc::clone(&self.job_action);
             let obj_tx = self.obj_tx.clone();
             let shard_num = shard_num_from_pathbuf(&shard)?;
-            let getter = self.getter.create(
-                job_action.from_shark.manta_storage_id.as_str(),
-                shard_num,
-                self.job_action.config.domain_name.as_str(),
-            )?;
+            let resolver = self.create_resolver.create(shard_num)?;
 
             let arc_success_map = Arc::clone(&success_map);
 
@@ -918,7 +875,7 @@ impl FileGenerator {
 
                 info!("Spawning thread for {}", shard.to_string_lossy());
                 if let Err(e) =
-                    walk_obj_ids_in_file(job_action, shard, obj_tx, getter)
+                    walk_obj_ids_in_file(job_action, shard, obj_tx, resolver)
                 {
                     error!("shard thread failed: {}", e);
                     msg = Some(e.to_string());
@@ -965,8 +922,12 @@ impl FileGenerator {
     }
 }
 
-impl ObjectGenerator for FileGenerator {
-    fn generate(self) -> Result<thread::JoinHandle<Result<(), Error>>, Error> {
+impl<C: CreateObjectResolver + Send + 'static> ObjectGenerator
+    for FileGenerator<C>
+{
+    fn generate_objects(
+        self,
+    ) -> Result<thread::JoinHandle<Result<(), Error>>, Error> {
         thread::Builder::new()
             .name(String::from("file_gen"))
             .spawn(move || {
@@ -987,7 +948,9 @@ impl ObjectGenerator for FileGenerator {
 }
 
 impl ObjectGenerator for SharkSpotterGenerator {
-    fn generate(self) -> Result<thread::JoinHandle<Result<(), Error>>, Error> {
+    fn generate_objects(
+        self,
+    ) -> Result<thread::JoinHandle<Result<(), Error>>, Error> {
         let job_action = self.job_action;
         let domain = job_action.config.domain_name.clone();
         let obj_tx = self.obj_tx;
@@ -2631,9 +2594,11 @@ fn start_generator_thread(
                 job_action: Arc::clone(&job_action),
                 directory: directory.to_owned(),
                 obj_tx,
-                getter: ObjectGetterType::Moray,
+                create_resolver: MorayObjectResolverBuilder {
+                    domain: job_action.config.domain_name.clone(),
+                },
             };
-            fgen.generate()
+            fgen.generate_objects()
         }
         ObjectSource::SharkSpotter => {
             let shark_gen = SharkSpotterGenerator {
@@ -2642,7 +2607,7 @@ fn start_generator_thread(
                 max_shard,
                 obj_tx,
             };
-            shark_gen.generate()
+            shark_gen.generate_objects()
         }
     }
 }
@@ -4398,6 +4363,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::jobs::evacuate::ObjectGenerator;
     use crate::metrics::metrics_init;
     use crate::storinfo::ChooseAlgorithm;
     use lazy_static::lazy_static;
@@ -4413,6 +4379,75 @@ mod tests {
 
     lazy_static! {
         static ref INITIALIZED: Mutex<bool> = Mutex::new(false);
+    }
+
+    struct FileObjectResolverBuilder {
+        path: String,
+        from_shark: String,
+        domain: String,
+    }
+
+    impl CreateObjectResolver for FileObjectResolverBuilder {
+        fn create(&self, shard_num: i32) -> Result<ObjectResolverArg, Error> {
+            let shark_dir = path_buf_from_dirname(
+                &self.from_shark,
+                &self.path,
+                &self.domain,
+            )
+            .map_err(|e| {
+                InternalError::new(
+                    Some(InternalErrorCode::ObjectNotFound),
+                    format!(
+                        "Could not create getter for {}: {}",
+                        self.from_shark, e
+                    ),
+                )
+            })?;
+
+            let shard_file_string = format!(
+                "{}/shard_{}.objs",
+                shark_dir.to_string_lossy(),
+                shard_num
+            );
+            let shard_file = Path::new(&shard_file_string).to_path_buf();
+            Ok(Box::new(FileObjectResolver { shard_file }))
+        }
+    }
+
+    struct FileObjectResolver {
+        shard_file: PathBuf,
+    }
+
+    impl ObjectResolver for FileObjectResolver {
+        fn get_object(
+            &mut self,
+            object_id: &ObjectId,
+        ) -> Result<MorayObject, Error> {
+            let shard_file = self.shard_file.clone();
+            let reader = BufReader::new(File::open(shard_file)?);
+            let msg: String;
+
+            for json_obj in reader.lines() {
+                let json_obj = json_obj?;
+                let moray_object: MorayObject =
+                    serde_json::from_str(json_obj.as_str())?;
+                let found_id =
+                    common::get_objectId_from_value(&moray_object.value)?;
+
+                if &found_id == object_id {
+                    return Ok(moray_object);
+                }
+            }
+
+            msg = format!("Could not find object with id: {}", object_id);
+            error!("{}", msg);
+
+            Err(InternalError::new(
+                Some(InternalErrorCode::ObjectNotFound),
+                msg,
+            )
+            .into())
+        }
     }
 
     #[derive(Deserialize, Serialize)]
@@ -4992,10 +5027,6 @@ mod tests {
         test_path: &str,
         test_objs_path: &str,
         from_shark: String,
-        func: fn(
-            fgen: FileGenerator,
-            obj_rx: crossbeam_channel::Receiver<EvacuateObject>,
-        ) -> u32,
     ) -> u32 {
         let (obj_tx, obj_rx) = crossbeam_channel::bounded(5);
 
@@ -5007,7 +5038,7 @@ mod tests {
 
         job_action.config.domain_name = "east.joyent.us".into();
 
-        job_action.from_shark.manta_storage_id = from_shark;
+        job_action.from_shark.manta_storage_id = from_shark.clone();
         let job_action = Arc::new(job_action);
 
         // Start the Generator
@@ -5015,33 +5046,28 @@ mod tests {
             job_action: Arc::clone(&job_action),
             directory: test_path.to_string(),
             obj_tx,
-            getter: ObjectGetterType::File(test_objs_path.to_string()),
+            create_resolver: FileObjectResolverBuilder {
+                domain: job_action.config.domain_name.clone(),
+                from_shark,
+                path: test_objs_path.into(),
+            },
         };
 
-        func(fgen, obj_rx)
-    }
+        let fgen_handle = fgen.generate_objects().expect("generate");
+        let mut received_count = 0;
 
-    fn get_basic_test_func() -> fn(
-        fgen: FileGenerator,
-        obj_rx: crossbeam_channel::Receiver<EvacuateObject>,
-    ) -> u32 {
-        move |fgen, obj_rx| {
-            let fgen_handle = fgen.generate().expect("generate");
-            let mut received_count = 0;
-
-            loop {
-                if let Ok(o) = obj_rx.recv() {
-                    debug!("{}", o.id);
-                    received_count += 1;
-                } else {
-                    break;
-                }
+        loop {
+            if let Ok(o) = obj_rx.recv() {
+                debug!("{}", o.id);
+                received_count += 1;
+            } else {
+                break;
             }
-
-            fgen_handle.join().expect("join fgen").expect("fgen result");
-
-            received_count
         }
+
+        fgen_handle.join().expect("join fgen").expect("fgen result");
+
+        received_count
     }
 
     // Get a count of the lines for all the files in this directory.
@@ -5091,13 +5117,11 @@ mod tests {
             format!("{}/testfiles/objs/", env!("CARGO_MANIFEST_DIR"));
 
         let expected_object_count = total_shard_line_count(&test_path);
-        let func = get_basic_test_func();
 
         let object_count = run_file_object_source_test(
             &test_path,
             &test_objs_path,
             "1.stor.east.joyent.us".into(),
-            func,
         );
 
         assert_eq!(expected_object_count, object_count);
@@ -5112,13 +5136,11 @@ mod tests {
             format!("{}/testfiles/objs/", env!("CARGO_MANIFEST_DIR"));
         let expected_object_count =
             total_shard_line_count(format!("{}/1.stor", &test_path).as_str());
-        let func = get_basic_test_func();
 
         let object_count = run_file_object_source_test(
             &test_path,
             &test_objs_path,
             "1.stor.east.joyent.us".into(),
-            func,
         );
 
         assert_eq!(expected_object_count, object_count);
@@ -5131,7 +5153,6 @@ mod tests {
         let test_path = format!("{}/testfiles/", env!("CARGO_MANIFEST_DIR"));
         let expected_object_count =
             total_shard_line_count(format!("{}/1.stor", &test_path).as_str());
-        let func = get_basic_test_func();
 
         let test_objs_path =
             format!("{}/testfiles/objs/1.stor", env!("CARGO_MANIFEST_DIR"));
@@ -5151,7 +5172,6 @@ mod tests {
             &test_path,
             &bad_objs_path,
             "1.stor.east.joyent.us".into(),
-            func,
         );
 
         // Clean up

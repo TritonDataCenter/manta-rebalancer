@@ -151,7 +151,9 @@ fn main() -> Result<(), String> {
                 .short("F")
                 .long("file_source")
                 .takes_value(true)
-                .help("Specify a path to the per-shark object IDs for this job"),
+                .help(
+                    "Specify a path to the per-shark object IDs for this job",
+                ),
         )
         .arg(
             Arg::with_name("max_objects")
