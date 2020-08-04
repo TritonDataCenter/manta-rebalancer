@@ -445,7 +445,14 @@ struct MorayObjectResolverBuilder {
 impl CreateObjectResolver for MorayObjectResolverBuilder {
     fn create(&self, shard_num: i32) -> Result<ObjectResolverArg, Error> {
         match moray_client::create_client(shard_num as u32, &self.domain) {
-            Ok(mclient) => Ok(Box::new(MorayObjectResolver { mclient })),
+            Ok(mclient) => {
+                let get_object_time = 0;
+                Ok(Box::new(MorayObjectResolver {
+                    mclient,
+                    get_object_time,
+                    shard_num,
+                }))
+            }
             Err(e) => {
                 let msg = format!(
                     "Failed to get Moray Client for shard {}: {}",
@@ -471,9 +478,12 @@ pub trait ObjectResolver {
         &mut self,
         object_id: &ObjectId,
     ) -> Result<MorayObject, Error>;
+    fn get_object_read_time(&self) -> u128;
 }
 
 struct MorayObjectResolver {
+    get_object_time: u128,
+    shard_num: i32,
     mclient: MorayClient,
 }
 
@@ -482,7 +492,18 @@ impl ObjectResolver for MorayObjectResolver {
         &mut self,
         object_id: &ObjectId,
     ) -> Result<MorayObject, Error> {
-        moray_client::get_object(&mut self.mclient, object_id)
+        let start = std::time::Instant::now();
+        let ret = moray_client::get_object(&mut self.mclient, object_id);
+        let elapsed = start.elapsed().as_millis();
+
+        self.get_object_time += elapsed;
+        debug!("shard {} object read took: {}ms", self.shard_num, elapsed);
+
+        ret
+    }
+
+    fn get_object_read_time(&self) -> u128 {
+        self.get_object_time
     }
 }
 
@@ -712,6 +733,12 @@ fn walk_obj_ids_in_file<P: AsRef<Path>>(
             return Err(e.into());
         }
     }
+    debug!(
+        "shard {} total metadata read time: {}",
+        shard_num,
+        obj_resolver.get_object_read_time()
+    );
+
     Ok(())
 }
 
@@ -4406,11 +4433,17 @@ mod tests {
                 shard_num
             );
             let shard_file = Path::new(&shard_file_string).to_path_buf();
-            Ok(Box::new(FileObjectResolver { shard_file }))
+
+            let get_object_time = 0;
+            Ok(Box::new(FileObjectResolver {
+                shard_file,
+                get_object_time,
+            }))
         }
     }
 
     struct FileObjectResolver {
+        get_object_time: u128,
         shard_file: PathBuf,
     }
 
@@ -4419,6 +4452,7 @@ mod tests {
             &mut self,
             object_id: &ObjectId,
         ) -> Result<MorayObject, Error> {
+            let start = std::time::Instant::now();
             let shard_file = self.shard_file.clone();
             let reader = BufReader::new(File::open(shard_file)?);
             let msg: String;
@@ -4431,9 +4465,11 @@ mod tests {
                     common::get_objectId_from_value(&moray_object.value)?;
 
                 if &found_id == object_id {
+                    self.get_object_time += start.elapsed().as_millis();
                     return Ok(moray_object);
                 }
             }
+            self.get_object_time += start.elapsed().as_millis();
 
             msg = format!("Could not find object with id: {}", object_id);
             error!("{}", msg);
@@ -4443,6 +4479,10 @@ mod tests {
                 msg,
             )
             .into())
+        }
+
+        fn get_object_read_time(&self) -> u128 {
+            self.get_object_time
         }
     }
 
