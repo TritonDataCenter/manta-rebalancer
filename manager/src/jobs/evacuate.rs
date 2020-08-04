@@ -52,7 +52,6 @@ use crossbeam_channel::TryRecvError;
 use crossbeam_deque::{Injector, Steal};
 use failure::Error as Failure;
 use failure::Fail;
-use fs3::FileExt;
 use lazy_static::lazy_static;
 use libmanta::moray::{MantaObject, MantaObjectShark};
 use moray::client::MorayClient;
@@ -657,12 +656,7 @@ fn walk_obj_ids_in_file<P: AsRef<Path>>(
     );
 
     let shard_num = shard_num_from_pathbuf(&shard_file.as_ref().to_path_buf())?;
-    let fd = File::open(shard_file.as_ref())?;
-    // Removing for now.   We continue to see "Bad file number (os error 9)"
-    // errors in testing.
-    // fd.try_lock_exclusive()?;
-    let reader = BufReader::new(fd);
-
+    let reader = BufReader::new(File::open(shard_file.as_ref())?);
     let fn_shark_match = |s: &MantaObjectShark| {
         s.manta_storage_id == job_action.from_shark.manta_storage_id
     };
@@ -4429,8 +4423,8 @@ mod tests {
             let reader = BufReader::new(File::open(shard_file)?);
             let msg: String;
 
-            for json_obj in reader.lines() {
-                let json_obj = json_obj?;
+            for line in reader.lines() {
+                let json_obj = line?;
                 let moray_object: MorayObject =
                     serde_json::from_str(json_obj.as_str())?;
                 let found_id =
