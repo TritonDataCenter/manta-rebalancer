@@ -8,10 +8,13 @@
  * Copyright 2020 Joyent, Inc.
  */
 use lazy_static::lazy_static;
-use prometheus::{opts, register_counter_vec, register_gauge};
+use prometheus::{
+    opts, register_counter_vec, register_gauge, register_histogram_vec,
+};
 use rebalancer::metrics::{
-    self, counter_vec_inc_by, gauge_dec, gauge_inc, gauge_set, Metrics,
-    MetricsMap, ERROR_COUNT, OBJECT_COUNT, REQUEST_COUNT,
+    self, counter_vec_inc_by, gauge_dec, gauge_inc, gauge_set,
+    histogram_vec_observe, Metrics, MetricsMap, ERROR_COUNT, OBJECT_COUNT,
+    REQUEST_COUNT,
 };
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -57,6 +60,9 @@ pub static SKIP_COUNT: &str = "skip_count";
 // Gauge for tracking the current number of active metadata update threads.
 pub static MD_THREAD_GAUGE: &str = "md_thread_gauge";
 
+// Histogram for tracking latencies of object-read operations.
+pub static OBJECT_READ_TIMES: &str = "object_read_times";
+
 // This method may come in handy if it is necessary to add more metrics to
 // our collector.
 pub fn metrics_get() -> &'static Mutex<Option<MetricsMap>> {
@@ -93,10 +99,23 @@ pub fn metrics_init(cfg: metrics::ConfigMetrics) {
         MD_THREAD_GAUGE,
         "Number of currently active metadata threads."
     )
-    .const_labels(labels))
+    .const_labels(labels.clone()))
     .expect("failed to register metadata thread gauge");
 
     metrics.insert(MD_THREAD_GAUGE, Metrics::MetricsGauge(md_thread_gauge));
+
+    // Metric for collecting object read times, broken down by shard.
+    let object_read_times = register_histogram_vec!(
+        histogram_opts!(OBJECT_READ_TIMES, "Object read times.")
+            .const_labels(labels),
+        &["shard"]
+    )
+    .expect("Failed to register object read times histogram.");
+
+    metrics.insert(
+        OBJECT_READ_TIMES,
+        Metrics::MetricsHistogramVec(object_read_times),
+    );
 
     // Take the fully formed set of metrics and store it globally.
     let mut global_metrics = METRICS.lock().unwrap();
@@ -170,4 +189,10 @@ pub fn metrics_gauge_inc(key: &str) {
 pub fn metrics_gauge_set(key: &str, val: usize) {
     let metrics = METRICS.lock().unwrap().clone();
     gauge_set(&metrics.expect("metrics"), key, val);
+}
+
+pub fn metrics_histogram_vec_observe(key: &str, bucket: &str, val: u128) {
+    let num = val as f64;
+    let metrics = METRICS.lock().unwrap().clone();
+    histogram_vec_observe(&metrics.expect("metrics"), key, bucket, num);
 }

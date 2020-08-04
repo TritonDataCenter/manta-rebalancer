@@ -10,8 +10,8 @@
 
 use crate::metrics::{
     metrics_error_inc, metrics_gauge_dec, metrics_gauge_inc, metrics_gauge_set,
-    metrics_object_inc_by, metrics_skip_inc, metrics_skip_inc_by,
-    ACTION_EVACUATE, MD_THREAD_GAUGE,
+    metrics_histogram_vec_observe, metrics_object_inc_by, metrics_skip_inc,
+    metrics_skip_inc_by, ACTION_EVACUATE, MD_THREAD_GAUGE, OBJECT_READ_TIMES,
 };
 use rebalancer::common::{
     self, AssignmentPayload, ObjectId, ObjectSkippedReason, Task, TaskStatus,
@@ -499,6 +499,11 @@ impl ObjectResolver for MorayObjectResolver {
         self.get_object_time += elapsed;
         debug!("shard {} object read took: {}ms", self.shard_num, elapsed);
 
+        metrics_histogram_vec_observe(
+            OBJECT_READ_TIMES,
+            &self.shard_num.to_string(),
+            elapsed,
+        );
         ret
     }
 

@@ -15,7 +15,7 @@ use hyper::{Request, Response};
 use lazy_static::lazy_static;
 use prometheus::{
     opts, register_counter, register_counter_vec, register_histogram, Counter,
-    CounterVec, Encoder, Gauge, Histogram, TextEncoder,
+    CounterVec, Encoder, Gauge, Histogram, HistogramVec, TextEncoder,
 };
 use serde_derive::Deserialize;
 use slog::{error, info, Logger};
@@ -61,6 +61,7 @@ pub enum Metrics {
     MetricsCounter(Counter),
     MetricsGauge(Gauge),
     MetricsHistogram(Histogram),
+    MetricsHistogramVec(HistogramVec),
 }
 
 lazy_static! {
@@ -174,6 +175,23 @@ pub fn histogram_observe<S: ::std::hash::BuildHasher>(
         Some(metric) => {
             if let Metrics::MetricsHistogram(h) = metric {
                 h.observe(val);
+            }
+        }
+        None => error!(slog_scope::logger(), "Invalid metric: {}", key),
+    }
+}
+
+#[allow(irrefutable_let_patterns)]
+pub fn histogram_vec_observe<S: ::std::hash::BuildHasher>(
+    metrics: &HashMap<&'static str, Metrics, S>,
+    key: &str,
+    bucket: &str,
+    val: f64,
+) {
+    match metrics.get(key) {
+        Some(metric) => {
+            if let Metrics::MetricsHistogramVec(h) = metric {
+                h.with_label_values(&[bucket]).observe(val);
             }
         }
         None => error!(slog_scope::logger(), "Invalid metric: {}", key),
