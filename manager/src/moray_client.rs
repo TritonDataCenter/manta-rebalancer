@@ -28,6 +28,7 @@ static MANTA_OBJECT_ID: &str = "objectId";
 
 // We can't use trust-dns-resolver here because it uses futures with a
 // block_on, and calling a block_on from within a block_on is not allowed.
+use rebalancer::common::ObjectId;
 use resolve::resolve_host;
 use resolve::{record::Srv, DnsConfig, DnsResolver};
 
@@ -65,6 +66,19 @@ fn get_moray_srv_sockaddr(host: &str) -> Result<SocketAddr, Error> {
     let ip = lookup_ip(&srv_record.target)?;
 
     Ok(SocketAddr::new(ip, srv_record.port))
+}
+
+// Create an LDAP style filter for moray's findObjects method.  The result
+// will be of the form:
+//      "(|(objectId=<object_uuid>)(objectId=<object_uuid>)...)"
+fn create_multi_object_filter(object_ids: &[ObjectId]) -> String {
+    let filter = object_ids
+        .iter()
+        .map(|o| format!("({}={})", MANTA_OBJECT_ID, o))
+        .collect::<Vec<String>>()
+        .join("");
+
+    format!("(|{})", filter)
 }
 
 // Create a moray client using the shard and the domain name only.  This will
@@ -149,28 +163,18 @@ pub fn put_object(
         .map_err(Error::from)
 }
 
-pub fn get_object(
+pub fn get_objects<F>(
     mclient: &mut MorayClient,
-    object_id: &str,
-) -> Result<MorayObject, Error> {
+    obj_ids: &[ObjectId],
+    object_handler: F,
+) -> Result<(), Error>
+where
+    F: FnMut(&MorayObject) -> Result<(), std::io::Error>,
+{
     let opts = ObjectMethodOptions::default();
-    let filter = format!("{}={}", MANTA_OBJECT_ID, object_id);
-    let mut ret: Option<MorayObject> = None;
+    let filter = create_multi_object_filter(obj_ids);
 
-    mclient.find_objects(MANTA_BUCKET, &filter, &opts, |o| {
-        ret = Some(o.to_owned());
-        Ok(())
-    })?;
-
-    match ret {
-        Some(r) => Ok(r),
-        None => {
-            let msg = format!("Error: Could not get object {}", object_id);
-            error!("{}", &msg);
-            Err(Error::from(InternalError::new(
-                Some(InternalErrorCode::ObjectNotFound),
-                msg,
-            )))
-        }
-    }
+    mclient
+        .find_objects(MANTA_BUCKET, &filter, &opts, object_handler)
+        .map_err(Error::from)
 }

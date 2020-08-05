@@ -34,7 +34,7 @@ use crate::pg_db;
 use crate::storinfo::{self as mod_storinfo, SharkSource, StorageNode};
 
 use std::collections::hash_map::Entry::{Occupied, Vacant};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::convert::{TryFrom, TryInto};
 use std::error::Error as _Error;
 use std::fs::{self, File};
@@ -88,6 +88,7 @@ use diesel::pg::{Pg, PgConnection, PgValue};
 use diesel::prelude::*;
 use diesel::serialize::{self, IsNull, Output, ToSql};
 use diesel::sql_types;
+use std::iter::FromIterator;
 
 // Note: The ordering of the fields in this table must match the ordering of
 // the fields in 'struct EvacuateObject'
@@ -225,6 +226,7 @@ pub enum EvacuateObjectError {
     MissingSharks,
     BadContentLength,
     MissingObject,
+    BadChunkMember,
 }
 
 impl Arbitrary for EvacuateObjectError {
@@ -435,22 +437,33 @@ type ObjectResolverArg = Box<dyn ObjectResolver + Send + 'static>;
 // interface for creation of that per-thread resolver.
 #[allow(clippy::ptr_arg)]
 pub trait CreateObjectResolver {
-    fn create(&self, shard_num: i32) -> Result<ObjectResolverArg, Error>;
+    fn create(
+        &self,
+        shard_num: i32,
+        obj_tx: crossbeam::Sender<EvacuateObject>,
+    ) -> Result<ObjectResolverArg, Error>;
 }
 
 struct MorayObjectResolverBuilder {
-    domain: String,
+    job_action: Arc<EvacuateJob>,
 }
 
 impl CreateObjectResolver for MorayObjectResolverBuilder {
-    fn create(&self, shard_num: i32) -> Result<ObjectResolverArg, Error> {
-        match moray_client::create_client(shard_num as u32, &self.domain) {
+    fn create(
+        &self,
+        shard_num: i32,
+        obj_tx: crossbeam::Sender<EvacuateObject>,
+    ) -> Result<ObjectResolverArg, Error> {
+        let domain = &self.job_action.config.domain_name;
+        match moray_client::create_client(shard_num as u32, domain) {
             Ok(mclient) => {
                 let get_object_time = 0;
                 Ok(Box::new(MorayObjectResolver {
+                    job_action: Arc::clone(&self.job_action),
                     mclient,
                     get_object_time,
                     shard_num,
+                    obj_tx,
                 }))
             }
             Err(e) => {
@@ -474,36 +487,170 @@ impl CreateObjectResolver for MorayObjectResolverBuilder {
 // it's own resolver.
 #[allow(clippy::ptr_arg)]
 pub trait ObjectResolver {
-    fn get_object(
-        &mut self,
-        object_id: &ObjectId,
-    ) -> Result<MorayObject, Error>;
+    // TODO: Consider returning the vector of objects that were successfully
+    // retrieved.
+    fn get_objects(&mut self, object_ids: &Vec<ObjectId>) -> Result<(), Error>;
     fn get_object_read_time(&self) -> u128;
 }
 
 struct MorayObjectResolver {
+    job_action: Arc<EvacuateJob>,
     get_object_time: u128,
     shard_num: i32,
+    obj_tx: crossbeam::Sender<EvacuateObject>,
     mclient: MorayClient,
 }
 
 impl ObjectResolver for MorayObjectResolver {
-    fn get_object(
-        &mut self,
-        object_id: &ObjectId,
-    ) -> Result<MorayObject, Error> {
+    fn get_objects(&mut self, object_ids: &Vec<ObjectId>) -> Result<(), Error> {
+        // TODO: fix metrics
         let start = std::time::Instant::now();
-        let ret = moray_client::get_object(&mut self.mclient, object_id);
-        let elapsed = start.elapsed().as_millis();
+        let obj_tx = self.obj_tx.clone();
+        let shard_num = self.shard_num;
+        let job_action = Arc::clone(&self.job_action);
 
-        self.get_object_time += elapsed;
-        debug!("shard {} object read took: {}ms", self.shard_num, elapsed);
+        let mut bad_chunk_members = 0;
+        let mut object_count = 0;
+        let mut obj_ids_remaining: HashSet<String> =
+            HashSet::from_iter(object_ids.iter().cloned());
 
-        metrics_histogram_vec_observe(
-            OBJECT_READ_TIMES,
-            &self.shard_num.to_string(),
-            elapsed,
+        let ret = moray_client::get_objects(
+            &mut self.mclient,
+            object_ids,
+            |moray_object| {
+                let fn_shark_match = |s: &MantaObjectShark| {
+                    s.manta_storage_id == job_action.from_shark.manta_storage_id
+                };
+
+                object_count += 1;
+
+                // Currently the only way this fails is if we cant get the object ID from
+                // the manta object.  That is a critical failure for this object, but we
+                // want to let our caller continue anyway.  The problem is our caller has
+                // no way to disambiguate between an object that has been deleted and an
+                // object that is malformed.  Callers should handle errors from this
+                // function as though all objects were malformed
+                let mut eobj =
+                    match EvacuateObject::try_from(moray_object.to_owned()) {
+                        Ok(obj) => obj,
+                        Err(mut partial_obj) => {
+                            partial_obj.shard = shard_num;
+                            error!(
+                                "Could not convert object: {:#?}",
+                                partial_obj
+                            );
+
+                            bad_chunk_members += 1;
+                            // Continue scanning
+                            return Ok(());
+                        }
+                    };
+
+                obj_ids_remaining.remove(&eobj.id);
+                eobj.shard = shard_num;
+
+                let sharks = match common::get_sharks_from_value(&eobj.object) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        error!(
+                            "Object missing sharks array: {:#?}\n{}",
+                            eobj, e
+                        );
+
+                        eobj.status = EvacuateObjectStatus::Error;
+                        eobj.error = Some(EvacuateObjectError::BadMantaObject);
+
+                        job_action.insert_into_db(&eobj);
+
+                        // continue scanning;
+                        return Ok(());
+                    }
+                };
+
+                if !sharks.iter().any(fn_shark_match) {
+                    job_action.skip_object(
+                        &mut eobj,
+                        ObjectSkippedReason::ObjectNotOnTarget,
+                    );
+
+                    // Continue with chunk
+                    return Ok(());
+                }
+
+                obj_tx
+                    .send(eobj)
+                    .map_err(CrossbeamError::from)
+                    .map_err(|e| {
+                        let msg = format!(
+                            "Assignment manager no longer accepting objects: {}",
+                            e
+                        );
+
+                        warn!("{}", msg);
+
+                        std::io::Error::new(std::io::ErrorKind::BrokenPipe, msg)
+                    })
+            },
         );
+
+        let elapsed = start.elapsed();
+        let elapsed_millis = elapsed.as_millis();
+
+        self.get_object_time += elapsed_millis;
+
+        debug!(
+            "shard {} object read {} objs in: {}ms",
+            self.shard_num, object_count, elapsed_millis
+        );
+
+        match elapsed.checked_div(object_count) {
+            Some(dur) => {
+                let per_object_millis = dur.as_millis();
+                metrics_histogram_vec_observe(
+                    OBJECT_READ_TIMES,
+                    &self.shard_num.to_string(),
+                    per_object_millis,
+                );
+            }
+            None => {
+                warn!(
+                    "Could not get per object read duration for {} \
+                     objects",
+                    object_count
+                );
+            }
+        }
+
+        let err = if bad_chunk_members > 0 {
+            error!(
+                "Found {} bad chunk members, marking all {} missing objects \
+                 as bad chunk members",
+                bad_chunk_members,
+                obj_ids_remaining.len()
+            );
+            Some(EvacuateObjectError::BadChunkMember)
+        } else {
+            Some(EvacuateObjectError::MissingObject)
+        };
+
+        // Walk the list of object ids that were not returned from moray and mark
+        // them as missing
+        for obj_id in obj_ids_remaining {
+            error!(
+                "Attempt to rebalance missing or malformed object: {}",
+                obj_id
+            );
+
+            let id_only_eobj = EvacuateObject {
+                id: obj_id,
+                shard: shard_num,
+                status: EvacuateObjectStatus::Error,
+                error: err,
+                ..Default::default()
+            };
+            job_action.insert_into_db(&id_only_eobj);
+        }
+
         ret
     }
 
@@ -607,73 +754,9 @@ fn shard_num_from_pathbuf(shard_path_buf: &PathBuf) -> Result<i32, Error> {
     Ok(shard_num)
 }
 
-// Retrieve one object.  If an error occurs during the retrieval store what
-// we have of the object in the database and report failure back to the caller.
-fn retrieve_object(
-    job_action: &Arc<EvacuateJob>,
-    obj_resolver: &mut ObjectResolverArg,
-    obj_id: ObjectId,
-    shard_num: i32,
-) -> Result<EvacuateObject, Error> {
-    assert!(shard_num > 0);
-
-    let moray_obj = match obj_resolver.get_object(&obj_id) {
-        Ok(mobj) => mobj,
-        Err(e) => {
-            let msg = format!(
-                "Attempt to rebalance missing object: {:#?} ({})",
-                obj_id, e
-            );
-            error!("{}", msg);
-
-            let id_only_eobj = EvacuateObject {
-                id: obj_id,
-                shard: shard_num,
-                status: EvacuateObjectStatus::Error,
-                error: Some(EvacuateObjectError::MissingObject),
-                ..Default::default()
-            };
-
-            job_action.insert_into_db(&id_only_eobj);
-
-            // Continue scanning
-            return Err(InternalError::new(
-                Some(InternalErrorCode::ObjectNotFound),
-                msg,
-            )
-            .into());
-        }
-    };
-
-    let mut eobj = match EvacuateObject::try_from(moray_obj) {
-        Ok(obj) => obj,
-        Err(mut partial_obj) => {
-            partial_obj.id = obj_id.clone();
-            partial_obj.shard = shard_num;
-            error!("Inserting Bad Object: {}", obj_id);
-
-            job_action.insert_into_db(&partial_obj);
-
-            // Continue scanning
-            return Err(InternalError::new(
-                Some(InternalErrorCode::BadMantaObject),
-                "Could not convert \
-                 Moray Object into Evacuate Object"
-                    .to_string(),
-            )
-            .into());
-        }
-    };
-
-    eobj.shard = shard_num;
-
-    Ok(eobj)
-}
-
 fn walk_obj_ids_in_file<P: AsRef<Path>>(
     job_action: Arc<EvacuateJob>,
     shard_file: P,
-    obj_tx: crossbeam_channel::Sender<EvacuateObject>,
     mut obj_resolver: ObjectResolverArg,
 ) -> Result<(), Error> {
     debug!(
@@ -681,63 +764,52 @@ fn walk_obj_ids_in_file<P: AsRef<Path>>(
         shard_file.as_ref().to_path_buf()
     );
 
+    let mut obj_id_vec = vec![];
+    let mut batch_count = 0;
     let shard_num = shard_num_from_pathbuf(&shard_file.as_ref().to_path_buf())?;
     let reader = BufReader::new(File::open(shard_file.as_ref())?);
-    let fn_shark_match = |s: &MantaObjectShark| {
-        s.manta_storage_id == job_action.from_shark.manta_storage_id
-    };
+    let mut max_objects_trigger = false;
 
     for obj_id in reader.lines() {
         if job_action.object_counter_check_inc() {
             info!("Max objects limit reached");
+            // TODO: get batch
+            max_objects_trigger = true;
+        } else {
+            obj_id_vec.push(obj_id?);
+            batch_count += 1;
+        }
+
+        if batch_count >= job_action.config.options.md_read_chunk_size
+            || max_objects_trigger
+        {
+            debug!(
+                "Attempting to resolve {} objects for shard {}",
+                obj_id_vec.len(),
+                shard_num
+            );
+            // There are a few different ways this function could fail.  In
+            // most ways it can handle it's own errors and allow this walk to
+            // continue.
+            // TODO: Error handling
+            obj_resolver.get_objects(&obj_id_vec)?;
+            obj_id_vec.clear();
+        }
+
+        if max_objects_trigger {
             break;
         }
-
-        let obj_id = obj_id?;
-
-        // There are a few different ways this function could fail.  In
-        // most ways it can handle it's own errors and allow this walk to
-        // continue.
-        let mut eobj = match retrieve_object(
-            &job_action,
-            &mut obj_resolver,
-            obj_id,
-            shard_num,
-        ) {
-            Ok(o) => o,
-            Err(_) => {
-                continue;
-            }
-        };
-
-        // If this object is not on the target shark, skip it.  We would
-        // catch this later in the process when we try to update metadata,
-        // but that would create cuft on the destination shark.
-        let sharks = common::get_sharks_from_value(&eobj.object)?;
-        if !sharks.iter().any(fn_shark_match) {
-            job_action
-                .skip_object(&mut eobj, ObjectSkippedReason::ObjectNotOnTarget);
-            continue;
-        }
-
-        if let Err(e) =
-            obj_tx
-                .send(eobj)
-                .map_err(CrossbeamError::from)
-                .map_err(|e| {
-                    warn!(
-                        "Assignment manager no longer accepting objects: {}",
-                        e
-                    );
-                    InternalError::new(
-                        Some(InternalErrorCode::Crossbeam),
-                        e.description(),
-                    )
-                })
-        {
-            return Err(e.into());
-        }
     }
+
+    if !obj_id_vec.is_empty() {
+        debug!(
+            "Resolving final {} objects for shard {}",
+            obj_id_vec.len(),
+            shard_num
+        );
+        obj_resolver.get_objects(&obj_id_vec)?;
+    }
+
     debug!(
         "shard {} total metadata read time: {}",
         shard_num,
@@ -892,9 +964,10 @@ impl<G: CreateObjectResolver> FileGenerator<G> {
         for shard in fs::read_dir(dir.as_path())? {
             let shard = shard?.path();
             let job_action = Arc::clone(&self.job_action);
-            let obj_tx = self.obj_tx.clone();
             let shard_num = shard_num_from_pathbuf(&shard)?;
-            let resolver = self.create_resolver.create(shard_num)?;
+            let resolver = self
+                .create_resolver
+                .create(shard_num, self.obj_tx.clone())?;
 
             let arc_success_map = Arc::clone(&success_map);
 
@@ -903,7 +976,7 @@ impl<G: CreateObjectResolver> FileGenerator<G> {
 
                 info!("Spawning thread for {}", shard.to_string_lossy());
                 if let Err(e) =
-                    walk_obj_ids_in_file(job_action, shard, obj_tx, resolver)
+                    walk_obj_ids_in_file(job_action, shard, resolver)
                 {
                     error!("shard thread failed: {}", e);
                     msg = Some(e.to_string());
@@ -2623,7 +2696,7 @@ fn start_generator_thread(
                 directory: directory.to_owned(),
                 obj_tx,
                 create_resolver: MorayObjectResolverBuilder {
-                    domain: job_action.config.domain_name.clone(),
+                    job_action: Arc::clone(&job_action),
                 },
             };
             fgen.generate_objects()
@@ -4416,7 +4489,11 @@ mod tests {
     }
 
     impl CreateObjectResolver for FileObjectResolverBuilder {
-        fn create(&self, shard_num: i32) -> Result<ObjectResolverArg, Error> {
+        fn create(
+            &self,
+            shard_num: i32,
+            obj_tx: crossbeam::Sender<EvacuateObject>,
+        ) -> Result<ObjectResolverArg, Error> {
             let shark_dir = path_buf_from_dirname(
                 &self.from_shark,
                 &self.path,
@@ -4443,6 +4520,7 @@ mod tests {
             Ok(Box::new(FileObjectResolver {
                 shard_file,
                 get_object_time,
+                obj_tx,
             }))
         }
     }
@@ -4450,18 +4528,19 @@ mod tests {
     struct FileObjectResolver {
         get_object_time: u128,
         shard_file: PathBuf,
+        obj_tx: crossbeam::Sender<EvacuateObject>,
     }
 
     impl ObjectResolver for FileObjectResolver {
-        fn get_object(
+        fn get_objects(
             &mut self,
-            object_id: &ObjectId,
-        ) -> Result<MorayObject, Error> {
+            object_ids: &Vec<ObjectId>,
+        ) -> Result<(), Error> {
             let start = std::time::Instant::now();
             let shard_file = self.shard_file.clone();
             let reader = BufReader::new(File::open(shard_file)?);
-            let msg: String;
 
+            debug!("looking for any of {:#?}", object_ids);
             for line in reader.lines() {
                 let json_obj = line?;
                 let moray_object: MorayObject =
@@ -4469,21 +4548,17 @@ mod tests {
                 let found_id =
                     common::get_objectId_from_value(&moray_object.value)?;
 
-                if &found_id == object_id {
-                    self.get_object_time += start.elapsed().as_millis();
-                    return Ok(moray_object);
+                debug!("found ID: {}", found_id);
+
+                if object_ids.contains(&found_id) {
+                    let eobj = EvacuateObject::try_from(moray_object)
+                        .expect("evacuate object");
+
+                    self.obj_tx.send(eobj).expect("obj_tx send");
                 }
             }
             self.get_object_time += start.elapsed().as_millis();
-
-            msg = format!("Could not find object with id: {}", object_id);
-            error!("{}", msg);
-
-            Err(InternalError::new(
-                Some(InternalErrorCode::ObjectNotFound),
-                msg,
-            )
-            .into())
+            Ok(())
         }
 
         fn get_object_read_time(&self) -> u128 {
