@@ -503,7 +503,12 @@ struct MorayObjectResolver {
 
 impl ObjectResolver for MorayObjectResolver {
     fn get_objects(&mut self, object_ids: &Vec<ObjectId>) -> Result<(), Error> {
-        // TODO: fix metrics
+
+        if object_ids.is_empty() {
+            warn!("attempted to get 0 objects for shard: {}", self.shard_num);
+            return Ok(());
+        }
+
         let start = std::time::Instant::now();
         let obj_tx = self.obj_tx.clone();
         let shard_num = self.shard_num;
@@ -541,7 +546,8 @@ impl ObjectResolver for MorayObjectResolver {
                             );
 
                             bad_chunk_members += 1;
-                            // Continue scanning
+
+                            // continue scanning
                             return Ok(());
                         }
                     };
@@ -562,7 +568,7 @@ impl ObjectResolver for MorayObjectResolver {
 
                         job_action.insert_into_db(&eobj);
 
-                        // continue scanning;
+                        // continue scanning
                         return Ok(());
                     }
                 };
@@ -573,7 +579,7 @@ impl ObjectResolver for MorayObjectResolver {
                         ObjectSkippedReason::ObjectNotOnTarget,
                     );
 
-                    // Continue with chunk
+                    // continue scanning
                     return Ok(());
                 }
 
@@ -788,6 +794,7 @@ fn walk_obj_ids_in_file<P: AsRef<Path>>(
                 obj_id_vec.len(),
                 shard_num
             );
+
             // There are a few different ways this function could fail.  In
             // most ways it can handle it's own errors and allow this walk to
             // continue.
@@ -1566,7 +1573,7 @@ impl EvacuateJob {
 
         // TODO: How big should each channel be?
         // Set up channels for thread to communicate.
-        let (obj_tx, obj_rx) = crossbeam::bounded(5);
+        let (obj_tx, obj_rx) = crossbeam::bounded(50);
         let (full_assignment_tx, full_assignment_rx) = crossbeam::bounded(5);
         let (md_update_tx, md_update_rx) = crossbeam::bounded(5);
         let (checker_fini_tx, checker_fini_rx) = crossbeam::bounded(1);
