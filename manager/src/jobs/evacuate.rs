@@ -503,7 +503,6 @@ struct MorayObjectResolver {
 
 impl ObjectResolver for MorayObjectResolver {
     fn get_objects(&mut self, object_ids: &Vec<ObjectId>) -> Result<(), Error> {
-
         if object_ids.is_empty() {
             warn!("attempted to get 0 objects for shard: {}", self.shard_num);
             return Ok(());
@@ -513,6 +512,7 @@ impl ObjectResolver for MorayObjectResolver {
         let obj_tx = self.obj_tx.clone();
         let shard_num = self.shard_num;
         let job_action = Arc::clone(&self.job_action);
+        let job_action_closure = Arc::clone(&self.job_action);
 
         let mut bad_chunk_members = 0;
         let mut object_count = 0;
@@ -523,79 +523,15 @@ impl ObjectResolver for MorayObjectResolver {
             &mut self.mclient,
             object_ids,
             |moray_object| {
-                let fn_shark_match = |s: &MantaObjectShark| {
-                    s.manta_storage_id == job_action.from_shark.manta_storage_id
-                };
-
-                object_count += 1;
-
-                // Currently the only way this fails is if we cant get the object ID from
-                // the manta object.  That is a critical failure for this object, but we
-                // want to let our caller continue anyway.  The problem is our caller has
-                // no way to disambiguate between an object that has been deleted and an
-                // object that is malformed.  Callers should handle errors from this
-                // function as though all objects were malformed
-                let mut eobj =
-                    match EvacuateObject::try_from(moray_object.to_owned()) {
-                        Ok(obj) => obj,
-                        Err(mut partial_obj) => {
-                            partial_obj.shard = shard_num;
-                            error!(
-                                "Could not convert object: {:#?}",
-                                partial_obj
-                            );
-
-                            bad_chunk_members += 1;
-
-                            // continue scanning
-                            return Ok(());
-                        }
-                    };
-
-                obj_ids_remaining.remove(&eobj.id);
-                eobj.shard = shard_num;
-
-                let sharks = match common::get_sharks_from_value(&eobj.object) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        error!(
-                            "Object missing sharks array: {:#?}\n{}",
-                            eobj, e
-                        );
-
-                        eobj.status = EvacuateObjectStatus::Error;
-                        eobj.error = Some(EvacuateObjectError::BadMantaObject);
-
-                        job_action.insert_into_db(&eobj);
-
-                        // continue scanning
-                        return Ok(());
-                    }
-                };
-
-                if !sharks.iter().any(fn_shark_match) {
-                    job_action.skip_object(
-                        &mut eobj,
-                        ObjectSkippedReason::ObjectNotOnTarget,
-                    );
-
-                    // continue scanning
-                    return Ok(());
-                }
-
-                obj_tx
-                    .send(eobj)
-                    .map_err(CrossbeamError::from)
-                    .map_err(|e| {
-                        let msg = format!(
-                            "Assignment manager no longer accepting objects: {}",
-                            e
-                        );
-
-                        warn!("{}", msg);
-
-                        std::io::Error::new(std::io::ErrorKind::BrokenPipe, msg)
-                    })
+                get_moray_object_handler(
+                    &job_action_closure,
+                    moray_object,
+                    &mut obj_ids_remaining,
+                    obj_tx.clone(),
+                    &mut object_count,
+                    &mut bad_chunk_members,
+                    shard_num,
+                )
             },
         );
 
@@ -663,6 +599,83 @@ impl ObjectResolver for MorayObjectResolver {
     fn get_object_read_time(&self) -> u128 {
         self.get_object_time
     }
+}
+
+fn get_moray_object_handler(
+    job_action: &Arc<EvacuateJob>,
+    moray_object: &MorayObject,
+    obj_ids_remaining: &mut HashSet<String>,
+    obj_tx: crossbeam::Sender<EvacuateObject>,
+    object_count: &mut u32,
+    bad_chunk_members: &mut u32,
+    shard_num: i32,
+) -> Result<(), std::io::Error> {
+    let fn_shark_match = |s: &MantaObjectShark| {
+        s.manta_storage_id == job_action.from_shark.manta_storage_id
+    };
+
+    *object_count += 1;
+
+    // Currently the only way this fails is if we cant get the object ID from
+    // the manta object.  That is a critical failure for this object, but we
+    // want to let our caller continue anyway.  The problem is our caller has
+    // no way to disambiguate between an object that has been deleted and an
+    // object that is malformed.  Callers should handle errors from this
+    // function as though all objects were malformed
+    let mut eobj = match EvacuateObject::try_from(moray_object.to_owned()) {
+        Ok(obj) => obj,
+        Err(mut partial_obj) => {
+            partial_obj.shard = shard_num;
+            error!("Could not convert object: {:#?}", partial_obj);
+
+            *bad_chunk_members += 1;
+
+            // continue scanning
+            return Ok(());
+        }
+    };
+
+    obj_ids_remaining.remove(&eobj.id);
+    eobj.shard = shard_num;
+
+    trace!("got object {}", eobj.id);
+
+    let sharks = match common::get_sharks_from_value(&eobj.object) {
+        Ok(s) => s,
+        Err(e) => {
+            error!("Object missing sharks array: {:#?}\n{}", eobj, e);
+
+            eobj.status = EvacuateObjectStatus::Error;
+            eobj.error = Some(EvacuateObjectError::BadMantaObject);
+
+            job_action.insert_into_db(&eobj);
+
+            // continue scanning
+            return Ok(());
+        }
+    };
+
+    if !sharks.iter().any(fn_shark_match) {
+        job_action
+            .skip_object(&mut eobj, ObjectSkippedReason::ObjectNotOnTarget);
+
+        // continue scanning
+        return Ok(());
+    }
+
+    obj_tx
+        .send(eobj)
+        .map_err(CrossbeamError::from)
+        .map_err(|e| {
+            let msg = format!(
+                "Assignment manager no longer accepting objects: {}",
+                e
+            );
+
+            warn!("{}", msg);
+
+            std::io::Error::new(std::io::ErrorKind::BrokenPipe, msg)
+        })
 }
 
 // Anything implementing the ObjectGenerator trait generates EvacuateObjects
