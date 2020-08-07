@@ -59,8 +59,6 @@ fn lookup_ip(host: &str) -> Result<IpAddr, Error> {
 
 fn get_moray_srv_sockaddr(host: &str) -> Result<SocketAddr, Error> {
     let srv_record = get_srv_record("_moray", "_tcp", &host)?;
-    dbg!(&srv_record);
-
     let ip = lookup_ip(&srv_record.target)?;
 
     Ok(SocketAddr::new(ip, srv_record.port))
