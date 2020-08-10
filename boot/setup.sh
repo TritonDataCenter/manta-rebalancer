@@ -42,4 +42,11 @@ cp /opt/smartdc/rebalancer/etc/postgresql.conf /rebalancer/pg/data/
 manta_common2_setup_log_rotation "rebalancer"
 manta_common2_setup_end
 
+# metricPorts are scraped by cmon-agent for prometheus metrics.
+#
+# 8878 is the metrics port for manta-rebalancer (i.e. the rebalaner manager).  This
+# port is currently not configurable, so it is specified directly here.
+#
+mdata-put metricPorts "8878"
+
 exit 0
