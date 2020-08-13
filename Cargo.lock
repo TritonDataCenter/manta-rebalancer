@@ -2451,7 +2451,7 @@ dependencies = [
 [[package]]
 name = "sharkspotter"
 version = "0.16.2"
-source = "git+https://github.com/joyent/rust-sharkspotter?branch=better_errors#26b98c4966fd9bfe872a9d0cd6c05bf17d5ca8d5"
+source = "git+https://github.com/joyent/rust-sharkspotter?branch=better_errors#7a3c8ed2cfc747410682fc7b924c77464b87e721"
 dependencies = [
  "assert_cli 0.6.3 (registry+https://github.com/rust-lang/crates.io-index)",
  "clap 2.33.0 (registry+https://github.com/rust-lang/crates.io-index)",
