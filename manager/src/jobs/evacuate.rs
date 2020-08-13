@@ -3857,12 +3857,13 @@ mod tests {
                     )
                     .expect("moray value");
 
-                    let manta_value = sharkspotter::manta_obj_from_moray_obj
-                        (&moray_value)
-                        .expect("manta value");
+                    let manta_value =
+                        sharkspotter::manta_obj_from_moray_obj(&moray_value)
+                            .expect("manta value");
 
-                    let etag = sharkspotter::etag_from_moray_value
-                        (&moray_value).expect("etag from moray value");
+                    let etag =
+                        sharkspotter::etag_from_moray_value(&moray_value)
+                            .expect("etag from moray value");
 
                     let ssobj = SharkspotterMessage {
                         manta_value,
