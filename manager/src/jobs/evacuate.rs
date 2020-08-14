@@ -591,42 +591,14 @@ impl TryFrom<SharkspotterMessage> for EvacuateObject {
     type Error = EvacuateObject;
 
     fn try_from(ss_msg: SharkspotterMessage) -> Result<Self, Self::Error> {
-        // For now we consider a poorly formatted moray object or a
-        // missing objectId to be critical failures.  We cannot
-        // insert an evacuate object without an objectId.
-        let manta_object =
-            sharkspotter::manta_obj_from_moray_obj(&ss_msg.value)
-                .expect("manta obj from moray obj");
-
-        let id = common::get_objectId_from_value(&manta_object)
+        let id = common::get_objectId_from_value(&ss_msg.manta_value)
             .expect("object ID from manta object Value");
 
         let mut eobj = EvacuateObject {
             id,
-            object: manta_object,
+            object: ss_msg.manta_value,
+            etag: ss_msg.etag,
             ..Default::default()
-        };
-
-        // If we fail to get the etag then we can't rebalance this
-        // object.  We give the caller back what we have and let it decide
-        // what to do.
-        let etag = match ss_msg.value.get("_etag") {
-            Some(tag) => match serde_json::to_string(tag) {
-                Ok(t) => t.replace("\"", ""),
-                Err(e) => {
-                    error!("Cannot convert etag to string: {}", e);
-                    eobj.status = EvacuateObjectStatus::Error;
-                    eobj.error = Some(EvacuateObjectError::BadMorayObject);
-
-                    return Err(eobj);
-                }
-            },
-            None => {
-                error!("Missing etag: {:?}", ss_msg);
-                eobj.status = EvacuateObjectStatus::Error;
-                eobj.error = Some(EvacuateObjectError::BadMorayObject);
-                return Err(eobj);
-            }
         };
 
         // TODO: build a test for this
@@ -639,7 +611,6 @@ impl TryFrom<SharkspotterMessage> for EvacuateObject {
         }
 
         eobj.shard = ss_msg.shard as i32;
-        eobj.etag = etag;
 
         Ok(eobj)
     }
@@ -729,7 +700,7 @@ impl EvacuateJob {
 
         // TODO: How big should each channel be?
         // Set up channels for thread to communicate.
-        let (obj_tx, obj_rx) = crossbeam::bounded(5);
+        let (obj_tx, obj_rx) = crossbeam::bounded(100);
         let (full_assignment_tx, full_assignment_rx) = crossbeam::bounded(5);
         let (md_update_tx, md_update_rx) = crossbeam::bounded(5);
         let (checker_fini_tx, checker_fini_rx) = crossbeam::bounded(1);
@@ -1972,6 +1943,7 @@ fn start_sharkspotter(
         max_shard,
         sharks: vec![shark.to_string()],
         chunk_size: job_action.config.options.md_read_chunk_size as u64,
+        direct_db: true,
         ..Default::default()
     };
 
@@ -1982,7 +1954,7 @@ fn start_sharkspotter(
     thread::Builder::new()
         .name(String::from("sharkspotter"))
         .spawn(move || {
-            sharkspotter::run_multithreaded(config, log, obj_tx)
+            sharkspotter::run_multithreaded(&config, log, obj_tx)
                 .map_err(Error::from)
         })
         .map_err(Error::from)
@@ -3885,8 +3857,17 @@ mod tests {
                     )
                     .expect("moray value");
 
+                    let manta_value =
+                        sharkspotter::manta_obj_from_moray_obj(&moray_value)
+                            .expect("manta value");
+
+                    let etag =
+                        sharkspotter::etag_from_moray_value(&moray_value)
+                            .expect("etag from moray value");
+
                     let ssobj = SharkspotterMessage {
-                        value: moray_value,
+                        manta_value,
+                        etag,
                         shark: from_shark.clone(),
                         shard,
                     };

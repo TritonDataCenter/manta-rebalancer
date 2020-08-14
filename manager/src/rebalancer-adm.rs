@@ -129,7 +129,7 @@ fn process_subcmd_job(job_matches: &ArgMatches) -> Result<(), String> {
 }
 
 fn main() -> Result<(), String> {
-    let evacuate = App::new("evacuate")
+    let evacuate_subcommand = App::new("evacuate")
         .about("Create an evacuate job")
         .arg(
             Arg::with_name("shark")
@@ -161,8 +161,6 @@ fn main() -> Result<(), String> {
                         .about("Get information on a specific job")
                         .arg(
                             Arg::with_name("uuid")
-                                .short("u")
-                                .long("uuid")
                                 .takes_value(true)
                                 .required(true)
                                 .help("Uuid of a job"),
@@ -178,7 +176,7 @@ fn main() -> Result<(), String> {
                         .about("Create a rebalancer job")
                         .setting(AppSettings::SubcommandRequiredElseHelp)
                         // Create evacuate job
-                        .subcommand(evacuate),
+                        .subcommand(evacuate_subcommand),
                 ),
         )
         .get_matches();
@@ -252,10 +250,10 @@ mod rebalancer_adm_tests {
         let err_msg = indoc!(
             "
             error: The following required arguments were not provided:
-                --uuid <uuid>
+                <uuid>
 
             USAGE:
-                rebalancer-adm job get --uuid <uuid>
+                rebalancer-adm job get <uuid>
             "
         );
 
