@@ -45,7 +45,7 @@ use crossbeam_channel;
 use diesel::query_dsl::{QueryDsl, RunQueryDsl};
 use diesel::PgConnection;
 use futures::{future, Future};
-use gotham::handler::{Handler, HandlerFuture, NewHandler};
+use gotham::handler::{Handler, HandlerFuture, IntoResponse, NewHandler};
 use gotham::helpers::http::response::create_response;
 use gotham::middleware::Middleware;
 use gotham::pipeline::new_pipeline;
@@ -53,6 +53,7 @@ use gotham::pipeline::set::{finalize_pipeline_set, new_pipeline_set};
 use gotham::router::builder::{build_router, DefineSingleRoute, DrawRoutes};
 use gotham::router::Router;
 use gotham::state::{FromState, State};
+use hyper::header::HeaderValue;
 use hyper::{Body, Response, StatusCode};
 use lazy_static::lazy_static;
 use manager::jobs::evacuate::EvacuateJobUpdateMessage;
@@ -79,6 +80,23 @@ struct JobList {
 #[derive(Deserialize, StateData, StaticResponseExtender)]
 struct UpdateJobParams {
     uuid: String,
+}
+
+pub fn get_version() -> String {
+    let version = env!("CARGO_PKG_VERSION");
+    let name = env!("CARGO_PKG_NAME");
+
+    // Attempt to obtain the information associated with this build (i.e. the
+    // build stamp).  If one does not exist, then it means that it was built
+    // without using Makefile targets.  In such a case, indicate that with the
+    // marker "no-STAMP" which intended to be unique enough to easily grep from
+    // the log file(s).
+    let buildstamp = match option_env!("STAMP") {
+        Some(s) => s.to_owned(),
+        None => "no-STAMP".to_owned(),
+    };
+
+    format!("rebalancer-{} {} ({})", name, version, buildstamp)
 }
 
 fn add_update_channel(
@@ -433,14 +451,31 @@ impl Handler for JobCreateHandler {
 }
 
 #[derive(NewMiddleware, Copy, Clone)]
-struct NoopMiddleware;
+struct BaseMiddleware;
 
-impl Middleware for NoopMiddleware {
+impl Middleware for BaseMiddleware {
     fn call<Chain>(self, state: State, chain: Chain) -> Box<HandlerFuture>
     where
         Chain: FnOnce(State) -> Box<HandlerFuture> + Send + 'static,
     {
-        chain(state)
+        let result = chain(state);
+        let f = result.then(move |result| {
+            let (state, mut response) = match result {
+                Ok((s, r)) => (s, r),
+                Err((s, err)) => {
+                    let res = err.into_response(&s);
+                    (s, res)
+                }
+            };
+            let headers = response.headers_mut();
+            let version_str = get_version();
+            let value = HeaderValue::from_str(&version_str).unwrap();
+            headers.insert("Server", value);
+
+            future::ok((state, response))
+        });
+
+        Box::new(f)
     }
 }
 
@@ -503,20 +538,24 @@ fn router(config: Arc<Mutex<Config>>) -> Router {
     }
 
     let ps_builder = new_pipeline_set();
-    let (ps_builder, noop) =
-        ps_builder.add(new_pipeline().add(NoopMiddleware).build());
+    let (ps_builder, base) =
+        ps_builder.add(new_pipeline().add(BaseMiddleware).build());
 
-    let (ps_builder, db_conn) =
-        ps_builder.add(new_pipeline().add(DBConnMiddleware).build());
+    let (ps_builder, db_conn) = ps_builder.add(
+        new_pipeline()
+            .add(DBConnMiddleware)
+            .add(BaseMiddleware)
+            .build(),
+    );
 
     let ps = finalize_pipeline_set(ps_builder);
 
-    let noop_pipeline = (noop, ());
+    let base_pipeline = (base, ());
     let db_conn_pipeline = (db_conn, ());
 
-    // By default we use the NoopPipeline.  If a given route needs a specific
+    // By default we use the BasePipeline.  If a given route needs a specific
     // pipeline, then specify it via `.with_pipeline_chain()`
-    let rtr = build_router(noop_pipeline, ps, |route| {
+    let rtr = build_router(base_pipeline, ps, |route| {
         route.with_pipeline_chain(db_conn_pipeline, |route| {
             route
                 .put("/jobs/:uuid")
