@@ -205,9 +205,9 @@ fn main() -> Result<(), String> {
 
 #[cfg(test)]
 mod rebalancer_adm_tests {
+    use super::*;
     use assert_cli;
     use indoc::indoc;
-    use super::*;
 
     #[test]
     fn no_params() {
