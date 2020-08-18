@@ -9,12 +9,23 @@
  */
 
 use clap::{App, AppSettings, Arg, ArgMatches};
+use hyper::HeaderMap;
 use manager::jobs::{EvacuateJobPayload, JobPayload};
 use reqwest;
 use serde_json::Value;
 use std::result::Result;
 
 pub static JOBS_URL: &str = "http://localhost/jobs";
+
+fn output_common(response_headers: HeaderMap, message: String) {
+    let version = match response_headers.get("server") {
+        Some(v) => v.to_str().unwrap_or("unknown"),
+        None => "unknown",
+    };
+
+    println!("server version: {}", version);
+    println!("{}", message);
+}
 
 // Common function used in order to get a list of jobs, or get specific job
 // information.  The contents of the response are evaluated and printed by
@@ -30,6 +41,8 @@ fn get_common(url: &str) -> Result<(), String> {
         return Err(format!("Failed to post job: {}", response.status()));
     }
 
+    let headers = response.headers().clone();
+
     let v: Value = match response.json() {
         Ok(v) => v,
         Err(e) => return Err(format!("Failed to parse response body: {}", &e)),
@@ -40,7 +53,7 @@ fn get_common(url: &str) -> Result<(), String> {
         Err(e) => return Err(format!("Failed to deserialize: {}", &e)),
     };
 
-    println!("{}", result);
+    output_common(headers, result);
     Ok(())
 }
 
@@ -105,13 +118,15 @@ fn job_create_evacuate(matches: &ArgMatches) -> Result<(), String> {
         return Err(format!("Server response: {}", response.status()));
     }
 
+    let headers = response.headers().clone();
+
     // Parse out the job uuid from the response payload.
     let job_uuid = match response.text() {
         Ok(j) => j,
         Err(e) => return Err(format!("Failed to parse response: {}", e)),
     };
 
-    println!("{}", job_uuid);
+    output_common(headers, job_uuid);
     Ok(())
 }
 
