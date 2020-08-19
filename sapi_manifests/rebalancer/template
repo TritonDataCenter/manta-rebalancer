@@ -16,6 +16,13 @@
         "max_metadata_update_threads": 10,
         {{/REBALANCER_MAX_METADATA_UPDATE_THREADS}}
 
+        {{#REBALANCER_MAX_METADATA_READ_THREADS}}
+        "max_metadata_update_threads": {{REBALANCER_MAX_METADATA_READ_THREADS}},
+        {{/REBALANCER_MAX_METADATA_READ_THREADS}}
+        {{^REBALANCER_MAX_METADATA_READ_THREADS}}
+        "max_metadata_update_threads": 10,
+        {{/REBALANCER_MAX_METADATA_READ_THREADS}}
+
         {{#REBALANCER_MAX_SHARKS}}
         "max_sharks": {{REBALANCER_MAX_SHARKS}},
         {{/REBALANCER_MAX_SHARKS}}
