@@ -55,6 +55,10 @@ static DEFAULT_MAX_ASSIGNMENT_AGE: u64 = 600;
 // The chunk size used when scanning the metadata tier.
 static DEFAULT_METADATA_READ_CHUNK_SIZE: usize = 500;
 
+// Default maximum number of per-shard threads that we will use to scan the
+// metadata tier.
+static DEFAULT_MAX_METADATA_READ_THREADS: usize = 10;
+
 pub const MAX_TUNABLE_MD_UPDATE_THREADS: usize = 250;
 
 #[derive(Deserialize, Default, Debug, Clone)]
@@ -75,6 +79,7 @@ pub struct ConfigOptions {
     pub max_assignment_age: u64,
     pub use_batched_updates: bool,
     pub md_read_chunk_size: usize,
+    pub max_md_read_threads: usize,
 }
 
 impl Default for ConfigOptions {
@@ -88,6 +93,7 @@ impl Default for ConfigOptions {
             max_assignment_age: DEFAULT_MAX_ASSIGNMENT_AGE,
             use_batched_updates: true,
             md_read_chunk_size: DEFAULT_METADATA_READ_CHUNK_SIZE,
+            max_md_read_threads: DEFAULT_MAX_METADATA_READ_THREADS,
         }
     }
 }
