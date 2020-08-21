@@ -964,6 +964,10 @@ impl EvacuateJob {
                 let locked = lock.lock().expect("lock cv");
                 let _ = cv.wait(locked).expect("cv wait");
 
+                let assignment_cache_size = {
+                    self.assignments.read().expect("assignment read lock").len()
+                };
+
                 if assignment_cache_size < hiwat_cache_size {
                     info!(
                         "assignment cache size has reduced below {}, \
