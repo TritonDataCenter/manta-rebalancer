@@ -814,6 +814,11 @@ impl EvacuateJob {
             job_action.md_update_time.load(Ordering::SeqCst)
         );
 
+        debug_assert!(job_action
+            .assignments
+            .read()
+            .expect("read lock")
+            .is_empty());
         if !job_action.assignments.read().expect("read lock").is_empty() {
             return Err(InternalError::new(
                 Some(InternalErrorCode::Other),
@@ -1316,9 +1321,12 @@ impl EvacuateJob {
             });
 
         debug!(
-            "Marking {} objects in assignment ({}) as error: {:?}",
+            "Marked {} objects in assignment ({}) as error: {:?}",
             update_cnt, assignment_uuid, err
         );
+
+        debug!("Removing error assignment from cache: {}", assignment_uuid);
+        self.remove_assignment_from_cache(&assignment_uuid);
 
         update_cnt
     }
@@ -1539,6 +1547,7 @@ impl EvacuateJob {
 /// 2. Update assignment that has been successfully posted to the Agent into the
 ///    EvacauteJob's assignment cache.
 /// 4. Implicitly drop (free) the Assignment on return.
+// Assignment Hash Inserter
 fn assignment_post_success(
     job_action: &EvacuateJob,
     mut assignment: Assignment,
@@ -1784,6 +1793,8 @@ impl ProcessAssignment for EvacuateJob {
                 // we JUST tried looking it up and that failed.  The best we
                 // can do is update the associated objects in the local DB
                 // with this function call below.
+                // We don't need to worry about removing it from the
+                // assignment cache because it apparently isn't in there.
                 self.mark_assignment_skipped(
                     &agent_assignment.uuid,
                     ObjectSkippedReason::AssignmentMismatch,
@@ -2415,6 +2426,7 @@ where
 
 // Insert the assignment into the assignment cache then send it to the post
 // thread.
+// Assignment Hash Inserter.
 fn _channel_send_assignment(
     job_action: Arc<EvacuateJob>,
     full_assignment_tx: &crossbeam_channel::Sender<Assignment>,
