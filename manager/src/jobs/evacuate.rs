@@ -41,13 +41,12 @@ use std::io::Write;
 use std::str::FromStr;
 use std::string::ToString;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::thread;
 use std::time::Duration;
 
 use crossbeam_channel as crossbeam;
 use crossbeam_channel::TryRecvError;
-use crossbeam_deque::{Injector, Steal};
 use libmanta::moray::{MantaObject, MantaObjectShark};
 use moray::client::MorayClient;
 use moray::objects::{
@@ -546,7 +545,7 @@ impl EvacuateJobUpdateMessage {
     }
 }
 
-enum DyanmicWorkerMsg {
+enum DynamicWorkerMsg {
     Data(AssignmentCacheEntry),
     Stop,
 }
@@ -582,6 +581,8 @@ pub struct EvacuateJob {
     pub object_movement_start_time: Mutex<Option<std::time::Instant>>,
 
     pub update_rx: Option<crossbeam_channel::Receiver<JobUpdateMessage>>,
+
+    pub assignment_full_cv: Arc<(Mutex<()>, Condvar)>,
 
     /// TESTING ONLY
     pub max_objects: Option<u32>,
@@ -656,6 +657,7 @@ impl EvacuateJob {
             bytes_transferred: AtomicU64::new(0),
             object_movement_start_time: Mutex::new(None),
             md_update_time: AtomicU64::new(0),
+            assignment_full_cv: Arc::new((Mutex::new(()), Condvar::new())),
         })
     }
 
@@ -924,6 +926,52 @@ impl EvacuateJob {
             "Assignment cache reduced by {}",
             initial_size - assignment_cache_usage(&assignments)
         );
+
+        let (lock, cv) = &*self.assignment_full_cv;
+        let _ = lock.lock().expect("cv lock");
+        cv.notify_one();
+    }
+
+    // If we are over the max_assignment_cache_size, this function blocks until
+    // we drop below the high water mark of 90% of the
+    // max_assignment_cache_size.
+    fn check_assignment_cache_hiwat(&self) {
+        let assignment_cache_size =
+            { self.assignments.read().expect("assignment read lock").len() };
+        debug!("assignment cache size {}", assignment_cache_size);
+
+        if assignment_cache_size > self.config.options.max_assignment_cache_size
+        {
+            info!("exceeded cache size waiting");
+            let hiwat_cache_size =
+                self.config.options.max_assignment_cache_size * 0.9 as usize;
+
+            info!(
+                "Setting assignment cache high water mark to: {}",
+                hiwat_cache_size
+            );
+
+            loop {
+                let (lock, cv) = &*self.assignment_full_cv;
+                let locked = lock.lock().expect("lock cv");
+                let _ = cv.wait(locked).expect("cv wait");
+
+                if assignment_cache_size < hiwat_cache_size {
+                    info!(
+                        "assignment cache size has reduced below {}, \
+                         continuing to process objects",
+                        hiwat_cache_size
+                    );
+                    break;
+                }
+
+                info!(
+                    "assignment_cache_size {} still above high water mark \
+                     of {}, waiting for more reduction",
+                    assignment_cache_size, hiwat_cache_size
+                );
+            }
+        }
     }
 
     fn skip_object(
@@ -2108,6 +2156,15 @@ where
         let mut shark_hash: HashMap<StorageId, SharkHashEntry> = HashMap::new();
 
         while !done {
+            //If our assignment cache size has grown beyond the
+            // configured max_assignment_cache_size, this function blocks
+            // until we drop below a fraction of it.
+            // This is intended to provide back pressure to sharkspotter when
+            // our metadata read threads or rebalancer agents can't keep up
+            // with the speed that sharkspotter finds matching objects for us
+            // to rebalance.
+            job_action.check_assignment_cache_hiwat();
+
             // TODO: MANTA-4519
             // get a fresh shark list
             let mut shark_list =
@@ -2915,9 +2972,10 @@ fn start_assignment_checker(
                         continue;
                     }
 
-                    debug!(
+                    trace!(
                         "Assignment Checker, checking: {} | {:?}",
-                        ace.id, ace.state
+                        ace.id,
+                        ace.state
                     );
 
                     // TODO: Async/await candidate
@@ -2933,7 +2991,7 @@ fn start_assignment_checker(
                             }
                         };
 
-                    debug!("Got Assignment: {:?}", ag_assignment);
+                    trace!("Got Assignment: {:?}", ag_assignment);
                     // If agent assignment is complete, process it and pass
                     // it to the metadata update broker.  Otherwise, continue
                     // to next assignment.
@@ -2943,6 +3001,10 @@ fn start_assignment_checker(
                             // because we have issues handling one assignment.
                             // The process() function should mark the
                             // associated objects appropriately.
+                            debug!(
+                                "Processing Assignment: {:?}",
+                                ag_assignment
+                            );
                             job_action.process(ag_assignment).unwrap_or_else(
                                 |e| {
                                     error!("Error Processing Assignment {}", e);
@@ -2978,8 +3040,8 @@ fn start_assignment_checker(
 
                 // TODO: MANTA-5106
                 if found_assignment_count == 0 {
-                    trace!("Found 0 completed assignments, sleeping for 100ms");
-                    thread::sleep(Duration::from_millis(100));
+                    debug!("Found 0 completed assignments, sleeping for 500ms");
+                    thread::sleep(Duration::from_millis(500));
                     continue;
                 }
 
@@ -3050,12 +3112,12 @@ fn metadata_update_worker_static(
     }
 }
 
-// This worker continues to run as long as the queue has entries for it to
-// work on.  If, when the worker attempts to "steal" from the queue, the
-// queue is empty the worker exits.
+// This worker continues to run as long as the channel has entries for it to
+// work on.  If/when the worker attempts to read from the channel and it is
+// empty the worker exits.
 fn metadata_update_worker_dynamic(
     job_action: Arc<EvacuateJob>,
-    queue_front: Arc<Injector<DyanmicWorkerMsg>>,
+    dwm_rx: crossbeam::Receiver<DynamicWorkerMsg>,
 ) -> impl Fn() {
     move || {
         // For each worker we create a hash of moray clients indexed by shard.
@@ -3073,24 +3135,29 @@ fn metadata_update_worker_dynamic(
             thread::current().id()
         );
 
-        // If the queue is empty or we receive a Stop message, then break out
+        // If the channel is empty or we receive a Stop message, then break out
         // of the loop and return.
-        //
-        // If we get a retry error then, retry.
         //
         // Otherwise get the assignment cache entry and process it.
         loop {
-            let ace = match queue_front.steal() {
-                Steal::Success(dwm) => match dwm {
-                    DyanmicWorkerMsg::Data(a) => a,
-                    DyanmicWorkerMsg::Stop => {
+            let ace = match dwm_rx.try_recv() {
+                Ok(dwm) => match dwm {
+                    DynamicWorkerMsg::Data(a) => a,
+                    DynamicWorkerMsg::Stop => {
                         debug!("Received stop message, exiting");
                         break;
                     }
                 },
-                Steal::Retry => continue,
-                Steal::Empty => break,
+                Err(e) => {
+                    trace!(
+                        "No work found in queue, dynamic worker queue \
+                         exiting: {}",
+                        e
+                    );
+                    break;
+                }
             };
+
             metadata_update_assignment(&job_action, ace, &mut client_hash);
         }
 
@@ -3427,10 +3494,10 @@ fn metadata_update_assignment(
 
 fn update_dynamic_metadata_threads(
     pool: &mut ThreadPool,
-    queue_back: &Arc<Injector<DyanmicWorkerMsg>>,
+    dwm_tx: crossbeam::Sender<DynamicWorkerMsg>,
     max_thread_count: &mut usize,
     msg: JobUpdateMessage,
-) {
+) -> Result<(), String> {
     // Currently there is only one valid message here so we
     // can use this irrefutable pattern.
     // If we add any additional messages we have to use match
@@ -3451,7 +3518,13 @@ fn update_dynamic_metadata_threads(
     // Otherwise the logic below will handle spinning up
     // more worker threads if they are needed.
     for _ in difference..0 {
-        queue_back.push(DyanmicWorkerMsg::Stop);
+        if let Err(e) = dwm_tx.send(DynamicWorkerMsg::Stop) {
+            return Err(format!(
+                "Error sending stop to dynamic worker \
+                 threads: {}",
+                e
+            ));
+        }
     }
     *max_thread_count = new_worker_count;
     pool.set_num_threads(*max_thread_count);
@@ -3460,6 +3533,8 @@ fn update_dynamic_metadata_threads(
         "Max number of metadata update threads set to: {}",
         max_thread_count
     );
+
+    Ok(())
 }
 
 /// This thread runs until EvacuateJob Completion.
@@ -3498,13 +3573,14 @@ fn metadata_update_broker_dynamic(
     job_action: Arc<EvacuateJob>,
     md_update_rx: crossbeam::Receiver<AssignmentCacheEntry>,
 ) -> Result<thread::JoinHandle<Result<(), Error>>, Error> {
+    let queue_depth = job_action.config.options.metadata_queue_depth;
     let mut max_thread_count =
         job_action.config.options.max_metadata_update_threads;
     let mut pool = ThreadPool::with_name(
         "Dyn_MD_Update".into(),
         job_action.config.options.max_metadata_update_threads,
     );
-    let queue = Arc::new(Injector::<DyanmicWorkerMsg>::new());
+    let (dwm_tx, dwm_rx) = crossbeam_channel::bounded(queue_depth);
     let update_rx = match &job_action.update_rx {
         Some(urx) => urx.clone(),
         None => panic!(
@@ -3518,39 +3594,56 @@ fn metadata_update_broker_dynamic(
             loop {
                 if let Ok(msg) = update_rx.try_recv() {
                     debug!("Received metadata update message: {:#?}", msg);
-                    update_dynamic_metadata_threads(
+                    if let Err(e) = update_dynamic_metadata_threads(
                         &mut pool,
-                        &queue,
+                        dwm_tx.clone(),
                         &mut max_thread_count,
                         msg,
-                    );
+                    ) {
+                        error!("Error updating dynamic workers: {}", e);
+                    }
                 }
+
                 let ace = match md_update_rx.recv() {
                     Ok(ace) => ace,
                     Err(e) => {
-                        // If the queue is empty and there are no active or
-                        // queued threads, kick one off to drain the queue.
-                        if !queue.is_empty()
-                            && pool.active_count() == 0
-                            && pool.queued_count() == 0
-                        {
-                            let worker = metadata_update_worker_dynamic(
-                                Arc::clone(&job_action),
-                                Arc::clone(&queue),
-                            );
+                        // If the channel is empty and there are no active or
+                        // queued threads, kick some off to drain the queue.
 
-                            pool.execute(worker);
+                        // XXX: it is possible that we could spin up worker
+                        // here that simply consume DynamicWorkerMsg::Stop
+                        // messages.  So we use a for loop to kick off enough
+                        // threads to consume every message if all of them
+                        // are stops.  We are done, but it is possible that
+                        // we could spin up way more threads than needed.
+                        // The threadpool should leave them in the queued
+                        // state, but we could probably improve the logic here.
+                        if pool.active_count() == 0 && pool.queued_count() == 0
+                        {
+                            for _ in 0..dwm_tx.len() {
+                                let worker = metadata_update_worker_dynamic(
+                                    Arc::clone(&job_action),
+                                    dwm_rx.clone(),
+                                );
+
+                                pool.execute(worker);
+                            }
                         }
-                        error!(
-                            "MD Update: Error receiving metadata from \
-                             assignment checker thread: {}",
+
+                        info!(
+                            "MD Update: no data from assignment checker \
+                             thread: {}",
                             e
                         );
+
                         break;
                     }
                 };
 
-                queue.push(DyanmicWorkerMsg::Data(ace));
+                if let Err(e) = dwm_tx.send(DynamicWorkerMsg::Data(ace)) {
+                    error!("Could not send msg to worker thread: {}", e);
+                    break;
+                }
 
                 // If all the pools threads are devoted to workers there's
                 // really no reason to queue up a new worker.
@@ -3569,7 +3662,7 @@ fn metadata_update_broker_dynamic(
                 // XXX: async/await candidate?
                 let worker = metadata_update_worker_dynamic(
                     Arc::clone(&job_action),
-                    Arc::clone(&queue),
+                    dwm_rx.clone(),
                 );
 
                 pool.execute(worker);
@@ -3594,7 +3687,7 @@ fn _update_broker_static(
     md_update_rx: crossbeam::Receiver<AssignmentCacheEntry>,
 ) -> Result<(), Error> {
     let num_threads = job_action.config.options.max_metadata_update_threads;
-    let queue_depth = job_action.config.options.static_queue_depth;
+    let queue_depth = job_action.config.options.metadata_queue_depth;
     let (static_tx, static_rx) = crossbeam_channel::bounded(queue_depth);
     let mut thread_handles = vec![];
 
@@ -4401,6 +4494,9 @@ mod tests {
                     }
 
                     println!("Task COUNT {}", task_count);
+                    verif_job_action
+                        .remove_assignment_from_cache(&assignment.id);
+                    // remove assignment from cache
                 }
 
                 use self::evacuateobjects::dsl::{
@@ -4713,7 +4809,7 @@ mod tests {
     fn full_test() {
         unit_test_init();
 
-        let num_objects: usize = 100;
+        let num_objects: usize = 1000;
         let mut g = StdThreadGen::new(10);
         let mut test_objects = HashMap::new();
 

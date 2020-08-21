@@ -40,11 +40,13 @@ static DEFAULT_MAX_METADATA_UPDATE_THREADS: usize = 2;
 // different set of sharks each time we get a snapshot from the storinfo zone.
 static DEFAULT_MAX_SHARKS: usize = 5;
 
-// The number of elements the bounded metadata update queue will be set to.
+// The number of assignments the bounded metadata update queue will be set to.
 // For evacuate jobs this represents the number of assignments that can be in
 // the post processing state waiting for a metadata update thread to become
 // available.
-static DEFAULT_STATIC_QUEUE_DEPTH: usize = 10;
+// This also represents the maximum number of assignments that will have to be
+// cleared before a reduction in metadata threads will be applied.
+static DEFAULT_METADATA_QUEUE_DEPTH: usize = 1000;
 
 // The maximum amount of time in seconds that an assignment should remain in
 // memory before it is posted to an agent.  This is not a hard and fast rule.
@@ -59,6 +61,13 @@ static DEFAULT_METADATA_READ_CHUNK_SIZE: usize = 500;
 // metadata tier.
 static DEFAULT_MAX_METADATA_READ_THREADS: usize = 10;
 
+// The maximum number of outstanding assignments that have been assigned but
+// not completed (updated metadata or marked skipped/error) yet.  This
+// implies the max number of "outstanding objects" is:
+// max_tasks_per_assignment * max_assignment_cache_size
+// E.g.: 300 * 5000 = 1.5 million
+static DEFAULT_MAX_ASSIGNMENT_CACHE_SIZE: usize = 5000;
+
 pub const MAX_TUNABLE_MD_UPDATE_THREADS: usize = 250;
 
 #[derive(Deserialize, Default, Debug, Clone)]
@@ -72,10 +81,11 @@ pub struct Shard {
 #[serde(default)]
 pub struct ConfigOptions {
     pub max_tasks_per_assignment: usize,
+    pub max_assignment_cache_size: usize,
     pub max_metadata_update_threads: usize,
     pub max_sharks: usize,
     pub use_static_md_update_threads: bool,
-    pub static_queue_depth: usize,
+    pub metadata_queue_depth: usize,
     pub max_assignment_age: u64,
     pub use_batched_updates: bool,
     pub md_read_chunk_size: usize,
@@ -86,10 +96,11 @@ impl Default for ConfigOptions {
     fn default() -> ConfigOptions {
         ConfigOptions {
             max_tasks_per_assignment: DEFAULT_MAX_TASKS_PER_ASSIGNMENT,
+            max_assignment_cache_size: DEFAULT_MAX_ASSIGNMENT_CACHE_SIZE,
             max_metadata_update_threads: DEFAULT_MAX_METADATA_UPDATE_THREADS,
             max_sharks: DEFAULT_MAX_SHARKS,
             use_static_md_update_threads: false,
-            static_queue_depth: DEFAULT_STATIC_QUEUE_DEPTH,
+            metadata_queue_depth: DEFAULT_METADATA_QUEUE_DEPTH,
             max_assignment_age: DEFAULT_MAX_ASSIGNMENT_AGE,
             use_batched_updates: true,
             md_read_chunk_size: DEFAULT_METADATA_READ_CHUNK_SIZE,
@@ -474,8 +485,8 @@ mod tests {
         assert_eq!(config.options.max_sharks, 3333);
         assert_eq!(config.options.use_static_md_update_threads, false);
         assert_eq!(
-            config.options.static_queue_depth,
-            DEFAULT_STATIC_QUEUE_DEPTH
+            config.options.metadata_queue_depth,
+            DEFAULT_METADATA_QUEUE_DEPTH
         );
         assert_eq!(
             config.options.max_assignment_age,

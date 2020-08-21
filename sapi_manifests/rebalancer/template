@@ -9,6 +9,13 @@
         "max_tasks_per_assignment": 50,
         {{/REBALANCER_MAX_TASKS_PER_ASSIGNMENT}}
 
+        {{#REBALANCER_MAX_ASSIGNMENT_CACHE_SIZE}}
+        "max_assignment_cache_size": {{REBALANCER_MAX_ASSIGNMENT_CACHE_SIZE}},
+        {{/REBALANCER_MAX_ASSIGNMENT_CACHE_SIZE}}
+        {{^REBALANCER_MAX_ASSIGNMENT_CACHE_SIZE}}
+        "max_assignment_cache_size": 5000,
+        {{/REBALANCER_MAX_ASSIGNMENT_CACHE_SIZE}}
+
         {{#REBALANCER_MAX_METADATA_UPDATE_THREADS}}
         "max_metadata_update_threads": {{REBALANCER_MAX_METADATA_UPDATE_THREADS}},
         {{/REBALANCER_MAX_METADATA_UPDATE_THREADS}}
@@ -37,12 +44,12 @@
         "use_static_md_update_threads": false,
         {{/REBALANCER_USE_STATIC_MD_UPDATE_THREADS}}
 
-        {{#REBALANCER_STATIC_QUEUE_DEPTH}}
-        "static_queue_depth": {{REBALANCER_STATIC_QUEUE_DEPTH}},
-        {{/REBALANCER_STATIC_QUEUE_DEPTH}}
-        {{^REBALANCER_STATIC_QUEUE_DEPTH}}
-        "static_queue_depth": 10,
-        {{/REBALANCER_STATIC_QUEUE_DEPTH}}
+        {{#REBALANCER_METADATA_QUEUE_DEPTH}}
+        "metadata_queue_depth": {{REBALANCER_METADATA_QUEUE_DEPTH}},
+        {{/REBALANCER_METADATA_QUEUE_DEPTH}}
+        {{^REBALANCER_METADATA_QUEUE_DEPTH}}
+        "metadata_queue_depth": 10000,
+        {{/REBALANCER_METADATA_QUEUE_DEPTH}}
 
         {{#REBALANCER_MAX_ASSIGNMENT_AGE}}
         "max_assignment_age": {{REBALANCER_MAX_ASSIGNMENT_AGE}},
