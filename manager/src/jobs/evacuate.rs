@@ -814,6 +814,14 @@ impl EvacuateJob {
             job_action.md_update_time.load(Ordering::SeqCst)
         );
 
+        if !job_action.assignments.read().expect("read lock").is_empty() {
+            return Err(InternalError::new(
+                Some(InternalErrorCode::Other),
+                "Assignment hash not empty",
+            )
+            .into());
+        }
+
         ret
     }
 
@@ -936,15 +944,15 @@ impl EvacuateJob {
     // we drop below the high water mark of 90% of the
     // max_assignment_cache_size.
     fn check_assignment_cache_hiwat(&self) {
+        let max_size = self.config.options.max_assignment_cache_size;
         let assignment_cache_size =
             { self.assignments.read().expect("assignment read lock").len() };
         debug!("assignment cache size {}", assignment_cache_size);
 
-        if assignment_cache_size > self.config.options.max_assignment_cache_size
-        {
+        if assignment_cache_size > max_size {
             info!("exceeded cache size waiting");
             let hiwat_cache_size =
-                self.config.options.max_assignment_cache_size * 0.9 as usize;
+                std::cmp::max(1, (max_size as f32 * 0.9) as usize);
 
             info!(
                 "Setting assignment cache high water mark to: {}",
@@ -2156,7 +2164,7 @@ where
         let mut shark_hash: HashMap<StorageId, SharkHashEntry> = HashMap::new();
 
         while !done {
-            //If our assignment cache size has grown beyond the
+            // If our assignment cache size has grown beyond the
             // configured max_assignment_cache_size, this function blocks
             // until we drop below a fraction of it.
             // This is intended to provide back pressure to sharkspotter when
