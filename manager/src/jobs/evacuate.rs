@@ -4886,8 +4886,12 @@ mod tests {
         let (md_update_tx, md_update_rx) = crossbeam::bounded(5);
         let (checker_fini_tx, checker_fini_rx) = crossbeam::bounded(1);
 
-        // Job Action
-        let job_action = Arc::new(create_test_evacuate_job(num_objects));
+        // Create a job action that is very likely to invoke the assignment
+        // cache size limit
+        let mut evac_job = create_test_evacuate_job(num_objects);
+        evac_job.config.options.max_assignment_cache_size = 2;
+
+        let job_action = Arc::new(evac_job);
 
         for _ in 0..num_objects {
             let mobj = MantaObject::arbitrary(&mut g);
