@@ -30,10 +30,13 @@ BASE_IMAGE_UUID = 59ba2e5e-976f-4e09-8aac-a4a7ef0395f5
 BUILDIMAGE_NAME = mantav2-rebalancer
 BUILDIMAGE_DESC = Manta Rebalancer
 AGENTS          = amon config registrar
+# XXX timf: experimentally removing Postgres 11 in the rebalancer image and
+# replacing with our own Postgres 9.6 set of patches to see whether this
+# impacts rebalancer memory use
 # Biasing to postgresql v11 over v10 to match the postgresql11-client that
 # is installed in the jenkins-agent build zones for 19.4.0 (per buckets-mdapi's
 # requirements).
-BUILDIMAGE_PKGSRC = postgresql11-server-11.6 postgresql11-client-11.6
+#BUILDIMAGE_PKGSRC = postgresql11-server-11.6 postgresql11-client-11.6
 
 ENGBLD_USE_BUILDIMAGE   = true
 
@@ -56,7 +59,7 @@ debug:
 	cp manager/src/config.json target/debug/
 
 .PHONY: release
-release: all deps/manta-scripts/.git $(SMF_MANIFESTS)
+release: all pg deps/manta-scripts/.git $(SMF_MANIFESTS)
 	@echo "Building $(RELEASE_TARBALL)"
 	# application dir
 	@mkdir -p $(RELSTAGEDIR)/root/opt/smartdc/$(NAME)/bin
@@ -89,6 +92,12 @@ publish: release pkg_agent
 	cp $(TOP)/$(RELEASE_TARBALL) $(ENGBLD_BITS_DIR)/$(NAME)/$(RELEASE_TARBALL)
 	cp $(TOP)/$(AGENT_TARBALL) $(ENGBLD_BITS_DIR)/$(NAME)/$(AGENT_TARBALL)
 	cp $(TOP)/$(AGENT_MANIFEST) $(ENGBLD_BITS_DIR)/$(NAME)/$(AGENT_MANIFEST)
+
+.PHONY: pg
+pg: deps/postgresql96/.git
+	PATH=/usr/bin:$$PATH $(MAKE) -f Makefile.postgres \
+	RELSTAGEDIR="$(RELSTAGEDIR)" \
+	DEPSDIR="$(TOP)/deps" pg96
 
 doc:
 	$(CARGO) doc
