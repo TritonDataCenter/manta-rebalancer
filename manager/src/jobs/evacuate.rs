@@ -3854,7 +3854,7 @@ mod tests {
         obj_tx: &crossbeam_channel::Sender<SharkspotterMessage>,
         obj: MantaObject,
         from_shark: &str,
-    ) {
+    ) -> Result<(), Error> {
         let shard = 1;
         let etag = String::from("Fake_etag");
         let mobj_value =
@@ -3880,7 +3880,10 @@ mod tests {
             shard,
         };
 
-        obj_tx.send(ssobj).expect("send one test object");
+        obj_tx.send(ssobj).map_err(|e| {
+            let msg = format!("Send one object : {}", e);
+            InternalError::new(None, msg).into()
+        })
     }
 
     fn start_test_obj_generator_thread(
@@ -3892,7 +3895,11 @@ mod tests {
             .name(String::from("test object generator thread"))
             .spawn(move || {
                 for (_, o) in test_objects.into_iter() {
-                    send_one_test_object(&obj_tx, o, &from_shark);
+                    if let Err(e) = send_one_test_object(&obj_tx, o,
+                                                         &from_shark) {
+                        error!("{}", e);
+                        break;
+                    }
                 }
             })
             .expect("failed to build object generator thread")
@@ -4726,7 +4733,9 @@ mod tests {
         let mut generator = StdThreadGen::new(10);
         for _ in 0..num_objects {
             let mobj = MantaObject::arbitrary(&mut generator);
-            send_one_test_object(&obj_tx, mobj, &from_shark);
+            if send_one_test_object(&obj_tx, mobj, &from_shark).is_err() {
+                break;
+            }
         }
     }
 
@@ -4735,6 +4744,7 @@ mod tests {
         unit_test_init();
 
         let num_objects: usize = 100000;
+        let pool_size = 50;
         let mut g = StdThreadGen::new(10);
 
         struct MockStorinfo;
@@ -4771,12 +4781,13 @@ mod tests {
         let (checker_fini_tx, checker_fini_rx) = crossbeam::bounded(1);
 
         // Job Action
-        let job_action = Arc::new(create_test_evacuate_job(num_objects));
+        let job_action = Arc::new(create_test_evacuate_job(num_objects *
+            pool_size + 1));
 
         // Threads
         let pool = threadpool::Builder::new()
             .thread_name("generator thread".to_string())
-            .num_threads(50)
+            .num_threads(pool_size)
             .build();
 
         for _ in 0..50 {
