@@ -965,24 +965,25 @@ impl EvacuateJob {
             );
 
             loop {
-                let (lock, cv) = &*self.assignment_full_cv;
-                let locked = lock.lock().expect("lock cv");
-                //                let _ = cv.wait(locked).expect("cv wait");
+                // assignment_full_cv critical section
+                {
+                    let (lock, cv) = &*self.assignment_full_cv;
+                    let locked = lock.lock().expect("lock cv");
+                    let wait_result = cv
+                        .wait_timeout(locked, Duration::from_secs(60))
+                        .expect("cv wait");
 
-                let wait_result = cv
-                    .wait_timeout(locked, Duration::from_secs(60))
-                    .expect("cv wait");
-
-                if wait_result.1.timed_out() {
-                    info!(
-                        "Full assignment CV hit timeout, checking \
+                    if wait_result.1.timed_out() {
+                        info!(
+                            "Full assignment CV hit timeout, checking \
                          assignment cache size"
-                    );
-                } else {
-                    info!(
-                        "Received CV notification that an assignment has \
+                        );
+                    } else {
+                        info!(
+                            "Received CV notification that an assignment has \
                          been removed from the cache"
-                    );
+                        );
+                    }
                 }
 
                 let assignment_cache_size = {
