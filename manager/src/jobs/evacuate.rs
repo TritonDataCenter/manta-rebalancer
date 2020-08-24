@@ -4718,6 +4718,18 @@ mod tests {
         );
     }
 
+    fn generate_num_objects(
+        obj_tx: crossbeam_channel::Sender<SharkspotterMessage>,
+        from_shark: String,
+        num_objects: usize
+    ) {
+        let mut generator = StdThreadGen::new(10);
+        for _ in 0..num_objects {
+            let mobj = MantaObject::arbitrary(&mut generator);
+            send_one_test_object(&obj_tx, mobj, &from_shark);
+        }
+    }
+
     #[test]
     fn full_test() {
         unit_test_init();
@@ -4762,13 +4774,20 @@ mod tests {
         let job_action = Arc::new(create_test_evacuate_job(num_objects));
 
         // Threads
-        let th_from_shark = job_action.from_shark.manta_storage_id.clone();
+        let pool = threadpool::Builder::new()
+            .thread_name("generator thread".to_string())
+            .num_threads(50)
+            .build();
+
+        for _ in 0..50 {
+            let th_obj_tx = obj_tx.clone();
+            let th_from_shark = job_action.from_shark.manta_storage_id.clone();
+            pool.execute(move || {
+                generate_num_objects(th_obj_tx,  th_from_shark, num_objects)
+            });
+        }
+
         let obj_generator_th = thread::spawn(move || {
-            let mut generator = StdThreadGen::new(10);
-            for _ in 0..num_objects {
-                let mobj = MantaObject::arbitrary(&mut generator);
-                send_one_test_object(&obj_tx, mobj, &th_from_shark);
-            }
         });
 
         let metadata_update_thread =
@@ -4832,6 +4851,8 @@ mod tests {
             .join()
             .expect("joining assignment post thread")
             .expect("internal assignment post thread");
+
+        pool.join();
 
         debug!("TOTAL TIME: {}ms", now.elapsed().as_millis());
     }
