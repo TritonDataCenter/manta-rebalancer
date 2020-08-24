@@ -66,7 +66,10 @@ fn get_moray_srv_sockaddr(host: &str) -> Result<SocketAddr, Error> {
 
 // Create a moray client using the shard and the domain name only.  This will
 // query binder for the SRV record for us.
-pub fn create_client(shard: u32, domain: &str) -> Result<MorayClient, Error> {
+pub fn create_client(shard: u32, domain: &str) -> Result<Option<MorayClient>,
+    Error> {
+    return Ok(None);
+    /*
     let domain_name = format!("{}.moray.{}", shard, domain);
     debug!("Creating moray client for: {}", domain_name);
 
@@ -74,6 +77,8 @@ pub fn create_client(shard: u32, domain: &str) -> Result<MorayClient, Error> {
     trace!("Found SockAddr for moray: {:#?}", &sock_addr);
 
     MorayClient::new(sock_addr, slog_scope::logger(), None).map_err(Error::from)
+
+     */
 }
 
 // Create a moray client, and then lookup the MantaObjectShard entry from the
@@ -82,7 +87,10 @@ pub fn get_manta_object_shark(
     storage_id: &str,
     domain: &str,
 ) -> Result<MantaObjectShark, Error> {
-    let mut mclient = create_client(MANTA_STORAGE_BUCKET_SHARD, domain)?;
+ //   let mut mclient = create_client(MANTA_STORAGE_BUCKET_SHARD, domain)?;
+    let mut mclient = create_client(MANTA_STORAGE_BUCKET_SHARD, domain)
+        .unwrap().unwrap();
+
     let mut ret: Option<MantaObjectShark> = None;
     let mut shark_id = storage_id.to_string();
     let opts = ObjectMethodOptions::default();

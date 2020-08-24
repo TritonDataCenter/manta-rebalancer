@@ -64,7 +64,7 @@ use threadpool::ThreadPool;
 use uuid::Uuid;
 
 type EvacuateObjectValue = Value;
-type MorayClientHash = HashMap<u32, MorayClient>;
+type MorayClientHash = HashMap<u32, Option<MorayClient>>;
 
 // --- Diesel Stuff, TODO This should be refactored --- //
 
@@ -268,7 +268,7 @@ impl FromSql<sql_types::Text, Pg> for EvacuateObjectError {
 }
 
 enum MetadataClientOption<'a> {
-    Client(&'a mut MorayClient),
+    Client(&'a mut Option<MorayClient>),
     Hash(&'a mut MorayClientHash),
 }
 
@@ -634,6 +634,8 @@ impl EvacuateJob {
                 std::process::exit(1);
             }
         };
+
+        info!("Creating evacuate job: {}", db_name);
 
         create_evacuateobjects_table(&conn)?;
         create_config_table(&conn)?;
@@ -3009,7 +3011,7 @@ fn metadata_update_worker_static(
         // the shard connections.  It also allows us to manage our max
         // number of per-shard connections by simply tuning the number of
         // metadata update worker threads.
-        let mut client_hash: HashMap<u32, MorayClient> = HashMap::new();
+        let mut client_hash: MorayClientHash = HashMap::new();
 
         debug!(
             "Started metadata update worker: {:?}",
@@ -3064,7 +3066,7 @@ fn metadata_update_worker_dynamic(
         // the shard connections.  It also allows us to manage our max
         // number of per-shard connections by simply tuning the number of
         // metadata update worker threads.
-        let mut client_hash: HashMap<u32, MorayClient> = HashMap::new();
+        let mut client_hash: MorayClientHash = HashMap::new();
 
         metrics_gauge_inc(MD_THREAD_GAUGE);
 
@@ -3103,9 +3105,9 @@ fn metadata_update_worker_dynamic(
 // create one and put it in the hash, and return it as an &mut.
 fn get_client_from_hash<'a>(
     job_action: &Arc<EvacuateJob>,
-    client_hash: &'a mut HashMap<u32, MorayClient>,
+    client_hash: &'a mut MorayClientHash,
     shard: u32,
-) -> Result<&'a mut MorayClient, Error> {
+) -> Result<&'a mut Option<MorayClient>, Error> {
     // We can't use or_insert_with() here because in the event
     // that client creation fails we want to handle that error.
     match client_hash.entry(shard) {
@@ -3150,6 +3152,8 @@ fn metadata_update_one(
         }
     };
 
+    return Ok(());
+    /*
     let now = std::time::Instant::now();
     let ret = moray_client::put_object(mclient, object, etag)
         .map_err(|e| {
@@ -3175,6 +3179,8 @@ fn metadata_update_one(
     }
 
     ret
+
+     */
 }
 
 // Attempt to update all objects in this assignment in per shard batches.
@@ -3186,10 +3192,11 @@ fn metadata_update_one(
 // individually for that batch.
 fn metadata_update_batch(
     job_action: &Arc<EvacuateJob>,
-    client_hash: &mut HashMap<u32, MorayClient>,
+    client_hash: &mut MorayClientHash,
     batched_reqs: HashMap<u32, Vec<BatchRequest>>,
 ) -> Vec<ObjectId> {
     let mut marked_error = vec![];
+    /*
     for (shard, requests) in batched_reqs.into_iter() {
         let num_reqs = requests.len();
         info!(
@@ -3253,14 +3260,16 @@ fn metadata_update_batch(
             );
         }
     }
+     */
     marked_error
+
 }
 
 fn retry_batch_update(
     job_action: &Arc<EvacuateJob>,
     requests: Vec<BatchRequest>,
     shard: u32,
-    client: &mut MorayClient,
+    client: &mut Option<MorayClient>,
     marked_error: &mut Vec<ObjectId>,
 ) {
     for r in requests.into_iter() {
@@ -3325,7 +3334,7 @@ fn batch_add_putobj(
 fn metadata_update_assignment(
     job_action: &Arc<EvacuateJob>,
     ace: AssignmentCacheEntry,
-    client_hash: &mut HashMap<u32, MorayClient>,
+    client_hash: &mut MorayClientHash,
 ) {
     info!("Updating metadata for assignment: {}", ace.id);
 
@@ -3704,6 +3713,7 @@ mod tests {
     use rebalancer::metrics::MetricsMap;
     use rebalancer::util;
     use reqwest::Client;
+    use std::sync::mpsc::SendError;
 
     lazy_static! {
         static ref INITIALIZED: Mutex<bool> = Mutex::new(false);
@@ -3764,6 +3774,7 @@ mod tests {
         _client: &Client,
         _metrics: &Option<MetricsMap>,
     ) {
+        println!("HELLO");
         task.set_status(TaskStatus::Complete);
     }
 
@@ -3839,6 +3850,39 @@ mod tests {
         job_action
     }
 
+    fn send_one_test_object(
+        obj_tx: &crossbeam_channel::Sender<SharkspotterMessage>,
+        obj: MantaObject,
+        from_shark: &str,
+    ) {
+        let shard = 1;
+        let etag = String::from("Fake_etag");
+        let mobj_value =
+            serde_json::to_string(&obj).expect("mobj value");
+
+        let moray_value = serde_json::to_value(
+            TestMorayObject::new(mobj_value, etag),
+        )
+            .expect("moray value");
+
+        let manta_value =
+            sharkspotter::manta_obj_from_moray_obj(&moray_value)
+                .expect("manta value");
+
+        let etag =
+            sharkspotter::etag_from_moray_value(&moray_value)
+                .expect("etag from moray value");
+
+        let ssobj = SharkspotterMessage {
+            manta_value,
+            etag,
+            shark: from_shark.to_string(),
+            shard,
+        };
+
+        obj_tx.send(ssobj).expect("send one test object");
+    }
+
     fn start_test_obj_generator_thread(
         obj_tx: crossbeam_channel::Sender<SharkspotterMessage>,
         test_objects: HashMap<String, MantaObject>,
@@ -3848,42 +3892,7 @@ mod tests {
             .name(String::from("test object generator thread"))
             .spawn(move || {
                 for (_, o) in test_objects.into_iter() {
-                    let shard = 1;
-                    let etag = String::from("Fake_etag");
-                    let mobj_value =
-                        serde_json::to_string(&o).expect("mobj value");
-
-                    let moray_value = serde_json::to_value(
-                        TestMorayObject::new(mobj_value, etag),
-                    )
-                    .expect("moray value");
-
-                    let manta_value =
-                        sharkspotter::manta_obj_from_moray_obj(&moray_value)
-                            .expect("manta value");
-
-                    let etag =
-                        sharkspotter::etag_from_moray_value(&moray_value)
-                            .expect("etag from moray value");
-
-                    let ssobj = SharkspotterMessage {
-                        manta_value,
-                        etag,
-                        shark: from_shark.clone(),
-                        shard,
-                    };
-
-                    match obj_tx.send(ssobj) {
-                        Ok(()) => (),
-                        Err(e) => {
-                            error!(
-                                "Could not send object.  Assignment \
-                                 generator must have shutdown {}.",
-                                e
-                            );
-                            break;
-                        }
-                    }
+                    send_one_test_object(&obj_tx, o, &from_shark);
                 }
             })
             .expect("failed to build object generator thread")
@@ -4713,9 +4722,8 @@ mod tests {
     fn full_test() {
         unit_test_init();
 
-        let num_objects: usize = 100;
+        let num_objects: usize = 100000;
         let mut g = StdThreadGen::new(10);
-        let mut test_objects = HashMap::new();
 
         struct MockStorinfo;
 
@@ -4753,17 +4761,15 @@ mod tests {
         // Job Action
         let job_action = Arc::new(create_test_evacuate_job(num_objects));
 
-        for _ in 0..num_objects {
-            let mobj = MantaObject::arbitrary(&mut g);
-            test_objects.insert(mobj.object_id.clone(), mobj);
-        }
-
         // Threads
-        let obj_generator_th = start_test_obj_generator_thread(
-            obj_tx,
-            test_objects.clone(),
-            job_action.from_shark.manta_storage_id.clone(),
-        );
+        let th_from_shark = job_action.from_shark.manta_storage_id.clone();
+        let obj_generator_th = thread::spawn(move || {
+            let mut generator = StdThreadGen::new(10);
+            for _ in 0..num_objects {
+                let mobj = MantaObject::arbitrary(&mut generator);
+                send_one_test_object(&obj_tx, mobj, &th_from_shark);
+            }
+        });
 
         let metadata_update_thread =
             start_metadata_update_broker(Arc::clone(&job_action), md_update_rx)
