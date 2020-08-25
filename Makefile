@@ -38,6 +38,10 @@ AGENTS          = amon config registrar
 # requirements).
 #BUILDIMAGE_PKGSRC = postgresql11-server-11.6 postgresql11-client-11.6
 
+# XXX timf set library paths for using older postgres bits
+DEF_RPATH=/opt/local/lib:/opt/local/gcc7/x86_64-sun-solaris2.11/lib/amd64:/opt/local/gcc7/lib/amd64
+REBALANCER_RPATH=/opt/postgresql/9.6.3/lib:$(DEF_RPATH)
+
 ENGBLD_USE_BUILDIMAGE   = true
 
 CLEAN_FILES += rebalancer-agent-*.tar.gz rebalancer-agent-*.manifest
@@ -55,7 +59,14 @@ all: agent manager
 
 debug:
 	$(CARGO) build --manifest-path=agent/Cargo.toml
-	$(CARGO) build --manifest-path=manager/Cargo.toml
+	LD_LIBRARY_PATH=$(RELSTAGE_DIR)/root/opt/postgresql/9.6.3/lib:$(DEF_RPATH) \
+	    $(CARGO) build --manifest-path=manager/Cargo.toml
+	/usr/bin/elfedit -e \
+	    "dyn:runpath $(REBALANCER_RPATH)" \
+	    target/debug/rebalancer-manager
+	/usr/bin/elfedit -e \
+	    "dyn:runpath $(REBALANCER_RPATH)" \
+	    target/debug/rebalancer-adm
 	cp manager/src/config.json target/debug/
 
 .PHONY: release
@@ -111,7 +122,14 @@ agent:
 
 .PHONY: manager
 manager:
-	$(CARGO) build --manifest-path=manager/Cargo.toml --release
+	LD_LIBRARY_PATH=$(RELSTAGE_DIR)/root/opt/postgresql/9.6.3/lib:$(DEF_RPATH) \
+	    $(CARGO) build --manifest-path=manager/Cargo.toml --release
+	/usr/bin/elfedit -e \
+	    "dyn:runpath $(REBALANCER_RPATH)" \
+	    target/release/rebalancer-manager
+	/usr/bin/elfedit -e \
+	    "dyn:runpath $(REBALANCER_RPATH)" \
+	    target/release/rebalancer-adm
 
 .PHONY: pkg_agent
 pkg_agent:
