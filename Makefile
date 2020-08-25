@@ -31,7 +31,7 @@ BUILDIMAGE_NAME = mantav2-rebalancer
 BUILDIMAGE_DESC = Manta Rebalancer
 AGENTS          = amon config registrar
 # XXX timf: experimentally removing Postgres 11 in the rebalancer image and
-# replacing with our own Postgres 9.6 set of patches to see whether this
+# replacing with our own Postgres 12 bits to see whether this
 # impacts rebalancer memory use
 # Biasing to postgresql v11 over v10 to match the postgresql11-client that
 # is installed in the jenkins-agent build zones for 19.4.0 (per buckets-mdapi's
@@ -39,8 +39,9 @@ AGENTS          = amon config registrar
 #BUILDIMAGE_PKGSRC = postgresql11-server-11.6 postgresql11-client-11.6
 
 # XXX timf set library paths for using older postgres bits
+PGVER=12.0
 DEF_RPATH=/opt/local/lib:/opt/local/gcc7/x86_64-sun-solaris2.11/lib/amd64:/opt/local/gcc7/lib/amd64
-REBALANCER_RPATH=/opt/postgresql/9.6.3/lib:$(DEF_RPATH)
+REBALANCER_RPATH=/opt/postgresql/$(PGVER)/lib:$(DEF_RPATH)
 
 ENGBLD_USE_BUILDIMAGE   = true
 
@@ -59,7 +60,7 @@ all: agent manager
 
 debug:
 	$(CARGO) build --manifest-path=agent/Cargo.toml
-	LD_LIBRARY_PATH=$(RELSTAGE_DIR)/root/opt/postgresql/9.6.3/lib:$(DEF_RPATH) \
+	LD_LIBRARY_PATH=$(RELSTAGE_DIR)/root/opt/postgresql/$(PGVER)/lib:$(DEF_RPATH) \
 	    $(CARGO) build --manifest-path=manager/Cargo.toml
 	/usr/bin/elfedit -e \
 	    "dyn:runpath $(REBALANCER_RPATH)" \
@@ -105,10 +106,10 @@ publish: release pkg_agent
 	cp $(TOP)/$(AGENT_MANIFEST) $(ENGBLD_BITS_DIR)/$(NAME)/$(AGENT_MANIFEST)
 
 .PHONY: pg
-pg: deps/postgresql96/.git
+pg: deps/postgresql12/.git
 	PATH=/usr/bin:$$PATH $(MAKE) -f Makefile.postgres \
 	RELSTAGEDIR="$(RELSTAGEDIR)" \
-	DEPSDIR="$(TOP)/deps" pg96
+	DEPSDIR="$(TOP)/deps" pg12
 
 doc:
 	$(CARGO) doc
@@ -122,7 +123,7 @@ agent:
 
 .PHONY: manager
 manager:
-	LD_LIBRARY_PATH=$(RELSTAGE_DIR)/root/opt/postgresql/9.6.3/lib:$(DEF_RPATH) \
+	LD_LIBRARY_PATH=$(RELSTAGE_DIR)/root/opt/postgresql/$(PGVER)/lib:$(DEF_RPATH) \
 	    $(CARGO) build --manifest-path=manager/Cargo.toml --release
 	/usr/bin/elfedit -e \
 	    "dyn:runpath $(REBALANCER_RPATH)" \

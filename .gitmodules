@@ -4,6 +4,6 @@
 [submodule "deps/manta-scripts"]
 	path = deps/manta-scripts
 	url = https://github.com/joyent/manta-scripts
-[submodule "deps/postgresql96"]
-	path = deps/postgresql96
-	url = https://github.com/joyent/postgres.git
+[submodule "deps/postgresql12"]
+	path = deps/postgresql12
+	url = https://github.com/postgres/postgres.git
