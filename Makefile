@@ -17,7 +17,8 @@ include ./deps/eng/tools/mk/Makefile.defs
 TOP ?= $(error Unable to access eng.git submodule Makefiles.)
 
 SMF_MANIFESTS =     smf/manifests/rebalancer.xml \
-                    smf/manifests/rebalancer-agent.xml
+                    smf/manifests/rebalancer-agent.xml \
+					smf/manifests/postgresql.xml \
 
 AGENT_TARBALL       := $(NAME)-agent-$(STAMP).tar.gz
 AGENT_MANIFEST      := $(NAME)-agent-$(STAMP).manifest
@@ -77,6 +78,7 @@ release: all pg deps/manta-scripts/.git $(SMF_MANIFESTS)
 	@mkdir -p $(RELSTAGEDIR)/root/opt/smartdc/$(NAME)/bin
 	@mkdir -p $(RELSTAGEDIR)/root/opt/smartdc/$(NAME)/etc
 	@mkdir -p $(RELSTAGEDIR)/root/opt/smartdc/$(NAME)/smf/manifests
+	@mkdir -p $(RELSTAGEDIR)/root/opt/smartdc/$(NAME)/smf/methods
 	cp $(TOP)/etc/postgresql.conf $(RELSTAGEDIR)/root/opt/smartdc/$(NAME)/etc/
 	cp -R \
 	    $(TOP)/sapi_manifests \
@@ -88,6 +90,12 @@ release: all pg deps/manta-scripts/.git $(SMF_MANIFESTS)
 	cp -R \
 	    $(TOP)/smf/manifests/rebalancer.xml \
 	    $(RELSTAGEDIR)/root/opt/smartdc/$(NAME)/smf/manifests/
+	cp -R \
+	    $(TOP)/smf/manifests/postgresql.xml \
+	    $(RELSTAGEDIR)/root/opt/smartdc/$(NAME)/smf/manifests/
+	cp -R \
+	    $(TOP)/smf/manifests/postgresql \
+	    $(RELSTAGEDIR)/root/opt/smartdc/$(NAME)/smf/methods/
 	# boot
 	@mkdir -p $(RELSTAGEDIR)/root/opt/smartdc/boot/scripts
 	cp -R $(TOP)/deps/manta-scripts/*.sh \
