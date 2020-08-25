@@ -94,7 +94,7 @@ release: all pg deps/manta-scripts/.git $(SMF_MANIFESTS)
 	    $(TOP)/smf/manifests/postgresql.xml \
 	    $(RELSTAGEDIR)/root/opt/smartdc/$(NAME)/smf/manifests/
 	cp -R \
-	    $(TOP)/smf/manifests/postgresql \
+	    $(TOP)/smf/methods/postgresql \
 	    $(RELSTAGEDIR)/root/opt/smartdc/$(NAME)/smf/methods/
 	# boot
 	@mkdir -p $(RELSTAGEDIR)/root/opt/smartdc/boot/scripts
