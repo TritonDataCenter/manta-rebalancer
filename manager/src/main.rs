@@ -19,11 +19,6 @@ extern crate rebalancer;
 
 mod gotham_json_util;
 
-// JEmallocator drastically improves our memory footprint
-use jemallocator::Jemalloc;
-#[global_allocator]
-static GLOBAL: Jemalloc = Jemalloc;
-
 use manager::config::Config;
 use manager::jobs::status::{JobStatus, StatusError};
 use manager::jobs::{
