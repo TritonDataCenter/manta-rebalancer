@@ -17,6 +17,8 @@ set -o errexit
 
 PGFMRI=svc:/manta/postgresql
 PG_LOG_DIR=/var/pg
+PG_BIN_DIR=/opt/postgresql/12.4/bin
+REBALANCER_BIN_DIR=/opt/smartdc/rebalancer/bin
 
 source /opt/smartdc/boot/scripts/util.sh
 source /opt/smartdc/boot/scripts/services.sh
@@ -49,7 +51,7 @@ manta_add_manifest_dir "/opt/smartdc/rebalancer"
 manta_common2_setup "rebalancer"
 
 # Set path for rebalancer-adm
-echo "export PATH=\$PATH:/opt/smartdc/rebalancer/bin" >> /root/.bashrc
+echo "export PATH=\$PATH:$REBALANCER_BIN_DIR:$PG_BIN_DIR" >> /root/.bashrc
 
 create_postgres_user
 
