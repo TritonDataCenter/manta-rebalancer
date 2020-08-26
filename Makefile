@@ -18,7 +18,7 @@ TOP ?= $(error Unable to access eng.git submodule Makefiles.)
 
 SMF_MANIFESTS =     smf/manifests/rebalancer.xml \
                     smf/manifests/rebalancer-agent.xml \
-					smf/manifests/postgresql.xml \
+                    smf/manifests/postgresql.xml \
 
 AGENT_TARBALL       := $(NAME)-agent-$(STAMP).tar.gz
 AGENT_MANIFEST      := $(NAME)-agent-$(STAMP).manifest
