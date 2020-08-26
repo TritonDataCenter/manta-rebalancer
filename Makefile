@@ -17,7 +17,8 @@ include ./deps/eng/tools/mk/Makefile.defs
 TOP ?= $(error Unable to access eng.git submodule Makefiles.)
 
 SMF_MANIFESTS =     smf/manifests/rebalancer.xml \
-                    smf/manifests/rebalancer-agent.xml
+                    smf/manifests/rebalancer-agent.xml \
+					smf/manifests/postgresql.xml \
 
 AGENT_TARBALL       := $(NAME)-agent-$(STAMP).tar.gz
 AGENT_MANIFEST      := $(NAME)-agent-$(STAMP).manifest
@@ -30,10 +31,18 @@ BASE_IMAGE_UUID = 59ba2e5e-976f-4e09-8aac-a4a7ef0395f5
 BUILDIMAGE_NAME = mantav2-rebalancer
 BUILDIMAGE_DESC = Manta Rebalancer
 AGENTS          = amon config registrar
+# XXX timf: experimentally removing Postgres 11 in the rebalancer image and
+# replacing with our own Postgres 12 bits to see whether this
+# impacts rebalancer memory use
 # Biasing to postgresql v11 over v10 to match the postgresql11-client that
 # is installed in the jenkins-agent build zones for 19.4.0 (per buckets-mdapi's
 # requirements).
-BUILDIMAGE_PKGSRC = postgresql11-server-11.6 postgresql11-client-11.6
+#BUILDIMAGE_PKGSRC = postgresql11-server-11.6 postgresql11-client-11.6
+
+# XXX timf set library paths for using older postgres bits
+PGVER=12.0
+DEF_RPATH=/opt/local/lib:/opt/local/gcc7/x86_64-sun-solaris2.11/lib/amd64:/opt/local/gcc7/lib/amd64
+REBALANCER_RPATH=/opt/postgresql/$(PGVER)/lib:$(DEF_RPATH)
 
 ENGBLD_USE_BUILDIMAGE   = true
 
@@ -52,16 +61,24 @@ all: agent manager
 
 debug:
 	$(CARGO) build --manifest-path=agent/Cargo.toml
-	$(CARGO) build --manifest-path=manager/Cargo.toml
+	LD_LIBRARY_PATH=$(RELSTAGE_DIR)/root/opt/postgresql/$(PGVER)/lib:$(DEF_RPATH) \
+	    $(CARGO) build --manifest-path=manager/Cargo.toml
+	/usr/bin/elfedit -e \
+	    "dyn:runpath $(REBALANCER_RPATH)" \
+	    target/debug/rebalancer-manager
+	/usr/bin/elfedit -e \
+	    "dyn:runpath $(REBALANCER_RPATH)" \
+	    target/debug/rebalancer-adm
 	cp manager/src/config.json target/debug/
 
 .PHONY: release
-release: all deps/manta-scripts/.git $(SMF_MANIFESTS)
+release: all pg deps/manta-scripts/.git $(SMF_MANIFESTS)
 	@echo "Building $(RELEASE_TARBALL)"
 	# application dir
 	@mkdir -p $(RELSTAGEDIR)/root/opt/smartdc/$(NAME)/bin
 	@mkdir -p $(RELSTAGEDIR)/root/opt/smartdc/$(NAME)/etc
 	@mkdir -p $(RELSTAGEDIR)/root/opt/smartdc/$(NAME)/smf/manifests
+	@mkdir -p $(RELSTAGEDIR)/root/opt/smartdc/$(NAME)/smf/methods
 	cp $(TOP)/etc/postgresql.conf $(RELSTAGEDIR)/root/opt/smartdc/$(NAME)/etc/
 	cp -R \
 	    $(TOP)/sapi_manifests \
@@ -73,6 +90,12 @@ release: all deps/manta-scripts/.git $(SMF_MANIFESTS)
 	cp -R \
 	    $(TOP)/smf/manifests/rebalancer.xml \
 	    $(RELSTAGEDIR)/root/opt/smartdc/$(NAME)/smf/manifests/
+	cp -R \
+	    $(TOP)/smf/manifests/postgresql.xml \
+	    $(RELSTAGEDIR)/root/opt/smartdc/$(NAME)/smf/manifests/
+	cp -R \
+	    $(TOP)/smf/methods/postgresql \
+	    $(RELSTAGEDIR)/root/opt/smartdc/$(NAME)/smf/methods/
 	# boot
 	@mkdir -p $(RELSTAGEDIR)/root/opt/smartdc/boot/scripts
 	cp -R $(TOP)/deps/manta-scripts/*.sh \
@@ -90,6 +113,12 @@ publish: release pkg_agent
 	cp $(TOP)/$(AGENT_TARBALL) $(ENGBLD_BITS_DIR)/$(NAME)/$(AGENT_TARBALL)
 	cp $(TOP)/$(AGENT_MANIFEST) $(ENGBLD_BITS_DIR)/$(NAME)/$(AGENT_MANIFEST)
 
+.PHONY: pg
+pg: deps/postgresql12/.git
+	PATH=/usr/bin:$$PATH $(MAKE) -f Makefile.postgres \
+	RELSTAGEDIR="$(RELSTAGEDIR)" \
+	DEPSDIR="$(TOP)/deps" pg12
+
 doc:
 	$(CARGO) doc
 
@@ -102,7 +131,14 @@ agent:
 
 .PHONY: manager
 manager:
-	$(CARGO) build --manifest-path=manager/Cargo.toml --release
+	LD_LIBRARY_PATH=$(RELSTAGE_DIR)/root/opt/postgresql/$(PGVER)/lib:$(DEF_RPATH) \
+	    $(CARGO) build --manifest-path=manager/Cargo.toml --release
+	/usr/bin/elfedit -e \
+	    "dyn:runpath $(REBALANCER_RPATH)" \
+	    target/release/rebalancer-manager
+	/usr/bin/elfedit -e \
+	    "dyn:runpath $(REBALANCER_RPATH)" \
+	    target/release/rebalancer-adm
 
 .PHONY: pkg_agent
 pkg_agent:
