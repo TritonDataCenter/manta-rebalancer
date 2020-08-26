@@ -30,7 +30,7 @@ endif
 
 PG92DIR = /opt/postgresql/9.2.4
 PG96DIR = /opt/postgresql/9.6.3
-PG12DIR = /opt/postgresql/12.0
+PG12DIR = /opt/postgresql/12.4
 
 .PHONY: all
 all: pg92 pg96 pg12
