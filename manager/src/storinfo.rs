@@ -235,6 +235,6 @@ fn fetch_sharks(client: &Client, host: &str) -> Vec<StorageNode> {
         new_sharks.extend(result);
     }
 
-    debug!("storinfo updated with new sharks: {:?}", new_sharks);
+    debug!("storinfo updated with {} new sharks", new_sharks.len());
     new_sharks
 }
