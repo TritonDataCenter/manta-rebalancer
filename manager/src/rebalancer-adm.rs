@@ -107,8 +107,16 @@ fn job_create_evacuate(matches: &ArgMatches) -> Result<(), String> {
     let payload: String =
         serde_json::to_string(&job_payload).expect("Serialize job payload");
 
+    // Create a client without a timeout.  We need to make a 'count()' query
+    // to get accurate numbers for job status.  This can take a while and no
+    // sense in timing out.  If the user doesn't want to wait, ctrl-c is
+    // always an option.
+    let client = reqwest::ClientBuilder::new()
+        .timeout(None)
+        .build()
+        .map_err(|e| e.to_string())?;
+
     // Send the request.
-    let client = reqwest::Client::new();
     let mut response = match client.post(JOBS_URL).body(payload).send() {
         Ok(resp) => resp,
         Err(e) => return Err(format!("Failed to post job: {}", &e)),
