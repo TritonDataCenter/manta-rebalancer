@@ -1,6 +1,6 @@
 [package]
 name = "manager"
-version = "0.2.2"
+version = "0.3.0"
 authors = ["Jenkins Agent <jenkins-agent@joyent.com>"]
 edition = "2018"
 workspace = ".."

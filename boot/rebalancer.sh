@@ -15,7 +15,7 @@
 
 REBAL_ROOT=/rebalancer
 SUDO=/opt/local/bin/sudo
-INITDB=/opt/postgresql/12.0/bin/initdb
+INITDB=/opt/postgresql/12.4/bin/initdb
 
 # Sets up delegated dataset at /$REBAL_ROOT/rebalancer and configures directory
 # for use of postgresql.

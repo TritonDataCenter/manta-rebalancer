@@ -14,7 +14,7 @@
       <method_credential user='postgres' group='postgres' />
       <method_environment>
         <envvar name="LD_PRELOAD_32" value="/usr/lib/extendedFILE.so.1" />
-        <envvar name='PATH' value='/opt/postgresql/12.0/bin:/opt/local/bin:/opt/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin'/>
+        <envvar name='PATH' value='/opt/postgresql/12.4/bin:/opt/local/bin:/opt/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin'/>
       </method_environment>
     </method_context>
     <exec_method type='method' name='start' exec='/opt/local/lib/svc/method/postgresql start' timeout_seconds='300' />

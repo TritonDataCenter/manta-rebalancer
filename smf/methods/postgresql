@@ -20,7 +20,7 @@ getproparg()
       [ -n "$val" ] && echo $val
 }
 
-PGBIN=/opt/postgresql/12.0/bin
+PGBIN=/opt/postgresql/12.4/bin
 PGDATA=`getproparg config/data`
 PGLOG=`getproparg config/log`
 
