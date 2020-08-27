@@ -1256,9 +1256,11 @@ impl EvacuateJob {
             });
 
         debug!(
-            "Marking {} objects in assignment ({}) as error: {:?}",
+            "Marked {} objects in assignment ({}) as error: {:?}",
             update_cnt, assignment_uuid, err
         );
+
+        // TODO: We may need to remove this assignment from the cache
 
         update_cnt
     }
@@ -2933,7 +2935,10 @@ fn start_assignment_checker(
                             }
                         };
 
-                    debug!("Got Assignment: {:?}", ag_assignment);
+                    debug!(
+                        "Got Assignment: {} {:?}",
+                        ag_assignment.uuid, ag_assignment.stats
+                    );
                     // If agent assignment is complete, process it and pass
                     // it to the metadata update broker.  Otherwise, continue
                     // to next assignment.
@@ -2943,6 +2948,10 @@ fn start_assignment_checker(
                             // because we have issues handling one assignment.
                             // The process() function should mark the
                             // associated objects appropriately.
+                            debug!(
+                                "Processing Assignment: {:?}",
+                                ag_assignment
+                            );
                             job_action.process(ag_assignment).unwrap_or_else(
                                 |e| {
                                     error!("Error Processing Assignment {}", e);
@@ -2978,8 +2987,8 @@ fn start_assignment_checker(
 
                 // TODO: MANTA-5106
                 if found_assignment_count == 0 {
-                    trace!("Found 0 completed assignments, sleeping for 100ms");
-                    thread::sleep(Duration::from_millis(100));
+                    trace!("Found 0 completed assignments, sleeping for 500ms");
+                    thread::sleep(Duration::from_millis(500));
                     continue;
                 }
 
