@@ -64,7 +64,7 @@ use threadpool::ThreadPool;
 use uuid::Uuid;
 
 type EvacuateObjectValue = Value;
-type MorayClientHash = HashMap<u32, Option<MorayClient>>;
+type MorayClientHash = HashMap<u32, MorayClient>;
 
 // --- Diesel Stuff, TODO This should be refactored --- //
 
@@ -268,7 +268,7 @@ impl FromSql<sql_types::Text, Pg> for EvacuateObjectError {
 }
 
 enum MetadataClientOption<'a> {
-    Client(&'a mut Option<MorayClient>),
+    Client(&'a mut MorayClient),
     Hash(&'a mut MorayClientHash),
 }
 
@@ -3107,7 +3107,7 @@ fn get_client_from_hash<'a>(
     job_action: &Arc<EvacuateJob>,
     client_hash: &'a mut MorayClientHash,
     shard: u32,
-) -> Result<&'a mut Option<MorayClient>, Error> {
+) -> Result<&'a mut MorayClient, Error> {
     // We can't use or_insert_with() here because in the event
     // that client creation fails we want to handle that error.
     match client_hash.entry(shard) {
@@ -3152,11 +3152,10 @@ fn metadata_update_one(
         }
     };
 
-    return Ok(());
-    /*
     let now = std::time::Instant::now();
     let ret = moray_client::put_object(mclient, object, etag)
         .map_err(|e| {
+            error!("put object error: {}", e);
             InternalError::new(
                 Some(InternalErrorCode::MetadataUpdateFailure),
                 e.description(),
@@ -3179,8 +3178,6 @@ fn metadata_update_one(
     }
 
     ret
-
-     */
 }
 
 // Attempt to update all objects in this assignment in per shard batches.
@@ -3196,7 +3193,6 @@ fn metadata_update_batch(
     batched_reqs: HashMap<u32, Vec<BatchRequest>>,
 ) -> Vec<ObjectId> {
     let mut marked_error = vec![];
-    /*
     for (shard, requests) in batched_reqs.into_iter() {
         let num_reqs = requests.len();
         info!(
@@ -3260,16 +3256,15 @@ fn metadata_update_batch(
             );
         }
     }
-     */
-    marked_error
 
+    marked_error
 }
 
 fn retry_batch_update(
     job_action: &Arc<EvacuateJob>,
     requests: Vec<BatchRequest>,
     shard: u32,
-    client: &mut Option<MorayClient>,
+    client: &mut MorayClient,
     marked_error: &mut Vec<ObjectId>,
 ) {
     for r in requests.into_iter() {
@@ -4745,7 +4740,7 @@ mod tests {
 
         let num_objects: usize = 100000;
         let pool_size = 50;
-        let mut g = StdThreadGen::new(10);
+//        let mut g = StdThreadGen::new(10);
 
         struct MockStorinfo;
 
