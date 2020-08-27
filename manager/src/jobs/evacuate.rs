@@ -3821,9 +3821,10 @@ mod tests {
 
     fn create_test_evacuate_job(max_objects: usize) -> EvacuateJob {
         let mut config = Config::default();
-        let from_shark = String::from("1.stor.domain");
+        let from_shark = String::from("1.stor.east.joyent.us");
 
         config.max_fill_percentage = 100;
+        config.domain_name = "east.joyent.us".to_string();
 
         let (_, update_rx) = crossbeam_channel::unbounded();
         let mut job_action = EvacuateJob::new(
