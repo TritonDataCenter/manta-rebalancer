@@ -164,7 +164,6 @@ fn get_job_status(uuid: Uuid) -> GetJobFuture {
 fn get_job(mut state: State) -> Box<HandlerFuture> {
     metrics_request_inc(Some("get_job"));
     info!("Get Job Request");
-    std::thread::sleep(std::time::Duration::from_secs(32));
     let get_job_params = GetJobParams::take_from(&mut state);
     let uuid = match Uuid::parse_str(&get_job_params.uuid) {
         Ok(id) => id,
