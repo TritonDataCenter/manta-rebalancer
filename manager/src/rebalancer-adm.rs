@@ -13,8 +13,8 @@ use hyper::HeaderMap;
 use manager::jobs::{EvacuateJobPayload, JobPayload};
 use reqwest;
 use serde_json::Value;
-use std::result::Result;
 use std::io::Write;
+use std::result::Result;
 
 pub static JOBS_URL: &str = "http://localhost/jobs";
 pub static VERSION: &str = "0.1.0";
@@ -25,7 +25,7 @@ fn output_common(response_headers: HeaderMap, message: String) {
         None => "unknown",
     };
 
-    println!("");
+    println!();
     println!("server version: {}", version);
     println!("{}", message);
 }
@@ -80,10 +80,10 @@ fn job_get(matches: &ArgMatches) -> Result<(), String> {
         std::thread::sleep(std::time::Duration::from_secs(3));
         println!("Getting job status counts.  This may take some time...");
 
-        loop{
+        loop {
             std::thread::sleep(std::time::Duration::from_secs(2));
             print!(".");
-            std::io::stdout().flush();
+            std::io::stdout().flush().expect("internal flush error");
         }
     });
 
