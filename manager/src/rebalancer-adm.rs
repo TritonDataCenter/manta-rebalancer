@@ -25,6 +25,7 @@ fn output_common(response_headers: HeaderMap, message: String) {
         None => "unknown",
     };
 
+    println!("");
     println!("server version: {}", version);
     println!("{}", message);
 }
@@ -80,7 +81,7 @@ fn job_get(matches: &ArgMatches) -> Result<(), String> {
         println!("Getting job status counts.  This may take some time...");
 
         loop{
-            std::thread::sleep(std::time::Duration::from_secs(3));
+            std::thread::sleep(std::time::Duration::from_secs(2));
             print!(".");
             std::io::stdout().flush();
         }
