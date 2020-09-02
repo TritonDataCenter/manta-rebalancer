@@ -14,6 +14,7 @@ use manager::jobs::{EvacuateJobPayload, JobPayload};
 use reqwest;
 use serde_json::Value;
 use std::result::Result;
+use std::io::Write;
 
 pub static JOBS_URL: &str = "http://localhost/jobs";
 pub static VERSION: &str = "0.1.0";
@@ -32,14 +33,23 @@ fn output_common(response_headers: HeaderMap, message: String) {
 // information.  The contents of the response are evaluated and printed by
 // the caller.
 fn get_common(url: &str) -> Result<(), String> {
-    let mut response = match reqwest::get(url) {
-        Ok(resp) => resp,
-        Err(e) => return Err(format!("Request failed: {}", &e)),
-    };
+    // Create a client without a timeout.  We need to make a 'count()' query
+    // to get accurate numbers for job status.  This can take a while and no
+    // sense in timing out.  If the user doesn't want to wait, ctrl-c is
+    // always an option.
+    let client = reqwest::ClientBuilder::new()
+        .timeout(None)
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let mut response = client
+        .get(url)
+        .send()
+        .map_err(|e| format!("Request failed: {}", &e))?;
 
     // Flag failure if we get a status code of anything other than 200.
     if !response.status().is_success() {
-        return Err(format!("Failed to post job: {}", response.status()));
+        return Err(format!("Failed to get job: {}", response.status()));
     }
 
     let headers = response.headers().clone();
@@ -63,6 +73,18 @@ fn get_common(url: &str) -> Result<(), String> {
 fn job_get(matches: &ArgMatches) -> Result<(), String> {
     let uuid = matches.value_of("uuid").unwrap();
     let url = format!("{}/{}", JOBS_URL, uuid);
+
+    // Add a delayed notification for job_get on a large job.
+    std::thread::spawn(|| {
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        println!("Getting job status counts.  This may take some time...");
+
+        loop{
+            std::thread::sleep(std::time::Duration::from_secs(3));
+            print!(".");
+            std::io::stdout().flush();
+        }
+    });
 
     get_common(&url)
 }
@@ -107,14 +129,7 @@ fn job_create_evacuate(matches: &ArgMatches) -> Result<(), String> {
     let payload: String =
         serde_json::to_string(&job_payload).expect("Serialize job payload");
 
-    // Create a client without a timeout.  We need to make a 'count()' query
-    // to get accurate numbers for job status.  This can take a while and no
-    // sense in timing out.  If the user doesn't want to wait, ctrl-c is
-    // always an option.
-    let client = reqwest::ClientBuilder::new()
-        .timeout(None)
-        .build()
-        .map_err(|e| e.to_string())?;
+    let client = reqwest::Client::new();
 
     // Send the request.
     let mut response = match client.post(JOBS_URL).body(payload).send() {
