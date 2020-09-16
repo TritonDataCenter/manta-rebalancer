@@ -73,6 +73,8 @@ const EVACUATE_OBJECTS_DB: &str = "evacuateobjects";
 use diesel::deserialize::{self, FromSql};
 use diesel::pg::{Pg, PgConnection, PgValue};
 use diesel::prelude::*;
+use diesel::result::{DatabaseErrorKind, DatabaseErrorInformation};
+use diesel::result::Error::DatabaseError;
 use diesel::serialize::{self, IsNull, Output, ToSql};
 use diesel::sql_types;
 use sharkspotter::SharkspotterMessage;
@@ -102,6 +104,15 @@ table! {
     }
 }
 
+table! {
+    use diesel::sql_types::{Text, Array, Integer};
+    duplicates(id) {
+        id -> Text,
+        key -> Text,
+        shards -> Array<Integer>,
+    }
+}
+
 #[derive(Insertable, Queryable, Identifiable)]
 #[table_name = "evacuateobjects"]
 struct UpdateEvacuateObject<'a> {
@@ -113,6 +124,14 @@ struct UpdateEvacuateObject<'a> {
 pub struct EvacuateJobDbConfig {
     id: i32,
     pub from_shark: Value,
+}
+
+#[derive(Clone, Debug, Insertable, AsChangeset, Queryable, Serialize)]
+#[table_name = "duplicates"]
+pub struct Duplicate {
+    id: String,
+    key: String,
+    shards: Vec<i32>,
 }
 
 // The fields in this struct are a subset of those found in
@@ -296,6 +315,16 @@ fn create_config_table(conn: &PgConnection) -> Result<usize, Error> {
     );";
 
     create_table_common(conn, "config", create_query)
+}
+
+fn create_duplicate_table(conn: &PgConnection) -> Result<usize, Error> {
+    let create_query = "CREATE TABLE duplicates(
+        id TEXT PRIMARY KEY,
+        key TEXT,
+        shards Int[]
+    );";
+
+    create_table_common(conn, "duplicates", create_query)
 }
 
 // We only want to store a single configuration entry for the evacaute job.
@@ -578,6 +607,8 @@ pub struct EvacuateJob {
 
     pub md_update_time: AtomicU64,
 
+    pub db_name: String,
+
     // Timer starts when first object is found and stops at the end of the job.
     pub object_movement_start_time: Mutex<Option<std::time::Instant>>,
 
@@ -637,6 +668,7 @@ impl EvacuateJob {
 
         create_evacuateobjects_table(&conn)?;
         create_config_table(&conn)?;
+        create_duplicate_table(&conn)?;
 
         from_shark.manta_storage_id = storage_id;
 
@@ -653,6 +685,7 @@ impl EvacuateJob {
             post_client: reqwest::Client::new(),
             get_client: reqwest::Client::new(),
             update_rx,
+            db_name: db_name.to_string(),
             bytes_transferred: AtomicU64::new(0),
             object_movement_start_time: Mutex::new(None),
             md_update_time: AtomicU64::new(0),
@@ -1112,13 +1145,106 @@ impl EvacuateJob {
         ret
     }
 
+    // We want to concatenate the shards array with the new shard, but if
+    // this is the first time we have inserted this object then we want to
+    // make sure we include the existing shard (which should have been added
+    // to the duplicate.shards array passed to this function).  If the insert
+    // fails due to conflict that means we already have that shard number in
+    // the array.  In that case we only want to insert the new_shard number.
+    fn insert_duplicate_object(
+        duplicate: Duplicate,
+        new_shard: i32,
+        db_name: &str,
+    ) {
+        let connect_string = format!(
+            "host=localhost user=postgres password=postgres dbname={}",
+            db_name
+        );
+
+        let mut client = pg::Client::connect(&connect_string, pg::NoTls)
+            .expect("PG Connection error");
+
+       client.execute(
+           "INSERT INTO duplicates (id, key, shards) \
+           VALUES ($1, $2, $3) \
+           ON CONFLICT (id)\
+           DO UPDATE SET shards = mantastubs.shards || $4;
+           ",
+           &[&duplicate.id, &duplicate.key, &duplicate.shards, &new_shard],
+       ).expect("Upsert error");
+    }
+
+    fn handle_duplicate(
+        &self,
+        assignment: &mut Assignment,
+        vec_objs: &mut Vec<EvacuateObject>,
+        info: Box<dyn DatabaseErrorInformation + Send + Sync>,
+        conn: &PgConnection,
+    ) {
+        use self::evacuateobjects::dsl::{evacuateobjects, id as db_id};
+
+        let details = info.details().expect("info missing details");
+        let mut new_shard= -1;
+        let key;
+        let mut object_id = "".to_string();
+        let mut count = 0;
+
+        assignment.tasks.retain(|t, _| {
+           !details.contains(t)
+        });
+
+        vec_objs.retain(|o| {
+            if details.contains(o.id.to_string()) {
+                let manta_object: MantaObjectEssential =
+                    serde_json::from_value(o.object.clone())
+                        .expect("manta object essential");
+
+                key = manta_object.key;
+                object_id = o.id.to_owned();
+                new_shard = o.shard.clone();
+
+                count += 1;
+
+                false
+            } else {
+                true
+            }
+            !details.contains(o.id.to_string())
+        });
+
+        assert_eq!(count, 1,
+                   "Did not find the right number of duplicate objects");
+        assert_ne!(new_shard, -1);
+
+        let existing_entry: EvacuateObject = evacuateobjects
+                .filter(db_id.eq(&object_id))
+                .load::<EvacuateObject>(conn)
+                .expect("getting filtered objects")
+                .first()
+                .expect("expected one entry");
+
+        let existing_shard = existing_entry.shard;
+
+        let duplicate = Duplicate {
+            id: object_id,
+            key,
+            shards: vec![new_shard.clone(), existing_shard],
+        };
+
+        EvacuateJob::insert_duplicate_object(duplicate, new_shard, &self
+            .db_name);
+    }
+
     #[allow(clippy::ptr_arg)]
     fn insert_assignment_into_db(
         &self,
-        assign_id: &AssignmentId,
+        assignment: &mut Assignment,
         vec_objs: &[EvacuateObject],
     ) -> Result<usize, Error> {
         use self::evacuateobjects::dsl::*;
+
+        let assign_id = &assignment.id;
+        let mut obj_list = vec_objs.to_owned();
 
         debug!(
             "Inserting {} objects for assignment ({}) into db",
@@ -1127,14 +1253,20 @@ impl EvacuateJob {
         );
 
         let locked_conn = self.conn.lock().expect("DB conn lock");
-        let ret = diesel::insert_into(evacuateobjects)
+        let ret = match diesel::insert_into(evacuateobjects)
             .values(vec_objs)
             .execute(&*locked_conn)
-            .unwrap_or_else(|e| {
+        {
+            Err(DatabaseError(DatabaseErrorKind::UniqueViolation, info)) => {
+                self.handle_duplicate(assignment, &mut obj_list)
+            }
+            Ok(num_records) => num_records,
+            Err(e) => {
                 let msg = format!("Error inserting object into DB: {}", e);
                 error!("{}", msg);
                 panic!(msg);
-            });
+            }
+        };
 
         debug!(
             "inserted {} objects for assignment {} into db",
@@ -2470,7 +2602,7 @@ fn add_object_to_assignment(
         return Err(AssignmentAddObjectError::DestinationInsufficentSpace);
     }
 
-    assignment.tasks.insert(
+    if let Some(eobj) = assignment.tasks.insert(
         manta_object.object_id.to_owned(),
         Task {
             object_id: manta_object.object_id.to_owned(),
@@ -2479,7 +2611,15 @@ fn add_object_to_assignment(
             source: source.to_owned(),
             status: TaskStatus::Pending,
         },
-    );
+    ) {
+        // We have encountered a duplicate.  We have no way to know which one
+        // is the correct one but we don't want to lose objects here by
+        // overwriting one that is already in the assignment.
+        // Call job_action.handle_duplicate() on this one.  It's just as good
+        // a any other duplicate.
+        // TODO
+        unimplemented!();
+    }
 
     // We don't checked_sub() here because if we do underflow we want to
     // panic.  We've already assured that available_space >= content_mb above.
@@ -2512,7 +2652,7 @@ fn flush_assignment(
     shark: &StorageNode,
     full_assignment_tx: &crossbeam::Sender<Assignment>,
 ) -> Result<u64, Error> {
-    job_action.insert_assignment_into_db(&assignment.id, &eobj_vec)?;
+    job_action.insert_assignment_into_db(assignment, &eobj_vec)?;
 
     // This function calls mark_dest_shark_ready() which in turn
     // updates the assigned_mb counter for this shark.
@@ -2581,7 +2721,8 @@ fn shark_assignment_generator(
                     // this will clean that up before exiting.
 
                     job_action
-                        .insert_assignment_into_db(&assignment.id, &eobj_vec)?;
+                        .insert_assignment_into_db(&mut assignment,
+                                                   &eobj_vec)?;
 
                     _channel_send_assignment(
                         Arc::clone(&job_action),
