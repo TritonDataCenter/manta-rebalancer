@@ -111,8 +111,8 @@ fn get_job_db_conn_common(uuid: &Uuid) -> Result<PgConnection, StatusError> {
 fn get_evacaute_job_status(
     uuid: &Uuid,
 ) -> Result<JobStatusResultsEvacuate, StatusError> {
-    use diesel::dsl::count_star;
     use crate::jobs::evacuate::duplicates::dsl::duplicates;
+    use diesel::dsl::count_star;
 
     let mut ret = HashMap::new();
     let mut total_count: i64 = 0;

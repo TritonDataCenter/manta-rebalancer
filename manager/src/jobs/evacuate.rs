@@ -73,8 +73,8 @@ const EVACUATE_OBJECTS_DB: &str = "evacuateobjects";
 use diesel::deserialize::{self, FromSql};
 use diesel::pg::{Pg, PgConnection, PgValue};
 use diesel::prelude::*;
-use diesel::result::{DatabaseErrorKind, DatabaseErrorInformation};
 use diesel::result::Error::DatabaseError;
+use diesel::result::{DatabaseErrorInformation, DatabaseErrorKind};
 use diesel::serialize::{self, IsNull, Output, ToSql};
 use diesel::sql_types;
 use sharkspotter::SharkspotterMessage;
@@ -1164,14 +1164,18 @@ impl EvacuateJob {
         let mut client = pg::Client::connect(&connect_string, pg::NoTls)
             .expect("PG Connection error");
 
-       client.execute(
-           "INSERT INTO duplicates (id, key, shards) \
+        info!("Inserting duplicate object: {:#?}", duplicate);
+
+        client
+            .execute(
+                "INSERT INTO duplicates (id, key, shards) \
            VALUES ($1, $2, $3) \
            ON CONFLICT (id)\
            DO UPDATE SET shards = mantastubs.shards || $4;
            ",
-           &[&duplicate.id, &duplicate.key, &duplicate.shards, &new_shard],
-       ).expect("Upsert error");
+                &[&duplicate.id, &duplicate.key, &duplicate.shards, &new_shard],
+            )
+            .expect("Upsert error");
     }
 
     fn handle_duplicate(
@@ -1184,14 +1188,12 @@ impl EvacuateJob {
         use self::evacuateobjects::dsl::{evacuateobjects, id as db_id};
 
         let details = info.details().expect("info missing details");
-        let mut new_shard= -1;
-        let mut key= "".to_string();
+        let mut new_shard = -1;
+        let mut key = "".to_string();
         let mut object_id = "".to_string();
         let mut count = 0;
 
-        assignment.tasks.retain(|t, _| {
-           !details.contains(t)
-        });
+        assignment.tasks.retain(|t, _| !details.contains(t));
 
         vec_objs.retain(|o| {
             if details.contains(o.id.as_str()) {
@@ -1211,8 +1213,10 @@ impl EvacuateJob {
             }
         });
 
-        assert_eq!(count, 1,
-                   "Did not find the right number of duplicate objects");
+        assert_eq!(
+            count, 1,
+            "Did not find the right number of duplicate objects"
+        );
         assert_ne!(new_shard, -1);
 
         let existing_entry: EvacuateObject = evacuateobjects
@@ -1231,8 +1235,11 @@ impl EvacuateJob {
             shards: vec![new_shard.clone(), existing_shard],
         };
 
-        EvacuateJob::insert_duplicate_object(duplicate, new_shard, &self
-            .db_name);
+        EvacuateJob::insert_duplicate_object(
+            duplicate,
+            new_shard,
+            &self.db_name,
+        );
     }
 
     #[allow(clippy::ptr_arg)]
@@ -1260,8 +1267,25 @@ impl EvacuateJob {
 
         while !ret.is_ok() {
             match ret {
-                Err(DatabaseError(DatabaseErrorKind::UniqueViolation, info)) => {
-                    self.handle_duplicate(assignment, &mut obj_list, info, &*locked_conn)
+                Err(DatabaseError(
+                    DatabaseErrorKind::UniqueViolation,
+                    info,
+                )) => {
+                    info!(
+                        "Encountered duplicate object in {}, \
+                         assignment_count {}, obj_list_count: {}: {:#?} \
+                         ",
+                        assign_id,
+                        assignment.tasks.len(),
+                        obj_list.len(),
+                        info.details()
+                    );
+                    self.handle_duplicate(
+                        assignment,
+                        &mut obj_list,
+                        info,
+                        &*locked_conn,
+                    )
                 }
                 Ok(_) => (), // unreachable?
                 Err(e) => {
@@ -1270,6 +1294,14 @@ impl EvacuateJob {
                     panic!(msg);
                 }
             }
+
+            info!(
+                "After duplicate handler {}, assignment_count: {}, \
+                 obj_list_count: {}",
+                assign_id,
+                assignment.tasks.len(),
+                obj_list.len()
+            );
 
             ret = diesel::insert_into(evacuateobjects)
                 .values(obj_list.clone())
@@ -2639,7 +2671,8 @@ fn add_object_to_assignment(
         EvacuateJob::insert_duplicate_object(
             duplicate,
             eobj.shard,
-            &job_action.db_name);
+            &job_action.db_name,
+        );
 
         return Err(AssignmentAddObjectError::DuplicateObject);
     }
@@ -2745,9 +2778,10 @@ fn shark_assignment_generator(
                     // this will clean that up before exiting.
 
                     // This function modifies both assignment and eobj_vec.
-                    job_action
-                        .insert_assignment_into_db(&mut assignment,
-                                                   &eobj_vec)?;
+                    job_action.insert_assignment_into_db(
+                        &mut assignment,
+                        &eobj_vec,
+                    )?;
 
                     _channel_send_assignment(
                         Arc::clone(&job_action),
