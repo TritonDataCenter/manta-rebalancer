@@ -1203,7 +1203,7 @@ impl EvacuateJob {
 
                 key = manta_object.key;
                 object_id = o.id.to_owned();
-                new_shard = o.shard.clone();
+                new_shard = o.shard;
 
                 count += 1;
 
@@ -1232,7 +1232,7 @@ impl EvacuateJob {
         let duplicate = Duplicate {
             id: object_id,
             key,
-            shards: vec![new_shard.clone(), existing_shard],
+            shards: vec![new_shard, existing_shard],
         };
 
         EvacuateJob::insert_duplicate_object(
@@ -1265,7 +1265,7 @@ impl EvacuateJob {
             .values(obj_list.clone())
             .execute(&*locked_conn);
 
-        while !ret.is_ok() {
+        while ret.is_err() {
             match ret {
                 Err(DatabaseError(
                     DatabaseErrorKind::UniqueViolation,
