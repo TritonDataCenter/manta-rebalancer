@@ -1185,7 +1185,7 @@ impl EvacuateJob {
 
         let details = info.details().expect("info missing details");
         let mut new_shard= -1;
-        let key;
+        let mut key= "".to_string();
         let mut object_id = "".to_string();
         let mut count = 0;
 
@@ -1194,7 +1194,7 @@ impl EvacuateJob {
         });
 
         vec_objs.retain(|o| {
-            if details.contains(o.id.to_string()) {
+            if details.contains(o.id.as_str()) {
                 let manta_object: MantaObjectEssential =
                     serde_json::from_value(o.object.clone())
                         .expect("manta object essential");
@@ -1209,7 +1209,6 @@ impl EvacuateJob {
             } else {
                 true
             }
-            !details.contains(o.id.to_string())
         });
 
         assert_eq!(count, 1,
@@ -1217,11 +1216,12 @@ impl EvacuateJob {
         assert_ne!(new_shard, -1);
 
         let existing_entry: EvacuateObject = evacuateobjects
-                .filter(db_id.eq(&object_id))
-                .load::<EvacuateObject>(conn)
-                .expect("getting filtered objects")
-                .first()
-                .expect("expected one entry");
+            .filter(db_id.eq(&object_id))
+            .load::<EvacuateObject>(conn)
+            .expect("getting filtered objects")
+            .first()
+            .expect("empty existing entries")
+            .to_owned();
 
         let existing_shard = existing_entry.shard;
 
@@ -1243,39 +1243,49 @@ impl EvacuateJob {
     ) -> Result<usize, Error> {
         use self::evacuateobjects::dsl::*;
 
-        let assign_id = &assignment.id;
+        let assign_id = assignment.id.clone();
         let mut obj_list = vec_objs.to_owned();
 
         debug!(
             "Inserting {} objects for assignment ({}) into db",
-            vec_objs.len(),
+            obj_list.len(),
             assign_id
         );
 
         let locked_conn = self.conn.lock().expect("DB conn lock");
-        let ret = match diesel::insert_into(evacuateobjects)
-            .values(vec_objs)
-            .execute(&*locked_conn)
-        {
-            Err(DatabaseError(DatabaseErrorKind::UniqueViolation, info)) => {
-                self.handle_duplicate(assignment, &mut obj_list)
+
+        let mut ret = diesel::insert_into(evacuateobjects)
+            .values(obj_list.clone())
+            .execute(&*locked_conn);
+
+        while !ret.is_ok() {
+            match ret {
+                Err(DatabaseError(DatabaseErrorKind::UniqueViolation, info)) => {
+                    self.handle_duplicate(assignment, &mut obj_list, info, &*locked_conn)
+                }
+                Ok(_) => (), // unreachable?
+                Err(e) => {
+                    let msg = format!("Error inserting object into DB: {}", e);
+                    error!("{}", msg);
+                    panic!(msg);
+                }
             }
-            Ok(num_records) => num_records,
-            Err(e) => {
-                let msg = format!("Error inserting object into DB: {}", e);
-                error!("{}", msg);
-                panic!(msg);
-            }
-        };
+
+            ret = diesel::insert_into(evacuateobjects)
+                .values(obj_list.clone())
+                .execute(&*locked_conn);
+        }
+
+        let num_records = ret.expect("num_records");
 
         debug!(
             "inserted {} objects for assignment {} into db",
-            ret, assign_id
+            num_records, assign_id
         );
 
-        assert_eq!(ret, vec_objs.len());
+        assert_eq!(num_records, obj_list.len());
 
-        Ok(ret)
+        Ok(num_records)
     }
 
     // There are other possible approaches here, and we should check to see which one performs the
@@ -2543,6 +2553,7 @@ enum AssignmentAddObjectError {
     BadMantaObject,
     DestinationInsufficentSpace,
     SouceIsEvacShark,
+    DuplicateObject,
 }
 
 // return True of False if we should flush the assignment or not
@@ -2602,7 +2613,7 @@ fn add_object_to_assignment(
         return Err(AssignmentAddObjectError::DestinationInsufficentSpace);
     }
 
-    if let Some(eobj) = assignment.tasks.insert(
+    if let Some(task) = assignment.tasks.insert(
         manta_object.object_id.to_owned(),
         Task {
             object_id: manta_object.object_id.to_owned(),
@@ -2617,8 +2628,20 @@ fn add_object_to_assignment(
         // overwriting one that is already in the assignment.
         // Call job_action.handle_duplicate() on this one.  It's just as good
         // a any other duplicate.
+        // and return a new error code
         // TODO
-        unimplemented!();
+        let duplicate = Duplicate {
+            id: task.object_id,
+            key: manta_object.key,
+            shards: vec![eobj.shard],
+        };
+
+        EvacuateJob::insert_duplicate_object(
+            duplicate,
+            eobj.shard,
+            &job_action.db_name);
+
+        return Err(AssignmentAddObjectError::DuplicateObject);
     }
 
     // We don't checked_sub() here because if we do underflow we want to
@@ -2652,6 +2675,7 @@ fn flush_assignment(
     shark: &StorageNode,
     full_assignment_tx: &crossbeam::Sender<Assignment>,
 ) -> Result<u64, Error> {
+    // This function modifies both assignment and eobj_vec
     job_action.insert_assignment_into_db(assignment, &eobj_vec)?;
 
     // This function calls mark_dest_shark_ready() which in turn
@@ -2720,6 +2744,7 @@ fn shark_assignment_generator(
                     // without doing this and we have an active assignment,
                     // this will clean that up before exiting.
 
+                    // This function modifies both assignment and eobj_vec.
                     job_action
                         .insert_assignment_into_db(&mut assignment,
                                                    &eobj_vec)?;
@@ -2763,6 +2788,7 @@ fn shark_assignment_generator(
                     ) {
                         Ok(eobj) => eobj_vec.push(eobj),
                         Err(e) => match e {
+                            AssignmentAddObjectError::DuplicateObject |
                             AssignmentAddObjectError::BadMantaObject |
                             AssignmentAddObjectError::SouceIsEvacShark => {
                                 // We either skipped or errored on an object,
@@ -4659,7 +4685,7 @@ mod tests {
         // Put the EvacuateObject's into the DB so that the process function
         // can look them up later.
         job_action
-            .insert_assignment_into_db(&uuid, &eobjs)
+            .insert_assignment_into_db(&mut assignment, &eobjs)
             .expect("process test: insert many");
 
         let mut tasks = HashMap::new();
