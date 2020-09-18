@@ -1205,8 +1205,12 @@ impl EvacuateJob {
            ON CONFLICT (id)\
            DO UPDATE SET shards = duplicates.shards || $4;
            ",
-                &[&duplicate.id, &duplicate.key, &duplicate.shards,
-                    &new_shard_array],
+                &[
+                    &duplicate.id,
+                    &duplicate.key,
+                    &duplicate.shards,
+                    &new_shard_array,
+                ],
             )
             .expect("Upsert error");
     }
@@ -2649,28 +2653,26 @@ fn add_object_to_assignment(
         return Err(AssignmentAddObjectError::DestinationInsufficentSpace);
     }
 
-    info!(
-        "DEBUG: inserting object with id: {}",
-        manta_object.object_id
-    );
-
-    if assignment.tasks.insert(
-        manta_object.object_id.to_owned(),
-        Task {
-            object_id: manta_object.object_id.to_owned(),
-            owner: manta_object.owner.to_owned(),
-            md5sum: manta_object.content_md5.to_owned(),
-            source: source.to_owned(),
-            status: TaskStatus::Pending,
-        },
-    ).is_some() {
+    if assignment
+        .tasks
+        .insert(
+            manta_object.object_id.to_owned(),
+            Task {
+                object_id: manta_object.object_id.to_owned(),
+                owner: manta_object.owner.to_owned(),
+                md5sum: manta_object.content_md5.to_owned(),
+                source: source.to_owned(),
+                status: TaskStatus::Pending,
+            },
+        )
+        .is_some()
+    {
         // We have encountered a duplicate.  We have no way to know which one
         // is the correct one but we don't want to lose objects here by
         // overwriting one that is already in the assignment.
         // So call insert_duplicate_object() on this one as we aren't sure if
         // this one is misplaced or if the resident object is misplaced.
-
-        info!("DEBUG: Found duplicate {}", manta_object.object_id);
+        //
         // Unfortunately we don't know the shard number of this task, so the
         // table will end up with one missing shard number.  The deleter will
         // have to handle this.  Fortunately, this only happens when two of
@@ -2680,6 +2682,12 @@ fn add_object_to_assignment(
         // shard number to task may require a change to the agents as well.
         // We could insert each evacuate object as we receive it, but we
         // currently group them in assignments for performance reasons.
+
+        debug!(
+            "Found duplicate in assignment{}: {}",
+            assignment.id, manta_object.object_id
+        );
+
         let duplicate = Duplicate {
             id: manta_object.object_id,
             key: manta_object.key,
@@ -2690,7 +2698,6 @@ fn add_object_to_assignment(
 
         return Err(AssignmentAddObjectError::DuplicateObject);
     }
-    info!("DEBUG: successfully inserted {}", manta_object.object_id);
 
     // We don't checked_sub() here because if we do underflow we want to
     // panic.  We've already assured that available_space >= content_mb above.
