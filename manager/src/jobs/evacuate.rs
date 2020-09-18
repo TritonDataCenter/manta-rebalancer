@@ -1171,7 +1171,7 @@ impl EvacuateJob {
                 "INSERT INTO duplicates (id, key, shards) \
            VALUES ($1, $2, $3) \
            ON CONFLICT (id)\
-           DO UPDATE SET shards = mantastubs.shards || $4;
+           DO UPDATE SET shards = duplicates.shards || $4;
            ",
                 &[&duplicate.id, &duplicate.key, &duplicate.shards, &new_shard],
             )
