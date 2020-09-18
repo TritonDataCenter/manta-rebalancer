@@ -1130,94 +1130,36 @@ impl EvacuateJob {
 
         let locked_conn = self.conn.lock().expect("DB conn lock");
 
-        // TODO: Is panic the right thing to do here?
-        // TODO: consider checking record count to ensure insert success
-        let ret = diesel::insert_into(evacuateobjects)
+        match diesel::insert_into(evacuateobjects)
             .values(obj)
             .execute(&*locked_conn)
-            .unwrap_or_else(|e| {
+        {
+            Ok(num_records) => num_records,
+            Err(DatabaseError(DatabaseErrorKind::UniqueViolation, _)) => {
+                self.insert_duplicate_with_existing(obj, &*locked_conn);
+                1
+            }
+            Err(e) => {
                 let msg = format!("Error inserting object into DB: {}", e);
                 error!("{}", msg);
                 panic!(msg);
-            });
-
-        assert_eq!(ret, 1);
-        ret
+            }
+        }
     }
 
-    // We want to concatenate the shards array with the new shard, but if
-    // this is the first time we have inserted this object then we want to
-    // make sure we include the existing shard (which should have been added
-    // to the duplicate.shards array passed to this function).  If the insert
-    // fails due to conflict that means we already have that shard number in
-    // the array.  In that case we only want to insert the new_shard number.
-    fn insert_duplicate_object(
-        duplicate: Duplicate,
-        new_shard: i32,
-        db_name: &str,
-    ) {
-        let connect_string = format!(
-            "host=localhost user=postgres password=postgres dbname={}",
-            db_name
-        );
-
-        let mut client = pg::Client::connect(&connect_string, pg::NoTls)
-            .expect("PG Connection error");
-
-        info!("Inserting duplicate object: {:#?}", duplicate);
-
-        client
-            .execute(
-                "INSERT INTO duplicates (id, key, shards) \
-           VALUES ($1, $2, $3) \
-           ON CONFLICT (id)\
-           DO UPDATE SET shards = duplicates.shards || $4;
-           ",
-                &[&duplicate.id, &duplicate.key, &duplicate.shards, &new_shard],
-            )
-            .expect("Upsert error");
-    }
-
-    fn handle_duplicate(
+    fn insert_duplicate_with_existing(
         &self,
-        assignment: &mut Assignment,
-        vec_objs: &mut Vec<EvacuateObject>,
-        info: Box<dyn DatabaseErrorInformation + Send + Sync>,
+        eobj: &EvacuateObject,
         conn: &PgConnection,
     ) {
         use self::evacuateobjects::dsl::{evacuateobjects, id as db_id};
 
-        let details = info.details().expect("info missing details");
-        let mut new_shard = -1;
-        let mut key = "".to_string();
-        let mut object_id = "".to_string();
-        let mut count = 0;
-
-        assignment.tasks.retain(|t, _| !details.contains(t));
-
-        vec_objs.retain(|o| {
-            if details.contains(o.id.as_str()) {
-                let manta_object: MantaObjectEssential =
-                    serde_json::from_value(o.object.clone())
-                        .expect("manta object essential");
-
-                key = manta_object.key;
-                object_id = o.id.to_owned();
-                new_shard = o.shard;
-
-                count += 1;
-
-                false
-            } else {
-                true
-            }
-        });
-
-        assert_eq!(
-            count, 1,
-            "Did not find the right number of duplicate objects"
-        );
-        assert_ne!(new_shard, -1);
+        let manta_object: MantaObjectEssential =
+            serde_json::from_value(eobj.object.clone())
+                .expect("manta object essential");
+        let object_id = eobj.id.to_owned();
+        let new_shard = eobj.shard;
+        let key = manta_object.key;
 
         let existing_entry: EvacuateObject = evacuateobjects
             .filter(db_id.eq(&object_id))
@@ -1235,11 +1177,73 @@ impl EvacuateJob {
             shards: vec![new_shard, existing_shard],
         };
 
-        EvacuateJob::insert_duplicate_object(
-            duplicate,
-            new_shard,
-            &self.db_name,
+        self.insert_duplicate_object(duplicate, new_shard);
+    }
+    // We want to concatenate the shards array with the new shard, but if
+    // this is the first time we have inserted this object then we want to
+    // make sure we include the existing shard (which should have been added
+    // to the duplicate.shards array passed to this function).  If the insert
+    // fails due to conflict that means we already have that shard number in
+    // the array.  In that case we only want to insert the new_shard number.
+    fn insert_duplicate_object(&self, duplicate: Duplicate, new_shard: i32) {
+        let db_name = &self.db_name;
+        let new_shard_array = vec![new_shard];
+        let connect_string = format!(
+            "host=localhost user=postgres password=postgres dbname={}",
+            db_name
         );
+
+        let mut client = pg::Client::connect(&connect_string, pg::NoTls)
+            .expect("PG Connection error");
+
+        info!("Inserting duplicate object: {:#?}", duplicate);
+
+        client
+            .execute(
+                "INSERT INTO duplicates (id, key, shards) \
+           VALUES ($1, $2, $3) \
+           ON CONFLICT (id)\
+           DO UPDATE SET shards = duplicates.shards || $4;
+           ",
+                &[&duplicate.id, &duplicate.key, &duplicate.shards,
+                    &new_shard_array],
+            )
+            .expect("Upsert error");
+    }
+
+    // This should only be called when an assignment fails to update.  There
+    // cannot be duplicate entries in a single assignment because it is a
+    // hashmap keyed by the object id.
+    fn handle_duplicate_assignment(
+        &self,
+        assignment: &mut Assignment,
+        vec_objs: &mut Vec<EvacuateObject>,
+        info: Box<dyn DatabaseErrorInformation + Send + Sync>,
+        conn: &PgConnection,
+    ) {
+        let details = info.details().expect("info missing details");
+        let mut count = 0;
+        let mut object: Option<EvacuateObject> = None;
+
+        assignment.tasks.retain(|t, _| !details.contains(t));
+
+        vec_objs.retain(|o| {
+            if details.contains(o.id.as_str()) {
+                object = Some(o.clone());
+                count += 1;
+                false
+            } else {
+                true
+            }
+        });
+
+        assert_eq!(
+            count, 1,
+            "Did not find the right number of duplicate objects"
+        );
+
+        let eobj = object.expect("Some object");
+        self.insert_duplicate_with_existing(&eobj, conn);
     }
 
     #[allow(clippy::ptr_arg)]
@@ -1280,7 +1284,7 @@ impl EvacuateJob {
                         obj_list.len(),
                         info.details()
                     );
-                    self.handle_duplicate(
+                    self.handle_duplicate_assignment(
                         assignment,
                         &mut obj_list,
                         info,
@@ -2645,7 +2649,12 @@ fn add_object_to_assignment(
         return Err(AssignmentAddObjectError::DestinationInsufficentSpace);
     }
 
-    if let Some(task) = assignment.tasks.insert(
+    info!(
+        "DEBUG: inserting object with id: {}",
+        manta_object.object_id
+    );
+
+    if assignment.tasks.insert(
         manta_object.object_id.to_owned(),
         Task {
             object_id: manta_object.object_id.to_owned(),
@@ -2654,28 +2663,34 @@ fn add_object_to_assignment(
             source: source.to_owned(),
             status: TaskStatus::Pending,
         },
-    ) {
+    ).is_some() {
         // We have encountered a duplicate.  We have no way to know which one
         // is the correct one but we don't want to lose objects here by
         // overwriting one that is already in the assignment.
-        // Call job_action.handle_duplicate() on this one.  It's just as good
-        // a any other duplicate.
-        // and return a new error code
-        // TODO
+        // So call insert_duplicate_object() on this one as we aren't sure if
+        // this one is misplaced or if the resident object is misplaced.
+
+        info!("DEBUG: Found duplicate {}", manta_object.object_id);
+        // Unfortunately we don't know the shard number of this task, so the
+        // table will end up with one missing shard number.  The deleter will
+        // have to handle this.  Fortunately, this only happens when two of
+        // the same objects are added to the same assignment.  Since
+        // assignment size is on the order of a few hundred and there are 50
+        // million objects per shark, this should be fairly rare.  Adding
+        // shard number to task may require a change to the agents as well.
+        // We could insert each evacuate object as we receive it, but we
+        // currently group them in assignments for performance reasons.
         let duplicate = Duplicate {
-            id: task.object_id,
+            id: manta_object.object_id,
             key: manta_object.key,
             shards: vec![eobj.shard],
         };
 
-        EvacuateJob::insert_duplicate_object(
-            duplicate,
-            eobj.shard,
-            &job_action.db_name,
-        );
+        job_action.insert_duplicate_object(duplicate, eobj.shard);
 
         return Err(AssignmentAddObjectError::DuplicateObject);
     }
+    info!("DEBUG: successfully inserted {}", manta_object.object_id);
 
     // We don't checked_sub() here because if we do underflow we want to
     // panic.  We've already assured that available_space >= content_mb above.
@@ -4051,13 +4066,13 @@ mod tests {
 
     fn start_test_obj_generator_thread(
         obj_tx: crossbeam_channel::Sender<SharkspotterMessage>,
-        test_objects: HashMap<String, MantaObject>,
+        test_objects: Vec<MantaObject>,
         from_shark: String,
     ) -> thread::JoinHandle<()> {
         thread::Builder::new()
             .name(String::from("test object generator thread"))
             .spawn(move || {
-                for (_, o) in test_objects.into_iter() {
+                for o in test_objects.into_iter() {
                     let shard = 1;
                     let etag = String::from("Fake_etag");
                     let mobj_value =
@@ -4309,7 +4324,11 @@ mod tests {
         // Generator Thread
         let generator_thread_handle = start_test_obj_generator_thread(
             obj_tx,
-            test_objects.clone(),
+            test_objects
+                .clone()
+                .values()
+                .map(|v| v.to_owned())
+                .collect(),
             job_action.from_shark.manta_storage_id.clone(),
         );
 
@@ -4419,7 +4438,11 @@ mod tests {
         // Generator Thread
         let generator_thread_handle = start_test_obj_generator_thread(
             obj_tx,
-            test_objects.clone(),
+            test_objects
+                .clone()
+                .values()
+                .map(|v| v.to_owned())
+                .collect(),
             job_action.from_shark.manta_storage_id.clone(),
         );
 
@@ -4573,7 +4596,7 @@ mod tests {
 
         let generator_thread_handle = start_test_obj_generator_thread(
             obj_tx,
-            test_objects_copy,
+            test_objects_copy.values().map(|v| v.to_owned()).collect(),
             job_action.from_shark.manta_storage_id.clone(),
         );
 
@@ -4971,7 +4994,11 @@ mod tests {
         // Threads
         let obj_generator_th = start_test_obj_generator_thread(
             obj_tx,
-            test_objects.clone(),
+            test_objects
+                .clone()
+                .values()
+                .map(|v| v.to_owned())
+                .collect(),
             job_action.from_shark.manta_storage_id.clone(),
         );
 
@@ -5038,5 +5065,106 @@ mod tests {
             .expect("internal assignment post thread");
 
         debug!("TOTAL TIME: {}ms", now.elapsed().as_millis());
+    }
+
+    #[test]
+    fn test_duplicate_handler() {
+        unit_test_init();
+
+        let num_objects: usize = 100;
+        let mut test_objects = vec![];
+        let mut g = StdThreadGen::new(10);
+        let mobj = MantaObject::arbitrary(&mut g);
+
+        let (full_assignment_tx, full_assignment_rx) = crossbeam::bounded(5);
+        let (obj_tx, obj_rx) = crossbeam::bounded(5);
+        let (md_update_tx, md_update_rx) = crossbeam::bounded(5);
+        let (checker_fini_tx, checker_fini_rx) = crossbeam::bounded(1);
+
+        for _ in 0..num_objects {
+            test_objects.push(mobj.clone());
+        }
+
+        struct MockStorinfo;
+
+        impl MockStorinfo {
+            fn new() -> Self {
+                MockStorinfo {}
+            }
+        }
+
+        impl SharkSource for MockStorinfo {
+            fn choose(&self, _: &ChooseAlgorithm) -> Option<Vec<StorageNode>> {
+                let mut rng = rand::thread_rng();
+                let random = rng.gen_range(0, 10);
+
+                if random == 0 {
+                    return None;
+                }
+
+                Some(generate_sharks(random, true))
+            }
+        }
+
+        // Storinfo
+        let storinfo = MockStorinfo::new();
+        let storinfo = Arc::new(storinfo);
+
+        // Job Action
+        let job_action = Arc::new(create_test_evacuate_job(num_objects));
+
+        let obj_generator_th = start_test_obj_generator_thread(
+            obj_tx,
+            test_objects,
+            job_action.from_shark.manta_storage_id.clone(),
+        );
+
+        let metadata_update_thread =
+            start_metadata_update_broker(Arc::clone(&job_action), md_update_rx)
+                .expect("start metadata updater thread");
+
+        let assignment_checker_thread = start_assignment_checker(
+            Arc::clone(&job_action),
+            checker_fini_rx,
+            md_update_tx,
+        )
+        .expect("start assignment checker thread");
+
+        let assign_post_thread =
+            start_assignment_post(full_assignment_rx, Arc::clone(&job_action))
+                .expect("assignment post thread");
+
+        let manager_thread = start_assignment_manager(
+            full_assignment_tx,
+            checker_fini_tx,
+            obj_rx,
+            Arc::clone(&job_action),
+            Arc::clone(&storinfo),
+        )
+        .expect("start assignment manager");
+
+        obj_generator_th.join().expect("object generator thread");
+
+        manager_thread
+            .join()
+            .expect("test assignment manager thread")
+            .expect("internal manager thread");
+
+        metadata_update_thread
+            .join()
+            .expect("joining MD update thread")
+            .expect("internal MD update thread");
+
+        assignment_checker_thread
+            .join()
+            .expect("joining assignment checker thread")
+            .expect("internal assignment checker thread");
+
+        assign_post_thread
+            .join()
+            .expect("joining assignment post thread")
+            .expect("internal assignment post thread");
+
+        println!("dbname: {}", job_action.db_name);
     }
 }
