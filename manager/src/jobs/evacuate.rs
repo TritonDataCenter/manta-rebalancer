@@ -3772,11 +3772,13 @@ fn metadata_update_broker_dynamic(
 
                             pool.execute(worker);
                         }
-                        error!(
-                            "MD Update: Error receiving metadata from \
-                             assignment checker thread: {}",
+
+                        warn!(
+                            "Could not receive metadata from assignment \
+                             checker thread: {}",
                             e
                         );
+
                         break;
                     }
                 };
@@ -4948,7 +4950,7 @@ mod tests {
         );
     }
 
-    fn run_full_test(test_objects: Vec<MantaObject>) -> String {
+    fn run_full_test(test_objects: Vec<MantaObject>, job_action: EvacuateJob) {
         unit_test_init();
 
         struct MockStorinfo;
@@ -4973,7 +4975,6 @@ mod tests {
         }
 
         let now = std::time::Instant::now();
-        let num_objects: usize = test_objects.len();
 
         // Storinfo
         let storinfo = MockStorinfo::new();
@@ -4986,8 +4987,7 @@ mod tests {
         let (checker_fini_tx, checker_fini_rx) = crossbeam::bounded(1);
 
         // Job Action
-        let job_action = Arc::new(create_test_evacuate_job(num_objects));
-        let job_id = job_action.db_name.clone();
+        let job_action = Arc::new(job_action);
 
         // Threads
         let obj_generator_th = start_test_obj_generator_thread(
@@ -5059,7 +5059,6 @@ mod tests {
             .expect("internal assignment post thread");
 
         debug!("TOTAL TIME: {}ms", now.elapsed().as_millis());
-        job_id
     }
 
     #[test]
@@ -5075,29 +5074,13 @@ mod tests {
             test_objects.push(mobj);
         }
 
-        let job_id = run_full_test(test_objects);
+        let job_action = create_test_evacuate_job(num_objects);
+        let job_id = job_action.db_name.clone();
+        run_full_test(test_objects, job_action);
         info!("Completed full test: {}", job_id);
     }
 
-    #[test]
-    fn test_duplicate_handler() {
-        unit_test_init();
-
-        let num_objects: usize = 100;
-        let mut test_objects = vec![];
-        let mut g = StdThreadGen::new(10);
-
-        let mobj = MantaObject::arbitrary(&mut g);
-
-        for _ in 0..num_objects {
-            test_objects.push(mobj.clone());
-        }
-
-        let job_id = run_full_test(test_objects);
-        info!("Completed duplicate handler test: {}", job_id);
-
-        // Now get the length of the shards array in our single entry, and
-        // confirm that it is num_objects - 1.
+    fn validate_duplicate_table(job_id: &str, expected_shards: usize) {
         use diesel::sql_query;
         use diesel::sql_types::Integer;
         #[derive(QueryableByName, Debug)]
@@ -5106,7 +5089,7 @@ mod tests {
             array_length: i32,
         }
 
-        let conn = match pg_db::connect_db(&job_id) {
+        let conn = match pg_db::connect_db(job_id) {
             Ok(c) => c,
             Err(e) => {
                 println!("Error creating Evacuate Job: {}", e);
@@ -5119,15 +5102,65 @@ mod tests {
         )
         .load::<ShardCount>(&conn)
         .expect("array length query");
-
         assert_eq!(shard_count.len(), 1);
-        let array_length = shard_count.first().expect("").array_length;
 
+        let array_length = shard_count.first().expect("").array_length;
+        assert_eq!(array_length as usize, expected_shards);
+    }
+
+    #[test]
+    fn test_duplicate_handler() {
+        unit_test_init();
+
+        let num_objects: usize = 100;
+        let mut test_objects = vec![];
+        let mut g = StdThreadGen::new(10);
+        let mobj = MantaObject::arbitrary(&mut g);
+
+        for _ in 0..num_objects {
+            test_objects.push(mobj.clone());
+        }
+
+        let job_action = create_test_evacuate_job(num_objects);
+        let job_id = job_action.db_name.clone();
+        run_full_test(test_objects, job_action);
+        info!("Completed duplicate handler test: {}", job_id);
+
+        // Now get the length of the shards array in our single entry, and
+        // confirm that it is num_objects - 1.
         // We expect the length to be 1 less than num_objects because this
         // will exercise the add_object_to_assignment() function, which
         // checks for duplicates in the same assignment.  This function
         // currently can't get the shard number of both the previously added
         // object and the duplicate.
-        assert_eq!(array_length as usize, num_objects - 1);
+        validate_duplicate_table(&job_id, num_objects - 1);
+    }
+
+    #[test]
+    fn test_duplicate_handler_small_assignment() {
+        unit_test_init();
+
+        let num_objects: usize = 100;
+        let mut test_objects = vec![];
+        let mut g = StdThreadGen::new(10);
+        let mobj = MantaObject::arbitrary(&mut g);
+
+        for _ in 0..num_objects {
+            test_objects.push(mobj.clone());
+        }
+
+        let mut job_action = create_test_evacuate_job(num_objects);
+        let job_id = job_action.db_name.clone();
+        job_action.config.options.max_tasks_per_assignment = 1;
+
+        run_full_test(test_objects, job_action);
+        info!("Completed duplicate handler test: {}", job_id);
+
+        // We expect the length to be exactly num_objects because this
+        // will skip the duplicate check in the add_object_to_assignment()
+        // function.  Instead it will hit the handle_duplicate_assignment()
+        // function when it tries to insert an assignment with a duplicate
+        // object id.
+        validate_duplicate_table(&job_id, num_objects);
     }
 }
