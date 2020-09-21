@@ -4949,13 +4949,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn full_test() {
+    fn run_full_test(test_objects: Vec<MantaObject>) {
         unit_test_init();
-
-        let num_objects: usize = 100;
-        let mut g = StdThreadGen::new(10);
-        let mut test_objects = HashMap::new();
 
         struct MockStorinfo;
 
@@ -4979,6 +4974,7 @@ mod tests {
         }
 
         let now = std::time::Instant::now();
+        let num_objects: usize = test_objects.len();
 
         // Storinfo
         let storinfo = MockStorinfo::new();
@@ -4993,19 +4989,10 @@ mod tests {
         // Job Action
         let job_action = Arc::new(create_test_evacuate_job(num_objects));
 
-        for _ in 0..num_objects {
-            let mobj = MantaObject::arbitrary(&mut g);
-            test_objects.insert(mobj.object_id.clone(), mobj);
-        }
-
         // Threads
         let obj_generator_th = start_test_obj_generator_thread(
             obj_tx,
-            test_objects
-                .clone()
-                .values()
-                .map(|v| v.to_owned())
-                .collect(),
+            test_objects,
             job_action.from_shark.manta_storage_id.clone(),
         );
 
@@ -5075,103 +5062,33 @@ mod tests {
     }
 
     #[test]
+    fn full_test() {
+        unit_test_init();
+
+        let num_objects: usize = 100;
+        let mut test_objects = vec![];
+        let mut g = StdThreadGen::new(10);
+
+        for _ in 0..num_objects {
+            let mobj = MantaObject::arbitrary(&mut g);
+            test_objects.push(mobj);
+        }
+        run_full_test(test_objects);
+    }
+
+    #[test]
     fn test_duplicate_handler() {
         unit_test_init();
 
         let num_objects: usize = 100;
         let mut test_objects = vec![];
         let mut g = StdThreadGen::new(10);
-        let mobj = MantaObject::arbitrary(&mut g);
 
-        let (full_assignment_tx, full_assignment_rx) = crossbeam::bounded(5);
-        let (obj_tx, obj_rx) = crossbeam::bounded(5);
-        let (md_update_tx, md_update_rx) = crossbeam::bounded(5);
-        let (checker_fini_tx, checker_fini_rx) = crossbeam::bounded(1);
+        let mobj = MantaObject::arbitrary(&mut g);
 
         for _ in 0..num_objects {
             test_objects.push(mobj.clone());
         }
-
-        struct MockStorinfo;
-
-        impl MockStorinfo {
-            fn new() -> Self {
-                MockStorinfo {}
-            }
-        }
-
-        impl SharkSource for MockStorinfo {
-            fn choose(&self, _: &ChooseAlgorithm) -> Option<Vec<StorageNode>> {
-                let mut rng = rand::thread_rng();
-                let random = rng.gen_range(0, 10);
-
-                if random == 0 {
-                    return None;
-                }
-
-                Some(generate_sharks(random, true))
-            }
-        }
-
-        // Storinfo
-        let storinfo = MockStorinfo::new();
-        let storinfo = Arc::new(storinfo);
-
-        // Job Action
-        let job_action = Arc::new(create_test_evacuate_job(num_objects));
-
-        let obj_generator_th = start_test_obj_generator_thread(
-            obj_tx,
-            test_objects,
-            job_action.from_shark.manta_storage_id.clone(),
-        );
-
-        let metadata_update_thread =
-            start_metadata_update_broker(Arc::clone(&job_action), md_update_rx)
-                .expect("start metadata updater thread");
-
-        let assignment_checker_thread = start_assignment_checker(
-            Arc::clone(&job_action),
-            checker_fini_rx,
-            md_update_tx,
-        )
-        .expect("start assignment checker thread");
-
-        let assign_post_thread =
-            start_assignment_post(full_assignment_rx, Arc::clone(&job_action))
-                .expect("assignment post thread");
-
-        let manager_thread = start_assignment_manager(
-            full_assignment_tx,
-            checker_fini_tx,
-            obj_rx,
-            Arc::clone(&job_action),
-            Arc::clone(&storinfo),
-        )
-        .expect("start assignment manager");
-
-        obj_generator_th.join().expect("object generator thread");
-
-        manager_thread
-            .join()
-            .expect("test assignment manager thread")
-            .expect("internal manager thread");
-
-        metadata_update_thread
-            .join()
-            .expect("joining MD update thread")
-            .expect("internal MD update thread");
-
-        assignment_checker_thread
-            .join()
-            .expect("joining assignment checker thread")
-            .expect("internal assignment checker thread");
-
-        assign_post_thread
-            .join()
-            .expect("joining assignment post thread")
-            .expect("internal assignment post thread");
-
-        println!("dbname: {}", job_action.db_name);
+        run_full_test(test_objects);
     }
 }
