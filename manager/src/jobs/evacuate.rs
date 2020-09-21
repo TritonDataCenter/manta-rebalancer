@@ -1281,8 +1281,7 @@ impl EvacuateJob {
                 )) => {
                     info!(
                         "Encountered duplicate object in {}, \
-                         assignment_count {}, obj_list_count: {}: {:#?} \
-                         ",
+                         assignment_count {}, obj_list_count: {}: {:#?}",
                         assign_id,
                         assignment.tasks.len(),
                         obj_list.len(),
@@ -4949,7 +4948,7 @@ mod tests {
         );
     }
 
-    fn run_full_test(test_objects: Vec<MantaObject>) {
+    fn run_full_test(test_objects: Vec<MantaObject>) -> String {
         unit_test_init();
 
         struct MockStorinfo;
@@ -4988,6 +4987,7 @@ mod tests {
 
         // Job Action
         let job_action = Arc::new(create_test_evacuate_job(num_objects));
+        let job_id = job_action.db_name.clone();
 
         // Threads
         let obj_generator_th = start_test_obj_generator_thread(
@@ -5059,6 +5059,7 @@ mod tests {
             .expect("internal assignment post thread");
 
         debug!("TOTAL TIME: {}ms", now.elapsed().as_millis());
+        job_id
     }
 
     #[test]
@@ -5073,7 +5074,9 @@ mod tests {
             let mobj = MantaObject::arbitrary(&mut g);
             test_objects.push(mobj);
         }
-        run_full_test(test_objects);
+
+        let job_id = run_full_test(test_objects);
+        info!("Completed full test: {}", job_id);
     }
 
     #[test]
@@ -5089,6 +5092,42 @@ mod tests {
         for _ in 0..num_objects {
             test_objects.push(mobj.clone());
         }
-        run_full_test(test_objects);
+
+        let job_id = run_full_test(test_objects);
+        info!("Completed duplicate handler test: {}", job_id);
+
+        // Now get the length of the shards array in our single entry, and
+        // confirm that it is num_objects - 1.
+        use diesel::sql_query;
+        use diesel::sql_types::Integer;
+        #[derive(QueryableByName, Debug)]
+        struct ShardCount {
+            #[sql_type = "Integer"]
+            array_length: i32,
+        }
+
+        let conn = match pg_db::connect_db(&job_id) {
+            Ok(c) => c,
+            Err(e) => {
+                println!("Error creating Evacuate Job: {}", e);
+                std::process::exit(1);
+            }
+        };
+
+        let shard_count = sql_query(
+            "SELECT ARRAY_LENGTH(duplicates.shards, 1) from duplicates",
+        )
+        .load::<ShardCount>(&conn)
+        .expect("array length query");
+
+        assert_eq!(shard_count.len(), 1);
+        let array_length = shard_count.first().expect("").array_length;
+
+        // We expect the length to be 1 less than num_objects because this
+        // will exercise the add_object_to_assignment() function, which
+        // checks for duplicates in the same assignment.  This function
+        // currently can't get the shard number of both the previously added
+        // object and the duplicate.
+        assert_eq!(array_length as usize, num_objects - 1);
     }
 }
