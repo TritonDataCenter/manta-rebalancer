@@ -111,8 +111,12 @@ fn get_job_db_conn_common(uuid: &Uuid) -> Result<PgConnection, StatusError> {
 fn get_evacaute_job_status(
     uuid: &Uuid,
 ) -> Result<JobStatusResultsEvacuate, StatusError> {
+    use crate::jobs::evacuate::duplicates::dsl::duplicates;
+    use diesel::dsl::count_star;
+
     let mut ret = HashMap::new();
     let mut total_count: i64 = 0;
+    let duplicate_count;
     let conn = get_job_db_conn_common(&uuid)?;
 
     // Unfortunately diesel doesn't have GROUP BY support yet, so we do a raw
@@ -138,6 +142,10 @@ fn get_evacaute_job_status(
             .or_insert(0);
     }
 
+    duplicate_count = duplicates.select(count_star()).first(&conn).unwrap_or(0);
+    total_count += duplicate_count;
+
+    ret.insert("Duplicates".into(), duplicate_count);
     ret.insert("Total".into(), total_count);
 
     Ok(ret)

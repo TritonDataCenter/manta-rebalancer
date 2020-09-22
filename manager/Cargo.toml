@@ -1,6 +1,6 @@
 [package]
 name = "manager"
-version = "0.3.2"
+version = "0.4.0"
 authors = ["Jenkins Agent <jenkins-agent@joyent.com>"]
 edition = "2018"
 workspace = ".."
@@ -41,6 +41,7 @@ threadpool = "1.7.1"
 resolve = "0.2.0"
 signal-hook = "0.1.13"
 failure = "0.1.8"
+pg = {version = "0.17.5", package = "postgres"}
 
 [dev-dependencies]
 # Unfortuantely there is a long standing bug in mustache version 0.9.0 that has
