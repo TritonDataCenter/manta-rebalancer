@@ -17,7 +17,7 @@ Inflector = "0.11.4"
 lazy_static = "1.4.0"
 libmanta = { git = "https://github.com/joyent/rust-libmanta", features = ["postgres"], tag = "v0.7.0" }
 mime = "0.3.13"
-moray = { git = "https://github.com/joyent/rust-moray", features = ["postgres"], tag = "v0.11.2" }
+moray = { git = "https://github.com/joyent/rust-moray", features = ["postgres"], tag = "v0.11.4" }
 sharkspotter = { git = "https://github.com/joyent/rust-sharkspotter", features = ["postgres"], tag = "v0.16.5" }
 diesel = { version = "1.4.2", features = ["postgres"] }
 rand = "0.7.0"
