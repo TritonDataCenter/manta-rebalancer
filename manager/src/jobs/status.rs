@@ -67,7 +67,7 @@ pub struct JobStatus {
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct JobConfigEvacuate {
-    from_shark: MantaObjectShark,
+    pub from_shark: MantaObjectShark,
 }
 
 type JobStatusResultsEvacuate = HashMap<String, i64>;

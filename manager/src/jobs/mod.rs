@@ -23,6 +23,7 @@ use std::fmt;
 use std::io::Write;
 use std::str::FromStr;
 
+use crate::jobs::status::JobStatusConfig;
 use diesel::deserialize::{self, FromSql};
 use diesel::pg::{Pg, PgValue};
 use diesel::prelude::*;
@@ -135,6 +136,45 @@ impl JobBuilder {
         }
 
         self
+    }
+
+    pub fn retry(mut self, retry_uuid_str: &str) -> Result<JobBuilder, Error> {
+        let retry_uuid = Uuid::from_str(retry_uuid_str).map_err(Error::from)?;
+
+        let job_status = status::get_job(retry_uuid).map_err(|e| {
+            Error::from(InternalError::new(
+                Some(InternalErrorCode::DbQuery),
+                format!(
+                    "Could not find job with UUID {}: {:#?}",
+                    retry_uuid_str, e
+                ),
+            ))
+        })?;
+
+        match job_status.config {
+            JobStatusConfig::Evacuate(conf) => {
+                match EvacuateJob::retry(
+                    conf.from_shark.manta_storage_id,
+                    &self.config,
+                    &self.id.to_string(),
+                    retry_uuid_str,
+                ) {
+                    Ok(j) => {
+                        let action = JobAction::Evacuate(Box::new(j));
+                        self.action = Some(action);
+                    }
+                    Err(e) => {
+                        error!(
+                            "Failed to initialize retry evacuate job: {}",
+                            e
+                        );
+                        self.state = JobState::Failed;
+                    }
+                }
+            }
+        }
+
+        Ok(self)
     }
 
     // * commit the configuration

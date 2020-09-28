@@ -665,32 +665,20 @@ impl EvacuateJob {
         update_rx: Option<crossbeam_channel::Receiver<JobUpdateMessage>>,
         max_objects: Option<u32>,
     ) -> Result<Self, Error> {
-        let mut job = Self::new_common(
-            storage_id,
-            config,
-            db_name,
-            update_rx,
-        )?;
+        let mut job = Self::new_common(storage_id, config, db_name, update_rx)?;
 
         job.max_objects = max_objects;
 
         Ok(job)
     }
 
-    pub fn retry (
+    pub fn retry(
         storage_id: String,
         config: &Config,
         db_name: &str,
         retry_uuid: &str,
-        update_rx: Option<crossbeam_channel::Receiver<JobUpdateMessage>>,
     ) -> Result<Self, Error> {
-
-        let mut job = Self::new_common(
-            storage_id,
-            config,
-            db_name,
-            update_rx,
-        )?;
+        let mut job = Self::new_common(storage_id, config, db_name, None)?;
 
         job.evac_type = EvacuateJobType::Retry(retry_uuid.to_string());
 
@@ -737,7 +725,6 @@ impl EvacuateJob {
             object_movement_start_time: Mutex::new(None),
             md_update_time: AtomicU64::new(0),
         })
-
     }
 
     pub fn create_tables(&self) -> Result<usize, Error> {
@@ -790,21 +777,16 @@ impl EvacuateJob {
         // TODO: add thread barriers MANTA-4457
 
         let obj_generator_thread = match &job_action.evac_type {
-            EvacuateJobType::Initial => {
-                start_sharkspotter(
-                    obj_tx,
-                    domain.as_str(),
-                    Arc::clone(&job_action),
-                    min_shard,
-                    max_shard,
-                )?
-            },
+            EvacuateJobType::Initial => start_sharkspotter(
+                obj_tx,
+                domain.as_str(),
+                Arc::clone(&job_action),
+                min_shard,
+                max_shard,
+            )?,
             EvacuateJobType::Retry(retry_uuid) => {
                 // start local db generator
-                start_local_db_generator(
-                    obj_tx,
-                    retry_uuid
-                )?
+                start_local_db_generator(obj_tx, retry_uuid)?
             }
         };
 
@@ -2170,7 +2152,7 @@ fn local_db_generator(
     obj_tx: crossbeam::Sender<EvacuateObject>,
     retry_uuid: &str,
 ) -> Result<(), Error> {
-    use self::evacuateobjects::dsl::{evacuateobjects, status, id as obj_id};
+    use self::evacuateobjects::dsl::{evacuateobjects, id as obj_id, status};
 
     let limit = 500;
     let mut offset = 0;
@@ -2185,9 +2167,10 @@ fn local_db_generator(
 
     loop {
         let retry_objs: Vec<EvacuateObject> = evacuateobjects
-            .filter(status.eq_any(
-                vec![EvacuateObjectStatus::Skipped, EvacuateObjectStatus::Error]
-            ))
+            .filter(status.eq_any(vec![
+                EvacuateObjectStatus::Skipped,
+                EvacuateObjectStatus::Error,
+            ]))
             .order(obj_id)
             .limit(limit)
             .offset(offset)
@@ -2195,8 +2178,10 @@ fn local_db_generator(
             .expect("getting filtered objects");
 
         if retry_objs.is_empty() {
-            info!("Done scanning previous job {}.  Object Count: {}",
-                  retry_uuid, count);
+            info!(
+                "Done scanning previous job {}.  Object Count: {}",
+                retry_uuid, count
+            );
             break;
         }
 
@@ -2205,11 +2190,11 @@ fn local_db_generator(
         // dont include badshard number skips
         for obj in retry_objs {
             if let Err(e) = obj_tx.send(obj) {
-                return Err(
-                    InternalError::new(
+                return Err(InternalError::new(
                     Some(InternalErrorCode::Crossbeam),
                     CrossbeamError::from(e).description(),
-                    ).into());
+                )
+                .into());
             }
         }
 
@@ -2226,9 +2211,7 @@ fn start_local_db_generator(
     let db_name = retry_uuid.to_string();
     thread::Builder::new()
         .name(String::from("local_generator"))
-        .spawn(move || {
-            local_db_generator(obj_tx, &db_name)
-        })
+        .spawn(move || local_db_generator(obj_tx, &db_name))
         .map_err(Error::from)
 }
 /// Start the sharkspotter thread and feed the objects into the assignment
@@ -2264,39 +2247,43 @@ fn start_sharkspotter(
         .spawn(move || {
             let ss_trans_handle: JoinHandle<Result<(), Error>> =
                 thread::Builder::new()
-                .name("sharkspotter_translator".to_string())
-                .spawn(move || {
-                    while let Ok(ss_msg) = ss_trans_rx.recv() {
-                        let eo: EvacuateObject =
-                            match EvacuateObject::try_from(ss_msg) {
-                                Ok(o) => o,
-                                Err(e) => {
-                                    job_action.insert_into_db(&e);
-                                    continue;
-                                }
-                            };
+                    .name("sharkspotter_translator".to_string())
+                    .spawn(move || {
+                        while let Ok(ss_msg) = ss_trans_rx.recv() {
+                            let eo: EvacuateObject =
+                                match EvacuateObject::try_from(ss_msg) {
+                                    Ok(o) => o,
+                                    Err(e) => {
+                                        job_action.insert_into_db(&e);
+                                        continue;
+                                    }
+                                };
 
-                        if let Err(e) = obj_tx.send(eo) {
-                            error!("Could not send evacuate object.  Receive \
-                            side of channel exited prematurely {}", e);
+                            if let Err(e) = obj_tx.send(eo) {
+                                error!(
+                                    "Could not send evacuate object.  Receive \
+                                     side of channel exited prematurely {}",
+                                    e
+                                );
 
-                            return Err(InternalError::new(
-                                Some(InternalErrorCode::Crossbeam),
-                                CrossbeamError::from(e).description(),
-                            ).into());
+                                return Err(InternalError::new(
+                                    Some(InternalErrorCode::Crossbeam),
+                                    CrossbeamError::from(e).description(),
+                                )
+                                .into());
+                            }
                         }
-                    }
 
-                    info!("Sharkspotter translator thread exiting");
-                    Ok(())
-                }).expect("Start sharkspotter translator thread");
+                        info!("Sharkspotter translator thread exiting");
+                        Ok(())
+                    })
+                    .expect("Start sharkspotter translator thread");
             sharkspotter::run_multithreaded(&config, log, ss_trans_tx)
                 .map_err(Error::from)?;
 
             ss_trans_handle
                 .join()
                 .expect("sharkspotter translator join")
-
         })
         .map_err(Error::from)
 }
