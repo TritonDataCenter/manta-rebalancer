@@ -622,7 +622,7 @@ fn router(config: Arc<Mutex<Config>>) -> Router {
             .post("/jobs")
             .to_new_handler(job_create_handler.clone());
         route
-            .get("/jobs/:uuid/retry")
+            .post("/jobs/:uuid/retry")
             .with_path_extractor::<GetJobParams>()
             .to_new_handler(job_retry_handler.clone());
         route
