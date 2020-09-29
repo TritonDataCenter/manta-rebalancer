@@ -140,6 +140,12 @@ impl JobBuilder {
 
     pub fn retry(mut self, retry_uuid_str: &str) -> Result<JobBuilder, Error> {
         let retry_uuid = Uuid::from_str(retry_uuid_str).map_err(Error::from)?;
+        let (tx, rx) = if self.config.options.use_static_md_update_threads {
+            (None, None)
+        } else {
+            let (tx, rx) = crossbeam_channel::unbounded();
+            (Some(tx), Some(rx))
+        };
 
         let job_status = status::get_job(retry_uuid).map_err(|e| {
             Error::from(InternalError::new(
@@ -157,10 +163,12 @@ impl JobBuilder {
                     conf.from_shark.manta_storage_id,
                     &self.config,
                     &self.id.to_string(),
+                    rx,
                     retry_uuid_str,
                 ) {
                     Ok(j) => {
                         let action = JobAction::Evacuate(Box::new(j));
+                        self.update_tx = tx;
                         self.action = Some(action);
                     }
                     Err(e) => {

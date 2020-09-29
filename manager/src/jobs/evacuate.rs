@@ -676,9 +676,10 @@ impl EvacuateJob {
         storage_id: String,
         config: &Config,
         db_name: &str,
+        update_rx: Option<crossbeam_channel::Receiver<JobUpdateMessage>>,
         retry_uuid: &str,
     ) -> Result<Self, Error> {
-        let mut job = Self::new_common(storage_id, config, db_name, None)?;
+        let mut job = Self::new_common(storage_id, config, db_name, update_rx)?;
 
         job.evac_type = EvacuateJobType::Retry(retry_uuid.to_string());
 

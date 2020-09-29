@@ -370,6 +370,9 @@ impl Handler for JobRetryHandler {
     fn handle(self, mut state: State) -> Box<HandlerFuture> {
         let job_params = GetJobParams::take_from(&mut state);
         let retry_uuid = job_params.uuid;
+
+        info!("Retry Job {} Request", retry_uuid);
+
         let config = self.config.lock().expect("config lock").clone();
         let job_builder = match JobBuilder::new(config).retry(&retry_uuid) {
             Ok(jb) => jb,
