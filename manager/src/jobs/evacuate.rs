@@ -788,7 +788,11 @@ impl EvacuateJob {
             )?,
             EvacuateJobType::Retry(retry_uuid) => {
                 // start local db generator
-                start_local_db_generator(obj_tx, retry_uuid)?
+                start_local_db_generator(
+                    Arc::clone(&job_action),
+                    obj_tx,
+                    retry_uuid,
+                )?
             }
         };
 
@@ -1899,29 +1903,36 @@ impl UpdateMetadata for EvacuateJob {
             }
         }
 
-        // Convert the Vec<MantaObjectShark> into a serde Value
-        let sharks_value = serde_json::to_value(sharks)?;
-
-        // update the manta object Value with the new sharks Value
-        match object.get_mut("sharks") {
-            Some(sharks) => {
-                *sharks = sharks_value;
-            }
-            None => {
-                let msg =
-                    format!("Missing sharks in manta object {:#?}", object);
-
-                error!("{}", &msg);
-                return Err(InternalError::new(
-                    Some(InternalErrorCode::BadMantaObject),
-                    msg,
-                )
-                .into());
-            }
-        }
+        update_sharks_in_object_value(sharks, &mut object)?;
 
         Ok(object)
     }
+}
+
+fn update_sharks_in_object_value(
+    sharks: Vec<MantaObjectShark>,
+    object: &mut Value,
+) -> Result<(), Error> {
+    // Convert the Vec<MantaObjectShark> into a serde Value
+    let sharks_value = serde_json::to_value(sharks)?;
+
+    // update the manta object Value with the new sharks Value
+    match object.get_mut("sharks") {
+        Some(sharks) => {
+            *sharks = sharks_value;
+        }
+        None => {
+            let msg = format!("Missing sharks in manta object {:#?}", object);
+
+            error!("{}", &msg);
+            return Err(InternalError::new(
+                Some(InternalErrorCode::BadMantaObject),
+                msg,
+            )
+            .into());
+        }
+    }
+    Ok(())
 }
 
 impl ProcessAssignment for EvacuateJob {
@@ -2151,6 +2162,7 @@ fn _calculate_available_mb(
 }
 
 fn local_db_generator(
+    job_action: Arc<EvacuateJob>,
     obj_tx: crossbeam::Sender<EvacuateObject>,
     retry_uuid: &str,
 ) -> Result<(), Error> {
@@ -2197,7 +2209,7 @@ fn local_db_generator(
         // We do not want to include objects that bailed on bad shard number
         // because that is the only case where we couldn't properly transform
         // a sharkspotter message to an EvacuateObject instance.
-        for obj in retry_objs {
+        for mut obj in retry_objs {
             if let Some(reason) = obj.error {
                 if reason == EvacuateObjectError::BadShardNumber {
                     warn!("Skipping bad shard number object {}", obj.id);
@@ -2205,6 +2217,8 @@ fn local_db_generator(
                 }
             }
             retry_count += 1;
+
+            modify_retry_object(&mut obj, &job_action.from_shark)?;
 
             if let Err(e) = obj_tx.send(obj) {
                 warn!("local db generator exiting early: {}", e);
@@ -2222,14 +2236,59 @@ fn local_db_generator(
     Ok(())
 }
 
+// Revert the object's sharks array to what it looked like before we attempted
+// to rebalance it.  This means if we find the planned destination shark for
+// this object (dest_shark) in the object's sharks array then we replace it with
+// the shark that is the evacuation target (from_shark).
+fn modify_retry_object(
+    obj: &mut EvacuateObject,
+    from_shark: &MantaObjectShark,
+) -> Result<(), Error> {
+    // get the current sharks array
+    let mut sharks = match common::get_sharks_from_value(&obj.object) {
+        Ok(s) => s,
+        Err(e) => {
+            let msg = format!(
+                "Could not get sharks from Manta Object {:#?}: {}",
+                obj.object, e
+            );
+            return Err(InternalError::new(
+                Some(InternalErrorCode::SharkNotFound),
+                msg,
+            )
+            .into());
+        }
+    };
+
+    if !obj.dest_shark.is_empty() {
+        // If we find the dest_shark in the sharks array replace it.
+        for shark in sharks.iter_mut() {
+            // If the dest_shark hasn't been populated or it is not found
+            // in the sharks array that means this object hit a skip or an
+            // error before we altered it's sharks array.
+            if shark.manta_storage_id == obj.dest_shark {
+                shark.manta_storage_id = from_shark.manta_storage_id.clone();
+                shark.datacenter = from_shark.datacenter.clone();
+            }
+        }
+    }
+
+    // Clear the dest shark field
+    obj.dest_shark = String::new();
+
+    // Update the sharks in the object value
+    update_sharks_in_object_value(sharks, &mut obj.object)
+}
+
 fn start_local_db_generator(
+    job_action: Arc<EvacuateJob>,
     obj_tx: crossbeam::Sender<EvacuateObject>,
     retry_uuid: &str,
 ) -> Result<thread::JoinHandle<Result<(), Error>>, Error> {
     let db_name = retry_uuid.to_string();
     thread::Builder::new()
         .name(String::from("local_generator"))
-        .spawn(move || local_db_generator(obj_tx, &db_name))
+        .spawn(move || local_db_generator(job_action, obj_tx, &db_name))
         .map_err(Error::from)
 }
 
@@ -5194,8 +5253,12 @@ mod tests {
             ),
             EvacuateJobType::Retry(retry_uuid) => {
                 // start local db generator
-                start_local_db_generator(obj_tx, retry_uuid)
-                    .expect("local db generator")
+                start_local_db_generator(
+                    Arc::clone(&job_action),
+                    obj_tx,
+                    retry_uuid,
+                )
+                .expect("local db generator")
             }
         };
 
