@@ -682,6 +682,7 @@ impl EvacuateJob {
         let mut job = Self::new_common(storage_id, config, db_name, update_rx)?;
 
         job.evac_type = EvacuateJobType::Retry(retry_uuid.to_string());
+        job.max_objects = None;
 
         Ok(job)
     }
@@ -2157,7 +2158,8 @@ fn local_db_generator(
 
     let limit = 500;
     let mut offset = 0;
-    let mut count = 0;
+    let mut found_objects = 0;
+    let mut retry_count = 0;
     let conn = match pg_db::connect_db(retry_uuid) {
         Ok(c) => c,
         Err(e) => {
@@ -2167,6 +2169,7 @@ fn local_db_generator(
     };
 
     loop {
+        debug!("retry limit: {} | offset: {}", limit, offset);
         let retry_objs: Vec<EvacuateObject> = evacuateobjects
             .filter(status.eq_any(vec![
                 EvacuateObjectStatus::Skipped,
@@ -2180,17 +2183,31 @@ fn local_db_generator(
 
         if retry_objs.is_empty() {
             info!(
-                "Done scanning previous job {}.  Object Count: {}",
-                retry_uuid, count
+                "Done scanning previous job {}.  Found Object Count: {}.  \
+                 Retry Count: {}",
+                retry_uuid, found_objects, retry_count
             );
             break;
         }
 
-        count += retry_objs.len();
+        info!("retrying {} objects", retry_objs.len());
 
-        // dont include badshard number skips
+        found_objects = retry_objs.len();
+
+        // We do not want to include objects that bailed on bad shard number
+        // because that is the only case where we couldn't properly transform
+        // a sharkspotter message to an EvacuateObject instance.
         for obj in retry_objs {
+            if let Some(reason) = obj.error {
+                if reason == EvacuateObjectError::BadShardNumber {
+                    warn!("Skipping bad shard number object {}", obj.id);
+                    continue;
+                }
+            }
+            retry_count += 1;
+
             if let Err(e) = obj_tx.send(obj) {
+                warn!("local db generator exiting early: {}", e);
                 return Err(InternalError::new(
                     Some(InternalErrorCode::Crossbeam),
                     CrossbeamError::from(e).description(),
@@ -2215,6 +2232,7 @@ fn start_local_db_generator(
         .spawn(move || local_db_generator(obj_tx, &db_name))
         .map_err(Error::from)
 }
+
 /// Start the sharkspotter thread and feed the objects into the assignment
 /// thread.  If the assignment thread (the rx side of the channel) exits
 /// prematurely the sender.send() method will return a SenderError and that
@@ -4182,22 +4200,7 @@ mod tests {
         ret
     }
 
-    fn create_test_evacuate_job(max_objects: usize) -> EvacuateJob {
-        let mut config = Config::default();
-        let from_shark = String::from("1.stor.domain");
-
-        config.max_fill_percentage = 100;
-
-        let (_, update_rx) = crossbeam_channel::unbounded();
-        let mut job_action = EvacuateJob::new(
-            from_shark,
-            &config,
-            &Uuid::new_v4().to_string(),
-            Some(update_rx),
-            Some(max_objects as u32),
-        )
-        .expect("initialize evacuate job");
-
+    fn configure_test_job_common(mut job_action: EvacuateJob) -> EvacuateJob {
         // Manually set the datacenter so that our destination validation
         // allows for same DC transfer.  This is normally done in
         // EvacuateJob::validate(), but that calls into moray to get the DC
@@ -4208,11 +4211,49 @@ mod tests {
         job_action
     }
 
+    fn create_test_retry_job(retry_uuid: &str) -> EvacuateJob {
+        let mut config = Config::default();
+        let from_shark = String::from("1.stor.domain");
+
+        config.max_fill_percentage = 100;
+
+        let (_, update_rx) = crossbeam_channel::unbounded();
+        let job_action = EvacuateJob::retry(
+            from_shark,
+            &config,
+            &Uuid::new_v4().to_string(),
+            Some(update_rx),
+            retry_uuid,
+        )
+        .expect("initialize retry job");
+
+        configure_test_job_common(job_action)
+    }
+
+    fn create_test_evacuate_job(max_objects: usize) -> EvacuateJob {
+        let mut config = Config::default();
+        let from_shark = String::from("1.stor.domain");
+
+        config.max_fill_percentage = 100;
+
+        let (_, update_rx) = crossbeam_channel::unbounded();
+        let job_action = EvacuateJob::new(
+            from_shark,
+            &config,
+            &Uuid::new_v4().to_string(),
+            Some(update_rx),
+            Some(max_objects as u32),
+        )
+        .expect("initialize evacuate job");
+
+        configure_test_job_common(job_action)
+    }
+
     fn start_test_obj_generator_thread(
         obj_tx: crossbeam_channel::Sender<EvacuateObject>,
         test_objects: Vec<MantaObject>,
         from_shark: String,
-    ) -> thread::JoinHandle<()> {
+    ) -> thread::JoinHandle<Result<(), Error>> {
         thread::Builder::new()
             .name(String::from("test object generator thread"))
             .spawn(move || {
@@ -4257,6 +4298,7 @@ mod tests {
                         }
                     }
                 }
+                Ok(())
             })
             .expect("failed to build object generator thread")
     }
@@ -4534,7 +4576,8 @@ mod tests {
         // Join Threads
         generator_thread_handle
             .join()
-            .expect("generator thread handle");
+            .expect("generator thread handle")
+            .expect("generator thread result");
         manager_thread
             .join()
             .expect("manager_thread")
@@ -4644,7 +4687,8 @@ mod tests {
         // Join Threads
         generator_thread_handle
             .join()
-            .expect("generator thread handle");
+            .expect("generator thread handle")
+            .expect("generator thread result");
         manager_thread
             .join()
             .expect("manager_thread")
@@ -4829,7 +4873,10 @@ mod tests {
             .expect("verification thread");
 
         verification_thread.join().expect("verification join");
-        generator_thread_handle.join().expect("obj_gen thr join");
+        generator_thread_handle
+            .join()
+            .expect("obj_gen thr join")
+            .expect("obj_gen thr result");
 
         // mark all assignments as post processed so that the checker thread
         // can exit.
@@ -5089,7 +5136,17 @@ mod tests {
         );
     }
 
-    fn run_full_test(test_objects: Vec<MantaObject>, job_action: EvacuateJob) {
+    fn run_full_test(
+        test_objects: Vec<MantaObject>,
+        md_update_th: Option<
+            fn(
+                Arc<EvacuateJob>,
+                crossbeam::Receiver<AssignmentCacheEntry>,
+            )
+                -> Result<thread::JoinHandle<Result<(), Error>>, Error>,
+        >,
+        job_action: EvacuateJob,
+    ) {
         unit_test_init();
 
         struct MockStorinfo;
@@ -5129,15 +5186,28 @@ mod tests {
         let job_action = Arc::new(job_action);
 
         // Threads
-        let obj_generator_th = start_test_obj_generator_thread(
-            obj_tx,
-            test_objects,
-            job_action.from_shark.manta_storage_id.clone(),
-        );
+        let obj_generator_th = match &job_action.evac_type {
+            EvacuateJobType::Initial => start_test_obj_generator_thread(
+                obj_tx,
+                test_objects,
+                job_action.from_shark.manta_storage_id.clone(),
+            ),
+            EvacuateJobType::Retry(retry_uuid) => {
+                // start local db generator
+                start_local_db_generator(obj_tx, retry_uuid)
+                    .expect("local db generator")
+            }
+        };
 
-        let metadata_update_thread =
-            start_metadata_update_broker(Arc::clone(&job_action), md_update_rx)
-                .expect("start metadata updater thread");
+        let metadata_update_thread = match md_update_th {
+            Some(md_func) => md_func(Arc::clone(&job_action), md_update_rx)
+                .expect("start metadata update thread"),
+            None => start_metadata_update_broker(
+                Arc::clone(&job_action),
+                md_update_rx,
+            )
+            .expect("start metadata updater thread"),
+        };
 
         let assignment_checker_thread = start_assignment_checker(
             Arc::clone(&job_action),
@@ -5159,7 +5229,10 @@ mod tests {
         )
         .expect("start assignment manager");
 
-        obj_generator_th.join().expect("object generator thread");
+        obj_generator_th
+            .join()
+            .expect("object generator thread")
+            .expect("object generator thread result");
 
         match manager_thread
             .join()
@@ -5215,7 +5288,7 @@ mod tests {
 
         let job_action = create_test_evacuate_job(num_objects);
         let job_id = job_action.db_name.clone();
-        run_full_test(test_objects, job_action);
+        run_full_test(test_objects, None, job_action);
         info!("Completed full test: {}", job_id);
     }
 
@@ -5247,6 +5320,27 @@ mod tests {
         assert_eq!(array_length as usize, expected_shards);
     }
 
+    fn get_error_count(job_id: &str, error: &str) -> i64 {
+        use crate::jobs::evacuate::evacuateobjects::dsl::{
+            error as error_field, evacuateobjects,
+        };
+        use diesel::dsl::*;
+
+        let conn = match pg_db::connect_db(job_id) {
+            Ok(c) => c,
+            Err(e) => {
+                println!("Error creating Evacuate Job: {}", e);
+                std::process::exit(1);
+            }
+        };
+
+        evacuateobjects
+            .filter(error_field.eq(error))
+            .select(count(error_field))
+            .first(&conn)
+            .expect("error count")
+    }
+
     #[test]
     fn test_duplicate_handler() {
         unit_test_init();
@@ -5262,7 +5356,7 @@ mod tests {
 
         let job_action = create_test_evacuate_job(num_objects);
         let job_id = job_action.db_name.clone();
-        run_full_test(test_objects, job_action);
+        run_full_test(test_objects, None, job_action);
         info!("Completed duplicate handler test: {}", job_id);
 
         // Now get the length of the shards array in our single entry, and
@@ -5292,7 +5386,7 @@ mod tests {
         let job_id = job_action.db_name.clone();
         job_action.config.options.max_tasks_per_assignment = 1;
 
-        run_full_test(test_objects, job_action);
+        run_full_test(test_objects, None, job_action);
         info!("Completed duplicate handler test: {}", job_id);
 
         // We expect the length to be exactly num_objects because this
@@ -5301,5 +5395,72 @@ mod tests {
         // function when it tries to insert an assignment with a duplicate
         // object id.
         validate_duplicate_table(&job_id, num_objects);
+    }
+
+    #[test]
+    fn test_retry_job() {
+        use crate::jobs::status::{get_job_status, JobStatusResults};
+        use crate::jobs::JobActionDbEntry;
+        unit_test_init();
+
+        let num_objects: usize = 100;
+        let mut test_objects = vec![];
+        let mut g = StdThreadGen::new(10);
+
+        for _ in 0..num_objects {
+            let mobj = MantaObject::arbitrary(&mut g);
+            test_objects.push(mobj);
+        }
+
+        // Create and run a job that will skip all objects
+        let job_action = create_test_evacuate_job(num_objects);
+        let initial_uuid = job_action.db_name.clone();
+        run_full_test(test_objects, Some(skip_all), job_action);
+
+        // Create and run a retry job that should find all skipped objects
+        let retry_job_action = create_test_retry_job(&initial_uuid);
+        let retry_job_uuid = retry_job_action.db_name.clone();
+        run_full_test(vec![], None, retry_job_action);
+
+        debug!("initial job: {}", initial_uuid);
+        debug!("retry job: {}", retry_job_uuid);
+
+        // Confirm that we processed "num_objects" objects and that they are
+        // all in the Error state (see below on why).
+        let job_status_results = get_job_status(
+            &Uuid::from_str(&retry_job_uuid).expect("retry job uuid"),
+            &JobActionDbEntry::Evacuate,
+        )
+        .expect("job status");
+
+        let JobStatusResults::Evacuate(results) = job_status_results;
+        assert_eq!(results.get("Total"), Some(&(num_objects as i64)));
+        assert_eq!(results.get("Error"), Some(&(num_objects as i64)));
+
+        // Confirm that all of the objects failed because they couldn't get a
+        // good moray client, which is expected since this test is run locally.
+        let bad_moray_client_count =
+            get_error_count(&retry_job_uuid, "bad_moray_client");
+
+        assert_eq!(bad_moray_client_count, num_objects as i64);
+    }
+
+    fn skip_all(
+        job_action: Arc<EvacuateJob>,
+        md_update_rx: crossbeam::Receiver<AssignmentCacheEntry>,
+    ) -> Result<thread::JoinHandle<Result<(), Error>>, Error> {
+        thread::Builder::new()
+            .name("skip_all".to_string())
+            .spawn(move || {
+                while let Ok(ace) = md_update_rx.recv() {
+                    info!("RECEIVED ASSIGNMENT: {}", ace.id);
+                    job_action.mark_assignment_skipped(
+                        &ace.id,
+                        ObjectSkippedReason::NetworkError,
+                    );
+                }
+                Ok(())
+            })
+            .map_err(Error::from)
     }
 }
