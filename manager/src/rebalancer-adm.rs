@@ -34,7 +34,10 @@ fn post_common<T>(url: &str, body: T) -> Result<(), String>
 where
     T: Into<reqwest::Body>,
 {
-    let client = reqwest::Client::new();
+    let client = reqwest::ClientBuilder::new()
+        .timeout(None)
+        .build()
+        .map_err(|e| e.to_string())?;
 
     // Send the request.
     let mut response = match client.post(url).body(body).send() {

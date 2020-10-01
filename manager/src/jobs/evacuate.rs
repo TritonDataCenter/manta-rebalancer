@@ -2168,7 +2168,7 @@ fn local_db_generator(
 ) -> Result<(), Error> {
     use self::evacuateobjects::dsl::{evacuateobjects, id as obj_id, status};
 
-    let limit = 500;
+    let limit = job_action.config.options.md_read_chunk_size as i64;
     let mut offset = 0;
     let mut found_objects = 0;
     let mut retry_count = 0;
@@ -2203,6 +2203,14 @@ fn local_db_generator(
         }
 
         info!("retrying {} objects", retry_objs.len());
+        info!(
+            "DEBUG: retry_obj len size is: {}",
+            retry_objs.len() * std::mem::size_of::<EvacuateObject>()
+        );
+        info!(
+            "DEBUG: retry_obj capacity size is: {}",
+            retry_objs.capacity() * std::mem::size_of::<EvacuateObject>()
+        );
 
         found_objects = retry_objs.len();
 
@@ -2244,6 +2252,8 @@ fn modify_retry_object(
     obj: &mut EvacuateObject,
     from_shark: &MantaObjectShark,
 ) -> Result<(), Error> {
+    // TODO: change to trace level logging
+    info!("putting {:#?} back into {:#?}", from_shark, obj);
     // get the current sharks array
     let mut sharks = match common::get_sharks_from_value(&obj.object) {
         Ok(s) => s,
@@ -2277,7 +2287,11 @@ fn modify_retry_object(
     obj.dest_shark = String::new();
 
     // Update the sharks in the object value
-    update_sharks_in_object_value(sharks, &mut obj.object)
+    let ret = update_sharks_in_object_value(sharks, &mut obj.object);
+
+    // TODO: change to trace
+    info!("Changed object to: {:#?}", obj);
+    ret
 }
 
 fn start_local_db_generator(
@@ -5466,7 +5480,7 @@ mod tests {
         use crate::jobs::JobActionDbEntry;
         unit_test_init();
 
-        let num_objects: usize = 100;
+        let num_objects: usize = 5000;
         let mut test_objects = vec![];
         let mut g = StdThreadGen::new(10);
 
