@@ -5441,14 +5441,21 @@ mod tests {
 
         let JobStatusResults::Evacuate(results) = job_status_results;
         assert_eq!(results.get("Total"), Some(&(num_objects as i64)));
-        assert_eq!(results.get("Error"), Some(&(num_objects as i64)));
+
+        // Almost all objects will be errors due to bad_moray_client.  But
+        // because we are using random objects we may find that shark
+        // assignment validation fails in which case the object will be skipped.
+        let error_count = results.get("Error").expect("error results").to_owned();
+        let skip_count = results.get("Skipped").expect("skip results")
+            .to_owned();
+        assert_eq!(error_count + skip_count, num_objects as i64);
 
         // Confirm that all of the objects failed because they couldn't get a
         // good moray client, which is expected since this test is run locally.
         let bad_moray_client_count =
             get_error_count(&retry_job_uuid, "bad_moray_client");
 
-        assert_eq!(bad_moray_client_count, num_objects as i64);
+        assert_eq!(bad_moray_client_count, error_count);
     }
 
     fn skip_all(
