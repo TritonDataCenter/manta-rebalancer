@@ -35,7 +35,7 @@ use crate::storinfo::{self as mod_storinfo, SharkSource, StorageNode};
 
 use std::collections::hash_map::Entry::{Occupied, Vacant};
 use std::collections::HashMap;
-use std::convert::{TryFrom, TryInto};
+use std::convert::TryFrom;
 use std::error::Error as _Error;
 use std::io::Write;
 use std::str::FromStr;
@@ -611,8 +611,6 @@ pub struct EvacuateJob {
 
     pub bytes_transferred: AtomicU64,
 
-    pub md_update_time: AtomicU64,
-
     pub db_name: String,
 
     pub evac_type: EvacuateJobType,
@@ -725,7 +723,6 @@ impl EvacuateJob {
             db_name: db_name.to_string(),
             bytes_transferred: AtomicU64::new(0),
             object_movement_start_time: Mutex::new(None),
-            md_update_time: AtomicU64::new(0),
         })
     }
 
@@ -884,11 +881,6 @@ impl EvacuateJob {
         info!(
             "Evacuate Job transferred {} bytes",
             job_action.bytes_transferred.load(Ordering::SeqCst)
-        );
-
-        info!(
-            "Evacuate Job total metadata update time: {}us",
-            job_action.md_update_time.load(Ordering::SeqCst)
         );
 
         ret
@@ -1903,36 +1895,29 @@ impl UpdateMetadata for EvacuateJob {
             }
         }
 
-        update_sharks_in_object_value(sharks, &mut object)?;
+        // Convert the Vec<MantaObjectShark> into a serde Value
+        let sharks_value = serde_json::to_value(sharks)?;
+
+        // update the manta object Value with the new sharks Value
+        match object.get_mut("sharks") {
+            Some(sharks) => {
+                *sharks = sharks_value;
+            }
+            None => {
+                let msg =
+                    format!("Missing sharks in manta object {:#?}", object);
+
+                error!("{}", &msg);
+                return Err(InternalError::new(
+                    Some(InternalErrorCode::BadMantaObject),
+                    msg,
+                )
+                .into());
+            }
+        }
 
         Ok(object)
     }
-}
-
-fn update_sharks_in_object_value(
-    sharks: Vec<MantaObjectShark>,
-    object: &mut Value,
-) -> Result<(), Error> {
-    // Convert the Vec<MantaObjectShark> into a serde Value
-    let sharks_value = serde_json::to_value(sharks)?;
-
-    // update the manta object Value with the new sharks Value
-    match object.get_mut("sharks") {
-        Some(sharks) => {
-            *sharks = sharks_value;
-        }
-        None => {
-            let msg = format!("Missing sharks in manta object {:#?}", object);
-
-            error!("{}", &msg);
-            return Err(InternalError::new(
-                Some(InternalErrorCode::BadMantaObject),
-                msg,
-            )
-            .into());
-        }
-    }
-    Ok(())
 }
 
 impl ProcessAssignment for EvacuateJob {
@@ -2217,7 +2202,7 @@ fn local_db_generator(
         // We do not want to include objects that bailed on bad shard number
         // because that is the only case where we couldn't properly transform
         // a sharkspotter message to an EvacuateObject instance.
-        for mut obj in retry_objs {
+        for obj in retry_objs {
             if let Some(reason) = obj.error {
                 if reason == EvacuateObjectError::BadShardNumber {
                     warn!("Skipping bad shard number object {}", obj.id);
@@ -2226,7 +2211,9 @@ fn local_db_generator(
             }
             retry_count += 1;
 
-            modify_retry_object(&mut obj, &job_action.from_shark)?;
+            // We don't modify the metadata in the database, so what this
+            // object has for a sharks array should be the same as what it
+            // was when we first found it.
 
             if let Err(e) = obj_tx.send(obj) {
                 warn!("local db generator exiting early: {}", e);
@@ -2242,56 +2229,6 @@ fn local_db_generator(
     }
 
     Ok(())
-}
-
-// Revert the object's sharks array to what it looked like before we attempted
-// to rebalance it.  This means if we find the planned destination shark for
-// this object (dest_shark) in the object's sharks array then we replace it with
-// the shark that is the evacuation target (from_shark).
-fn modify_retry_object(
-    obj: &mut EvacuateObject,
-    from_shark: &MantaObjectShark,
-) -> Result<(), Error> {
-    // TODO: change to trace level logging
-    info!("putting {:#?} back into {:#?}", from_shark, obj);
-    // get the current sharks array
-    let mut sharks = match common::get_sharks_from_value(&obj.object) {
-        Ok(s) => s,
-        Err(e) => {
-            let msg = format!(
-                "Could not get sharks from Manta Object {:#?}: {}",
-                obj.object, e
-            );
-            return Err(InternalError::new(
-                Some(InternalErrorCode::SharkNotFound),
-                msg,
-            )
-            .into());
-        }
-    };
-
-    if !obj.dest_shark.is_empty() {
-        // If we find the dest_shark in the sharks array replace it.
-        for shark in sharks.iter_mut() {
-            // If the dest_shark hasn't been populated or it is not found
-            // in the sharks array that means this object hit a skip or an
-            // error before we altered it's sharks array.
-            if shark.manta_storage_id == obj.dest_shark {
-                shark.manta_storage_id = from_shark.manta_storage_id.clone();
-                shark.datacenter = from_shark.datacenter.clone();
-            }
-        }
-    }
-
-    // Clear the dest shark field
-    obj.dest_shark = String::new();
-
-    // Update the sharks in the object value
-    let ret = update_sharks_in_object_value(sharks, &mut obj.object);
-
-    // TODO: change to trace
-    info!("Changed object to: {:#?}", obj);
-    ret
 }
 
 fn start_local_db_generator(
@@ -3625,10 +3562,6 @@ fn metadata_update_one(
         );
     } else {
         let md_update_time = now.elapsed().as_micros();
-        job_action.md_update_time.fetch_add(
-            md_update_time.try_into().expect("try u128 into u64"),
-            Ordering::SeqCst,
-        );
         debug!("Updated 1 object in {}us", md_update_time);
     }
 
@@ -3689,10 +3622,6 @@ fn metadata_update_batch(
                 // elapsed() gives us a u128, but unfortunately AtomicU128 is
                 // nightly only.
                 let md_update_time = now.elapsed().as_micros();
-                job_action.md_update_time.fetch_add(
-                    md_update_time.try_into().expect("try u128 into u64"),
-                    Ordering::SeqCst,
-                );
 
                 info!(
                     "Batch updated {} objects in {}us",
