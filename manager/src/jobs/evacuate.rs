@@ -767,7 +767,10 @@ impl EvacuateJob {
 
         // TODO: How big should each channel be?
         // Set up channels for thread to communicate.
-        let (obj_tx, obj_rx) = crossbeam::bounded(100);
+        let (obj_tx, obj_rx): (
+            crossbeam::Sender<EvacuateObject>,
+            crossbeam::Receiver<EvacuateObject>,
+        );
         let (full_assignment_tx, full_assignment_rx) = crossbeam::bounded(5);
         let (md_update_tx, md_update_rx) = crossbeam::bounded(5);
         let (checker_fini_tx, checker_fini_rx) = crossbeam::bounded(1);
@@ -775,16 +778,35 @@ impl EvacuateJob {
         // TODO: lock evacuating server to readonly
         // TODO: add thread barriers MANTA-4457
 
+        // Note that we use md_read_chunk_size for retry jobs both here in the
+        // channel and in the limit for local_db_generator()'s local db query.
+        // This way we can queue up objects that we read from the local db into
+        // the channel while we querying for the next chunk from the local db.
+        // The local db access is pretty slow when the job has on the order
+        // of 50 million objects, so we want to make sure the
+        // local_db_generator() is not waiting to put objects into the
+        // channel while it could be running the next chunk query on the local
+        // db.
         let obj_generator_thread = match &job_action.evac_type {
-            EvacuateJobType::Initial => start_sharkspotter(
-                obj_tx,
-                domain.as_str(),
-                Arc::clone(&job_action),
-                min_shard,
-                max_shard,
-            )?,
+            EvacuateJobType::Initial => {
+                let channel = crossbeam::bounded(100);
+                obj_tx = channel.0;
+                obj_rx = channel.1;
+                start_sharkspotter(
+                    obj_tx,
+                    domain.as_str(),
+                    Arc::clone(&job_action),
+                    min_shard,
+                    max_shard,
+                )?
+            }
             EvacuateJobType::Retry(retry_uuid) => {
                 // start local db generator
+                let channel = crossbeam::bounded(
+                    job_action.config.options.md_read_chunk_size,
+                );
+                obj_tx = channel.0;
+                obj_rx = channel.1;
                 start_local_db_generator(
                     Arc::clone(&job_action),
                     obj_tx,
@@ -2146,6 +2168,21 @@ fn _calculate_available_mb(
     }
 }
 
+// Query the previous Job's database for skips and errors, and send them to
+// the assignment_manager thread.  Note that we do synchronous chunk queries
+// here with the limit controlled by the md_read_chunk_size tunable.
+// We would utilize asynchronous queries here, but an attempt at bringing
+// tokio_postgres crate into rebalancer revealed that we would have to
+// upgraded many other crates, many of which have changed their interfaces
+// across minor and major versions.  Unfortunately, this retry job work is
+// urgent so that work could not be done in time, hence the synchronous chunks.
+// Note also that the channel size should be equal to the chunk size.  This
+// will allow this thread to queue up objects in the channel while it starts
+// the next query.
+// The query is really slow because we are looking for objects in a table
+// with around 50 million entries.  If this isn't sufficient we could
+// consider creating an index on this table for this use case.  We would have
+// to consider the trade off if any of inserts.
 fn local_db_generator(
     job_action: Arc<EvacuateJob>,
     obj_tx: crossbeam::Sender<EvacuateObject>,
@@ -5445,9 +5482,10 @@ mod tests {
         // Almost all objects will be errors due to bad_moray_client.  But
         // because we are using random objects we may find that shark
         // assignment validation fails in which case the object will be skipped.
-        let error_count = results.get("Error").expect("error results").to_owned();
-        let skip_count = results.get("Skipped").expect("skip results")
-            .to_owned();
+        let error_count =
+            results.get("Error").expect("error results").to_owned();
+        let skip_count =
+            results.get("Skipped").expect("skip results").to_owned();
         assert_eq!(error_count + skip_count, num_objects as i64);
 
         // Confirm that all of the objects failed because they couldn't get a
