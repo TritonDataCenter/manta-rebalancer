@@ -2326,15 +2326,16 @@ fn start_sharkspotter(
                                 };
 
                             if let Err(e) = obj_tx.send(eo) {
-                                error!(
+                                warn!(
                                     "Could not send evacuate object.  Receive \
-                                     side of channel exited prematurely {}",
+                                     side of channel exited prematurely.  Is \
+                                     max_objects set? {}",
                                     e
                                 );
 
-                                return Err(InternalError::new(
-                                    Some(InternalErrorCode::Crossbeam),
-                                    CrossbeamError::from(e).description(),
+                                return Err(std::io::Error::new(
+                                    std::io::ErrorKind::BrokenPipe,
+                                    e,
                                 )
                                 .into());
                             }
