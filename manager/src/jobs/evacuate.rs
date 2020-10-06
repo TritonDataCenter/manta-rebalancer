@@ -2333,11 +2333,7 @@ fn start_sharkspotter(
                                     e
                                 );
 
-                                return Err(std::io::Error::new(
-                                    std::io::ErrorKind::BrokenPipe,
-                                    e,
-                                )
-                                .into());
+                                break;
                             }
                         }
 
