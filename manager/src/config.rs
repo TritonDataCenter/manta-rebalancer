@@ -52,8 +52,9 @@ static DEFAULT_STATIC_QUEUE_DEPTH: usize = 10;
 // destination sharks.
 static DEFAULT_MAX_ASSIGNMENT_AGE: u64 = 600;
 
-// The chunk size used when scanning the metadata tier.
-static DEFAULT_METADATA_READ_CHUNK_SIZE: usize = 500;
+// The chunk size used when scanning the metadata tier or during a retry when
+// reading from the local database.
+static DEFAULT_METADATA_READ_CHUNK_SIZE: usize = 10000;
 
 // Default maximum number of per-shard threads that we will use to scan the
 // metadata tier.

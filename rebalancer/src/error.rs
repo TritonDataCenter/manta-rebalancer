@@ -19,6 +19,7 @@ pub enum Error {
     SerdeJson(serde_json::error::Error),
     Reqwest(reqwest::Error),
     ParseInt(std::num::ParseIntError),
+    ParseUuid(uuid::parser::ParseError),
     DieselConnection(diesel::ConnectionError),
 }
 
@@ -32,6 +33,7 @@ impl std::error::Error for Error {
             Error::SerdeJson(e) => e.description(),
             Error::Reqwest(e) => e.description(),
             Error::ParseInt(e) => e.description(),
+            Error::ParseUuid(e) => e.description(),
             Error::DieselConnection(e) => e.description(),
         }
     }
@@ -79,6 +81,12 @@ impl From<std::num::ParseIntError> for Error {
     }
 }
 
+impl From<uuid::parser::ParseError> for Error {
+    fn from(error: uuid::parser::ParseError) -> Self {
+        Error::ParseUuid(error)
+    }
+}
+
 impl From<diesel::ConnectionError> for Error {
     fn from(error: diesel::ConnectionError) -> Self {
         Error::DieselConnection(error)
@@ -95,6 +103,7 @@ impl fmt::Display for Error {
             Error::SerdeJson(e) => write!(f, "{}", e),
             Error::Reqwest(e) => write!(f, "{}", e),
             Error::ParseInt(e) => write!(f, "{}", e),
+            Error::ParseUuid(e) => write!(f, "{}", e),
             Error::DieselConnection(e) => write!(f, "{}", e),
         }
     }

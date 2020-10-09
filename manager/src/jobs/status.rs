@@ -67,7 +67,7 @@ pub struct JobStatus {
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct JobConfigEvacuate {
-    from_shark: MantaObjectShark,
+    pub from_shark: MantaObjectShark,
 }
 
 type JobStatusResultsEvacuate = HashMap<String, i64>;
@@ -176,7 +176,7 @@ fn get_evacuate_job_config(
     Ok(JobConfigEvacuate { from_shark })
 }
 
-fn get_job_status(
+pub fn get_job_status(
     uuid: &Uuid,
     action: &JobActionDbEntry,
 ) -> Result<JobStatusResults, StatusError> {

@@ -353,6 +353,64 @@ fn update_job(mut state: State) -> (State, Response<Body>) {
 }
 
 #[derive(Clone)]
+struct JobRetryHandler {
+    tx: crossbeam_channel::Sender<jobs::Job>,
+    config: Arc<Mutex<Config>>,
+}
+
+impl NewHandler for JobRetryHandler {
+    type Instance = Self;
+
+    fn new_handler(&self) -> gotham::error::Result<Self::Instance> {
+        Ok(self.clone())
+    }
+}
+
+impl Handler for JobRetryHandler {
+    fn handle(self, mut state: State) -> Box<HandlerFuture> {
+        let job_params = GetJobParams::take_from(&mut state);
+        let retry_uuid = job_params.uuid;
+
+        info!("Retry Job {} Request", retry_uuid);
+
+        let config = self.config.lock().expect("config lock").clone();
+        let job_builder = match JobBuilder::new(config).retry(&retry_uuid) {
+            Ok(jb) => jb,
+            Err(e) => {
+                let error =
+                    invalid_server_error(&state, String::from(e.description()));
+                return Box::new(future::ok((state, error)));
+            }
+        };
+
+        let job = match job_builder.commit() {
+            Ok(j) => j,
+            Err(e) => {
+                let error =
+                    invalid_server_error(&state, String::from(e.description()));
+                return Box::new(future::ok((state, error)));
+            }
+        };
+
+        let job_uuid = job.get_id();
+        let uuid_response = format!("{}\n", &job_uuid);
+
+        if let Err(e) = self.tx.send(job) {
+            panic!("Tx error: {}", e);
+        }
+
+        let res = create_response(
+            &state,
+            StatusCode::OK,
+            mime::APPLICATION_JSON,
+            uuid_response,
+        );
+
+        Box::new(future::ok((state, res)))
+    }
+}
+
+#[derive(Clone)]
 struct JobCreateHandler {
     tx: crossbeam_channel::Sender<jobs::Job>,
     config: Arc<Mutex<Config>>,
@@ -503,7 +561,13 @@ impl Middleware for DBConnMiddleware {
 
 fn router(config: Arc<Mutex<Config>>) -> Router {
     let (tx, rx) = crossbeam_channel::bounded(5);
-    let job_create_handler = JobCreateHandler { tx, config };
+
+    let job_create_handler = JobCreateHandler {
+        tx: tx.clone(),
+        config: Arc::clone(&config),
+    };
+
+    let job_retry_handler = JobRetryHandler { tx, config };
 
     // Start the metrics server.
     metrics_init(rebalancer::metrics::ConfigMetrics::default());
@@ -560,6 +624,10 @@ fn router(config: Arc<Mutex<Config>>) -> Router {
         route
             .post("/jobs")
             .to_new_handler(job_create_handler.clone());
+        route
+            .post("/jobs/:uuid/retry")
+            .with_path_extractor::<GetJobParams>()
+            .to_new_handler(job_retry_handler.clone());
         route
             .get("/jobs/:uuid")
             .with_path_extractor::<GetJobParams>()

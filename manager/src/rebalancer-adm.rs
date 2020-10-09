@@ -8,7 +8,7 @@
  * Copyright 2020 Joyent, Inc.
  */
 
-use clap::{App, AppSettings, Arg, ArgMatches};
+use clap::{App, AppSettings, Arg, ArgMatches, SubCommand};
 use hyper::HeaderMap;
 use manager::jobs::{EvacuateJobPayload, JobPayload};
 use reqwest;
@@ -28,6 +28,39 @@ fn output_common(response_headers: HeaderMap, message: String) {
     println!();
     println!("server version: {}", version);
     println!("{}", message);
+}
+
+fn post_common<T>(url: &str, body: T) -> Result<(), String>
+where
+    T: Into<reqwest::Body>,
+{
+    let client = reqwest::ClientBuilder::new()
+        .timeout(None)
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    // Send the request.
+    let mut response = match client.post(url).body(body).send() {
+        Ok(resp) => resp,
+        Err(e) => return Err(format!("Failed to post job: {}", &e)),
+    };
+
+    // Flag failure if we get a status code of anything other than 200.
+    if !response.status().is_success() {
+        return Err(format!("Server response: {}", response.status()));
+    }
+
+    let headers = response.headers().clone();
+
+    // Parse out the job uuid from the response payload.
+    let job_uuid = match response.text() {
+        Ok(j) => j,
+        Err(e) => return Err(format!("Failed to parse response: {}", e)),
+    };
+
+    output_common(headers, job_uuid);
+
+    Ok(())
 }
 
 // Common function used in order to get a list of jobs, or get specific job
@@ -72,7 +105,7 @@ fn get_common(url: &str) -> Result<(), String> {
 // Given a spcific job id, send a request to the manager for more detailed
 // information.
 fn job_get(matches: &ArgMatches) -> Result<(), String> {
-    let uuid = matches.value_of("uuid").unwrap();
+    let uuid = matches.value_of("uuid").expect("get uuid");
     let url = format!("{}/{}", JOBS_URL, uuid);
 
     // Add a delayed notification for job_get on a large job.
@@ -88,6 +121,13 @@ fn job_get(matches: &ArgMatches) -> Result<(), String> {
     });
 
     get_common(&url)
+}
+
+fn job_retry(matches: &ArgMatches) -> Result<(), String> {
+    let uuid = matches.value_of("uuid").expect("retry uuid");
+    let url = format!("{}/{}/retry", JOBS_URL, uuid);
+
+    post_common(&url, vec![])
 }
 
 fn job_create(matches: &ArgMatches) -> Result<(), String> {
@@ -130,29 +170,7 @@ fn job_create_evacuate(matches: &ArgMatches) -> Result<(), String> {
     let payload: String =
         serde_json::to_string(&job_payload).expect("Serialize job payload");
 
-    let client = reqwest::Client::new();
-
-    // Send the request.
-    let mut response = match client.post(JOBS_URL).body(payload).send() {
-        Ok(resp) => resp,
-        Err(e) => return Err(format!("Failed to post job: {}", &e)),
-    };
-
-    // Flag failure if we get a status code of anything other than 200.
-    if !response.status().is_success() {
-        return Err(format!("Server response: {}", response.status()));
-    }
-
-    let headers = response.headers().clone();
-
-    // Parse out the job uuid from the response payload.
-    let job_uuid = match response.text() {
-        Ok(j) => j,
-        Err(e) => return Err(format!("Failed to parse response: {}", e)),
-    };
-
-    output_common(headers, job_uuid);
-    Ok(())
+    post_common(JOBS_URL, payload)
 }
 
 // The `job' subcommand currently requires one of three different primary
@@ -163,6 +181,7 @@ fn process_subcmd_job(job_matches: &ArgMatches) -> Result<(), String> {
     match job_matches.subcommand() {
         ("get", Some(get_matches)) => job_get(get_matches),
         ("list", Some(_)) => get_common(JOBS_URL),
+        ("retry", Some(retry_matches)) => job_retry(retry_matches),
         ("create", Some(create_matches)) => job_create(create_matches),
         _ => unreachable!(),
     }
@@ -204,6 +223,17 @@ fn main() -> Result<(), String> {
                                 .takes_value(true)
                                 .required(true)
                                 .help("Uuid of a job"),
+                        ),
+                )
+                // Retry subcommand
+                .subcommand(
+                    SubCommand::with_name("retry")
+                        .about("retry a previously run and completed job")
+                        .arg(
+                            Arg::with_name("uuid")
+                                .help("uuid of previous job")
+                                .required(true)
+                                .takes_value(true),
                         ),
                 )
                 // List subcommand
