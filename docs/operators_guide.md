@@ -146,6 +146,23 @@ createdb -U postgres <job_uuid>
 psql -U postgres <job_uuid> < <job_uuid>.backup
 ```
 
+### Cleaning up old assignments
+Currently the rebalancer manager does not clean up assignments created when the
+job ends [MANTA-5288](https://jira.joyent.us/browse/MANTA-5288).  On each
+rebalancer-agent the completed assignemnts are stored in
+`/var/tmp/rebalancer/completed/`.
+
+The number of assignments can be determined via:
+```
+manta-oneach -s storage 'ls  /var/tmp/rebalancer/completed/ | wc -l'
+```
+
+Those assignemnts can be removed *ONLY* when there are no rebalancer jobs
+running via:
+```
+manta-oneach -s storage 'rm /var/tmp/rebalancer/completed/*'
+```
+
 
 ## Rebalancer Agent
 
@@ -282,16 +299,30 @@ rebalancer-agent in a storage instance (i.e. to undo any hotpatching):
 
 
 ### Configuration and Troubleshooting
-The rebalancer agent runs as an SMF service on each mako zone:
+* The rebalancer agent runs as an SMF service on each mako zone:
 ```
 svc:/manta/application/rebalancer-agent:default
 ```
 
-Logs are located in the SMF log directory and rotated hourly:
+* Logs are located in the SMF log directory and rotated hourly:
 ```
 $ svcs -L svc:/manta/application/rebalancer-agent:default
 /var/svc/log/manta-application-rebalancer-agent:default.log
 ```
+
+* Finding `error` or `skipped` reasons:
+    1.  Enter the local job database
+    ```
+    psql -U postgres <job uuid>
+    ```
+    2.  Query the `evacuateobjects` table:
+    ```
+    SELECT skipped_reason,count(skipped_reason) FROM evacauteobjects WHERE status = 'skipped' GROUP BY skipped_reason;
+    ```
+    or 
+    ```
+    SELECT error,count(error) FROM evacauteobjects WHERE status = 'error' GROUP BY error;
+    ```
 
 See [agent documentation](https://github.com/joyent/manta-rebalancer/blob/master/docs/agent.md) for additional details.
 

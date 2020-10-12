@@ -138,7 +138,7 @@ SUBCOMMANDS:
 Job operations
 
 USAGE:
-    rebalancer-adm job [SUBCOMMAND]
+    rebalancer-adm job <SUBCOMMAND>
 
 FLAGS:
     -h, --help       Prints help information
@@ -149,6 +149,7 @@ SUBCOMMANDS:
     get       Get information on a specific job
     help      Prints this message or the help of the given subcommand(s)
     list      List all known rebalancer jobs
+    retry     retry a previously run and completed job
 
 ```
 
@@ -215,6 +216,37 @@ rebalancer-adm job create evacuate --shark=<storage server name> [--max_objects=
 evacuate job is run, the target storage node must be manually set read-only. See
 [Operators Guide](https://github.com/joyent/manta-rebalancer/docs/operators_guide.md#marking-evacuate-target-read-only) for more details.**
 
+
+### Retrying a job
+The `retry` job functionality is intended to re-run all of objects that were
+marked `skipped` or `error` on a previously `Completed` run.  Note `retry` does
+not re-scan the metadata tier, so if a run fails or otherwise does not complete
+properly, retry will not pick find objects that the previous job missed.
+`retry` reads the object metadata from the local database and feeds it back
+into the rebalancer.
+
+When a retry job is started the same job type of the previous job being retried
+(e.g. `evacuate`) will be created.  So a `retry` of an `evacuate` job will
+create a new `evacuate`, and will be listed as such in `rebalancer-adm job
+list`.
+
+The `retry` job's databse read chunk size (`limit`) is controlled by the
+`REBALANCER_MD_READ_CHUNK_SIZE` SAPI tunable.
+
+Creating a retry job:
+```
+rebalancer-adm job retry <uuid of previous job>
+```
+
+Note that an object marked as error due to `BadShardNumber` will not be retried
+as that object could not be properly parsed and will be incomplete in the local
+database.  `retry` jobs should not be created on evacuate jobs where duplicates
+were found.  In order to properly rebalance objects with misplaced metadata
+(metadata duplicates), those duplicates need to be deleted and the job re-run.
+Once the `duplicates` count is 0, a `retry` job can be used to clean up any
+`skipped` or `error` objects.
+
+
 ## Manager Configuration Parameters
 The rebalancer manager requires certain  service configuration parameters in
 `etc/config.json`.  This file is populated by the config-agent using
@@ -226,11 +258,13 @@ These options can be updated by SAPI.
 | --- | --- | ---|
 |REBALANCER_MAX_TASKS_PER_ASSIGNMENT | Maximum number of tasks that will be added to a single assignment before it is sent to the agent for processing. | 50 |
 |REBALANCER_MAX_METADATA_UPDATE_THREADS| The maximum number of metadata update threads.  For static this number of threads will be spun up at the beginning of a job and remain at that level for the duration of the job.  For dynamic threads this is the maximum number that will run concurrently.| 10 |
+|REBALANCER_MAX_METADATA_READ_THREADS| The maximum number of threads used to read from from the metadata source.  The sharkspotter library imposes a limit (in `sharkspotter:config.rs`) of 100. This does not apply to retry jobs which use a single thread to read from the local database. |10|
 |REBALANCER_MAX_SHARKS|The maximum number of destination sharks that will be considered for assignments. | 5 |
 |REBALANCER_USE_STATIC_MD_UPDATE_THREADS| Use static metadata update threads instead of dynamic metadata update threadpool. | false |
-|REBALANCER_STATIC_QUEUE_DEPTH| The maximum size of the queue for post processing assignments (updating metadata). | 10 |
-|REBALANCER_MAX_ASSIGNMENT_AGE|The maximum amount of time that an assignment for a given shark will wait to be filled up in seconds.  The timer starts after the first task is added to the assignment.| 600 |
+|REBALANCER_STATIC_QUEUE_DEPTH| The maximum size of the queue for post processing assignments (updating metadata) when static metadata updates are enabled with `REBALANCER_USE_STATIC_MD_UPDATE_THREADS`. | 10 |
+|REBALANCER_MAX_ASSIGNMENT_AGE| The maximum amount of time that an assignment for a given shark will wait to be filled up in seconds.  The timer starts after the first task is added to the assignment.| 600 |
 |REBALANCER_USE_BATCHED_UPDATES|Update the metadata of objects in a batch instead of one by one.| false |
+|REBALANCER_MD_READ_CHUNK_SIZE| The number of records returned from a metadata query.  Currently rebalancer uses sharkspotter's direct DB feature for evacuate jobs.  This feature asynchronously streams data from a clone of the metadata postgres database, so chunking is not used.  This tunable is used for `retry` jobs which synchronously query the local databse for metadata records of at most `MD_READ_CHUNKSIZE` records per query. |10,000|
 
 
 
@@ -241,7 +275,7 @@ These options can be updated by SAPI.
 | domain_name          | String | The domain name of the manta deployment.  From SAPI application metadata (`DOMAIN_NAME`). |
 | shards               | Array  | The array of directory-api shards.  From SAPI application metadata `INDEX_MORAY_SHARDS`. |
 | listen_port | u16 | Optionally specify a port to listen on.  Default 80.|
-| log_level | u16 | Level of logging verbosity as a string (`critical`, `error`, `warning`, `info`, `debug`, or `trace)|
+| log_level | u16 | Level of logging verbosity as a string (`critical`, `error`, `warning`, `info`, `debug`, or `trace).  Can be set with SAPI tunable `REBALANCER_LOG_LEVEL`.  Requires service restart. |
  
 ## Development
 Currently the rebalancer manager and rebalancer-adm rely on a postgres database
