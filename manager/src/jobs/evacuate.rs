@@ -2205,6 +2205,8 @@ fn local_db_generator(
     // If we can't create the index it could simply be because the index
     // already exists.  Either way this isn't a critical failure, so log it
     // and move on.
+    // XXX: Should we drop the index when we are done?  This
+    // table shoudln't take any additional writes so it shouldn't matter.
     if let Err(e) = conn
         .execute("CREATE INDEX id_and_status on evacuateobjects (id, status);")
     {
