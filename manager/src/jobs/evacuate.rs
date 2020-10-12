@@ -2202,6 +2202,18 @@ fn local_db_generator(
         }
     };
 
+    // If we can't create the index it could simply be because the index
+    // already exists.  Either way this isn't a critical failure, so log it
+    // and move on.
+    if let Err(e) = conn
+        .execute("CREATE INDEX id_and_status on evacuateobjects (id, status);")
+    {
+        warn!(
+            "Could not create index on previous job's table ({}): {}",
+            retry_uuid, e
+        );
+    }
+
     loop {
         debug!("retry limit: {} | offset: {}", limit, offset);
         let retry_objs: Vec<EvacuateObject> = evacuateobjects
