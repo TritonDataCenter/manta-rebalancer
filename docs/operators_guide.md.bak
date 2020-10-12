@@ -149,7 +149,7 @@ psql -U postgres <job_uuid> < <job_uuid>.backup
 ### Cleaning up old assignments
 Currently the rebalancer manager does not clean up assignments created when the
 job ends [MANTA-5288](https://jira.joyent.us/browse/MANTA-5288).  On each
-rebalancer-agent the completed assignments are stored in
+rebalancer-agent the completed assignemnts are stored in
 `/var/tmp/rebalancer/completed/`.
 
 The number of assignments can be determined via:
@@ -157,7 +157,7 @@ The number of assignments can be determined via:
 manta-oneach -s storage 'ls  /var/tmp/rebalancer/completed/ | wc -l'
 ```
 
-Those assignments can be removed *ONLY* when there are no rebalancer jobs
+Those assignemnts can be removed *ONLY* when there are no rebalancer jobs
 running via:
 ```
 manta-oneach -s storage 'rm /var/tmp/rebalancer/completed/*'
