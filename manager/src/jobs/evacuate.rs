@@ -807,11 +807,7 @@ impl EvacuateJob {
                 );
                 obj_tx = channel.0;
                 obj_rx = channel.1;
-                start_local_db_generator(
-                    Arc::clone(&job_action),
-                    obj_tx,
-                    retry_uuid,
-                )?
+                start_local_db_generator(obj_tx, retry_uuid)?
             }
         };
 
@@ -2184,7 +2180,6 @@ fn _calculate_available_mb(
 // consider creating an index on this table for this use case.  We would have
 // to consider the trade off if any of inserts.
 fn local_db_generator(
-    _job_action: Arc<EvacuateJob>,
     obj_tx: crossbeam::Sender<EvacuateObject>,
     retry_uuid: &str,
 ) -> Result<(), Error> {
@@ -2269,14 +2264,13 @@ fn local_db_generator(
 }
 
 fn start_local_db_generator(
-    job_action: Arc<EvacuateJob>,
     obj_tx: crossbeam::Sender<EvacuateObject>,
     retry_uuid: &str,
 ) -> Result<thread::JoinHandle<Result<(), Error>>, Error> {
     let db_name = retry_uuid.to_string();
     thread::Builder::new()
         .name(String::from("local_generator"))
-        .spawn(move || local_db_generator(job_action, obj_tx, &db_name))
+        .spawn(move || local_db_generator(obj_tx, &db_name))
         .map_err(Error::from)
 }
 
@@ -5230,12 +5224,8 @@ mod tests {
             ),
             EvacuateJobType::Retry(retry_uuid) => {
                 // start local db generator
-                start_local_db_generator(
-                    Arc::clone(&job_action),
-                    obj_tx,
-                    retry_uuid,
-                )
-                .expect("local db generator")
+                start_local_db_generator(obj_tx, retry_uuid)
+                    .expect("local db generator")
             }
         };
 

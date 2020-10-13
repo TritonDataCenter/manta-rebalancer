@@ -227,10 +227,10 @@ into the rebalancer.
 
 When a retry job is started the same job type of the previous job being retried
 (e.g. `evacuate`) will be created.  So a `retry` of an `evacuate` job will
-create a new `evacuate`, and will be listed as such in `rebalancer-adm job
+create a new `evacuate` job, and will be listed as such in `rebalancer-adm job
 list`.
 
-The `retry` job's database read chunk size (`limit`) is controlled by the
+The `retry` job's queue size is controlled by the
 `REBALANCER_MD_READ_CHUNK_SIZE` SAPI tunable.
 
 Creating a retry job:
@@ -264,8 +264,7 @@ These options can be updated by SAPI.
 |REBALANCER_STATIC_QUEUE_DEPTH| The maximum size of the queue for post processing assignments (updating metadata) when static metadata updates are enabled with `REBALANCER_USE_STATIC_MD_UPDATE_THREADS`. | 10 |
 |REBALANCER_MAX_ASSIGNMENT_AGE| The maximum amount of time that an assignment for a given shark will wait to be filled up in seconds.  The timer starts after the first task is added to the assignment.| 600 |
 |REBALANCER_USE_BATCHED_UPDATES|Update the metadata of objects in a batch instead of one by one.| false |
-|REBALANCER_MD_READ_CHUNK_SIZE| The number of records returned from a metadata query.  Currently rebalancer uses sharkspotter's direct DB feature for evacuate jobs.  This feature asynchronously streams data from a clone of the metadata postgres database, so chunking is not used.  This tunable is used for `retry` jobs which synchronously query the local database for metadata records of at most `MD_READ_CHUNKSIZE` records per query. |10,000|
-
+|REBALANCER_MD_READ_CHUNK_SIZE| The number of records returned from a metadata query.  Currently rebalancer uses sharkspotter's direct DB feature for evacuate jobs.  This feature asynchronously streams data from a clone of the metadata postgres database, so chunking is not used.  This tunable is used for `retry` jobs which synchronously query the local database for metadata records and enqueues them into a queue of at most `MD_READ_CHUNKSIZE` records. |10,000|
 
 
 ### Service Parameters
