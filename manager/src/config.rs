@@ -33,7 +33,7 @@ static DEFAULT_MAX_TASKS_PER_ASSIGNMENT: usize = 50;
 
 // The maximum number of threads that will be used for metadata updates.
 // Each thread has its own hash of moray clients.
-static DEFAULT_MAX_METADATA_UPDATE_THREADS: usize = 2;
+static DEFAULT_MAX_METADATA_UPDATE_THREADS: usize = 10;
 
 // The maximum number of sharks we will use as destinations for things like
 // evacuate job.  This is the top 5 of an ordered list which could mean a
