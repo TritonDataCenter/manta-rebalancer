@@ -807,11 +807,7 @@ impl EvacuateJob {
                 );
                 obj_tx = channel.0;
                 obj_rx = channel.1;
-                start_local_db_generator(
-                    Arc::clone(&job_action),
-                    obj_tx,
-                    retry_uuid,
-                )?
+                start_local_db_generator(obj_tx, retry_uuid)?
             }
         };
 
@@ -2184,16 +2180,11 @@ fn _calculate_available_mb(
 // consider creating an index on this table for this use case.  We would have
 // to consider the trade off if any of inserts.
 fn local_db_generator(
-    job_action: Arc<EvacuateJob>,
     obj_tx: crossbeam::Sender<EvacuateObject>,
     retry_uuid: &str,
 ) -> Result<(), Error> {
     use self::evacuateobjects::dsl::{evacuateobjects, id as obj_id, status};
 
-    let limit = job_action.config.options.md_read_chunk_size as i64;
-    let mut offset = 0;
-    let mut found_objects = 0;
-    let mut retry_count = 0;
     let conn = match pg_db::connect_db(retry_uuid) {
         Ok(c) => c,
         Err(e) => {
@@ -2206,7 +2197,7 @@ fn local_db_generator(
     // already exists.  Either way this isn't a critical failure, so log it
     // and move on.
     // XXX: Should we drop the index when we are done?  This
-    // table shoudln't take any additional writes so it shouldn't matter.
+    // table shouldn't take any additional writes so it shouldn't matter.
     if let Err(e) = conn
         .execute("CREATE INDEX id_and_status on evacuateobjects (id, status);")
     {
@@ -2216,81 +2207,70 @@ fn local_db_generator(
         );
     }
 
-    loop {
-        debug!("retry limit: {} | offset: {}", limit, offset);
-        let retry_objs: Vec<EvacuateObject> = evacuateobjects
-            .filter(status.eq_any(vec![
-                EvacuateObjectStatus::Skipped,
-                EvacuateObjectStatus::Error,
-            ]))
-            .order(obj_id)
-            .limit(limit)
-            .offset(offset)
-            .load::<EvacuateObject>(&conn)
-            .expect("getting filtered objects");
+    // Get a (huge) vector of all the object IDs.  Then for each one,
+    // lookup the metadata and send it to the rebalancer's assignment
+    // manager.
+    // We've found that this may use a little more than 1GB for 10 million
+    // object IDs.  Since we provision a rebalancer zone to be 64GB and
+    // expect no more than 100 million objects per job, if we assume those
+    // are all skips we are still only at 10GB in the absolute worst case
+    // possible.
+    let start = std::time::Instant::now();
+    let ids = evacuateobjects
+        .select(obj_id)
+        .filter(status.eq_any(vec![
+            EvacuateObjectStatus::Skipped,
+            EvacuateObjectStatus::Error,
+        ]))
+        .load::<String>(&conn)
+        .expect("could not load object ids");
 
-        if retry_objs.is_empty() {
-            info!(
-                "Done scanning previous job {}.  Found Object Count: {}.  \
-                 Retry Count: {}",
-                retry_uuid, found_objects, retry_count
-            );
-            break;
-        }
+    info!(
+        "Initial object ID took {}ms and found {} object ids",
+        start.elapsed().as_millis(),
+        ids.len()
+    );
 
-        info!("retrying {} objects", retry_objs.len());
-        info!(
-            "DEBUG: retry_obj len size is: {}",
-            retry_objs.len() * std::mem::size_of::<EvacuateObject>()
-        );
-        info!(
-            "DEBUG: retry_obj capacity size is: {}",
-            retry_objs.capacity() * std::mem::size_of::<EvacuateObject>()
-        );
+    // Now iterate over each object id, get its metadata and send that to the
+    // rebalancer.  We expect each query to take < 1ms, which would imply a
+    // total time of 5 hours for 18 million skips/errors.
+    for id in ids {
+        let obj = evacuateobjects
+            .filter(obj_id.eq(id))
+            .get_result::<EvacuateObject>(&conn)
+            .expect("Could not get object from id");
 
-        found_objects = retry_objs.len();
-
-        // We do not want to include objects that bailed on bad shard number
-        // because that is the only case where we couldn't properly transform
-        // a sharkspotter message to an EvacuateObject instance.
-        for obj in retry_objs {
-            if let Some(reason) = obj.error {
-                if reason == EvacuateObjectError::BadShardNumber {
-                    warn!("Skipping bad shard number object {}", obj.id);
-                    continue;
-                }
-            }
-            retry_count += 1;
-
-            // We don't modify the metadata in the database, so what this
-            // object has for a sharks array should be the same as what it
-            // was when we first found it.
-
-            if let Err(e) = obj_tx.send(obj) {
-                warn!("local db generator exiting early: {}", e);
-                return Err(InternalError::new(
-                    Some(InternalErrorCode::Crossbeam),
-                    CrossbeamError::from(e).description(),
-                )
-                .into());
+        if let Some(reason) = obj.error {
+            if reason == EvacuateObjectError::BadShardNumber {
+                warn!("Skipping bad shard number object {}", obj.id);
+                continue;
             }
         }
 
-        offset += limit;
+        // We don't modify the metadata in the database, so what this
+        // object has for a sharks array should be the same as what it
+        // was when we first found it.
+        if let Err(e) = obj_tx.send(obj) {
+            warn!("local db generator exiting early: {}", e);
+            return Err(InternalError::new(
+                Some(InternalErrorCode::Crossbeam),
+                CrossbeamError::from(e).description(),
+            )
+            .into());
+        }
     }
 
     Ok(())
 }
 
 fn start_local_db_generator(
-    job_action: Arc<EvacuateJob>,
     obj_tx: crossbeam::Sender<EvacuateObject>,
     retry_uuid: &str,
 ) -> Result<thread::JoinHandle<Result<(), Error>>, Error> {
     let db_name = retry_uuid.to_string();
     thread::Builder::new()
         .name(String::from("local_generator"))
-        .spawn(move || local_db_generator(job_action, obj_tx, &db_name))
+        .spawn(move || local_db_generator(obj_tx, &db_name))
         .map_err(Error::from)
 }
 
@@ -5244,12 +5224,8 @@ mod tests {
             ),
             EvacuateJobType::Retry(retry_uuid) => {
                 // start local db generator
-                start_local_db_generator(
-                    Arc::clone(&job_action),
-                    obj_tx,
-                    retry_uuid,
-                )
-                .expect("local db generator")
+                start_local_db_generator(obj_tx, retry_uuid)
+                    .expect("local db generator")
             }
         };
 
