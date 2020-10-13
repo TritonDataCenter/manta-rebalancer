@@ -2184,16 +2184,18 @@ fn _calculate_available_mb(
 // consider creating an index on this table for this use case.  We would have
 // to consider the trade off if any of inserts.
 fn local_db_generator(
-    job_action: Arc<EvacuateJob>,
+    _job_action: Arc<EvacuateJob>,
     obj_tx: crossbeam::Sender<EvacuateObject>,
     retry_uuid: &str,
 ) -> Result<(), Error> {
     use self::evacuateobjects::dsl::{evacuateobjects, id as obj_id, status};
 
+    /*
     let limit = job_action.config.options.md_read_chunk_size as i64;
     let mut offset = 0;
     let mut found_objects = 0;
     let mut retry_count = 0;
+    */
     let conn = match pg_db::connect_db(retry_uuid) {
         Ok(c) => c,
         Err(e) => {
@@ -2216,6 +2218,43 @@ fn local_db_generator(
         );
     }
 
+    let ids = evacuateobjects
+        .select(obj_id)
+        .filter(status.eq_any(vec![
+            EvacuateObjectStatus::Skipped,
+            EvacuateObjectStatus::Error,
+        ]))
+        .load::<String>(&conn)
+        .expect("could not load object ids");
+
+    for id in ids {
+        let obj = evacuateobjects
+            .filter(obj_id.eq(id))
+            .get_result::<EvacuateObject>(&conn)
+            .expect("Could not get object from id");
+
+        if let Some(reason) = obj.error {
+            if reason == EvacuateObjectError::BadShardNumber {
+                warn!("Skipping bad shard number object {}", obj.id);
+                continue;
+            }
+        }
+
+        // We don't modify the metadata in the database, so what this
+        // object has for a sharks array should be the same as what it
+        // was when we first found it.
+
+        if let Err(e) = obj_tx.send(obj) {
+            warn!("local db generator exiting early: {}", e);
+            return Err(InternalError::new(
+                Some(InternalErrorCode::Crossbeam),
+                CrossbeamError::from(e).description(),
+            )
+            .into());
+        }
+    }
+
+    /*
     loop {
         debug!("retry limit: {} | offset: {}", limit, offset);
         let retry_objs: Vec<EvacuateObject> = evacuateobjects
@@ -2278,6 +2317,8 @@ fn local_db_generator(
 
         offset += limit;
     }
+
+     */
 
     Ok(())
 }
