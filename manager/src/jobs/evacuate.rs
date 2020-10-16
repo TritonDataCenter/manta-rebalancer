@@ -901,7 +901,100 @@ impl EvacuateJob {
             job_action.bytes_transferred.load(Ordering::SeqCst)
         );
 
+        job_action.delete_assignments();
+
         ret
+    }
+
+    fn delete_assignments(&self) {
+        use self::evacuateobjects::dsl::{
+            assignment_id as assignment_id_field,
+            dest_shark as dest_shark_field, evacuateobjects,
+        };
+
+        let conn = self.conn.lock().expect("database lock");
+
+        info!("Gathering data to delete completed assignments for agents.");
+        let assignment_uuids = match self.get_assignment_uuids() {
+            Ok(ids) => ids,
+            Err(e) => {
+                error!(
+                    "Could not get assignment uuids, completing job \
+                     without cleaning up: {}",
+                    e
+                );
+                return;
+            }
+        };
+
+        info!("Deleting {} assignments.", assignment_uuids.len());
+        for id in assignment_uuids {
+            if let Ok(dest_shark) = evacuateobjects
+                .filter(assignment_id_field.eq(&id))
+                .select(dest_shark_field)
+                .first::<String>(&*conn)
+            {
+                // do delete
+                let delete_uri =
+                    format!("http://{}:7878/assignments/{}", dest_shark, id);
+
+                // XXX: We can use the post client here because it isn't
+                // being used for posting anymore.
+                match self.post_client.delete(&delete_uri).send() {
+                    Ok(res) => {
+                        if !res.status().is_success() {
+                            error!(
+                                "Assignment {} delete was not successful: {}",
+                                id,
+                                res.status().to_string()
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        error!("Error deleting assignment {}: {}", id, e);
+                    }
+                }
+            } else {
+                error!("Could not find dest_shark for assignment: {}", id);
+            }
+        }
+    }
+
+    fn get_assignment_uuids(&self) -> Result<Vec<String>, Error> {
+        use diesel::sql_query;
+        use diesel::sql_types::Text;
+
+        #[derive(QueryableByName, Debug)]
+        struct AssignmentIdResult {
+            #[sql_type = "Text"]
+            assignment_id: String,
+        }
+
+        let assignment_id_query = "SELECT assignment_id FROM evacuateobjects \
+                                   GROUP BY assignment_id";
+
+        let mut assignment_ids = vec![];
+        let conn = self.conn.lock().expect("database lock");
+
+        // XXX: This could take a lot of memory, and could take a while to
+        // execute while holding the DB lock.  Maybe we should grab a
+        // second connection just for this function call, and split the
+        // queries up into chunks.
+        let result: Vec<AssignmentIdResult> =
+            match sql_query(assignment_id_query)
+                .load::<AssignmentIdResult>(&*conn)
+            {
+                Ok(ids) => ids,
+                Err(e) => {
+                    return Err(Error::from(e));
+                }
+            };
+
+        for ent in result {
+            assignment_ids.push(ent.assignment_id);
+        }
+
+        Ok(assignment_ids)
     }
 
     fn mark_objects_complete(&self, completed_objects: Vec<EvacuateObject>) {
