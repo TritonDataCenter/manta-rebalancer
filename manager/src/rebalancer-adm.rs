@@ -160,10 +160,24 @@ fn job_create_evacuate(matches: &ArgMatches) -> Result<(), String> {
         },
     };
 
+    let obj_file = match matches.value_of("obj_file") {
+        None => None,
+        Some(of) => match of.parse::<String>() {
+            Ok(o) => Some(o),
+            Err(e) => {
+                return Err(format!(
+                    "String value required for obj_file: {}",
+                    e
+                ));
+            }
+        },
+    };
+
     // Form the payload of the request.
     let job_payload = JobPayload::Evacuate(EvacuateJobPayload {
         from_shark: shark.to_owned(),
         max_objects,
+        obj_file,
     });
 
     // Serialize it.
@@ -204,6 +218,13 @@ fn main() -> Result<(), String> {
                 .long("max_objects")
                 .takes_value(true)
                 .help("Maximum number of objects allowed in the job"),
+        )
+        .arg(
+            Arg::with_name("obj_file")
+                .short("f")
+                .long("obj_file")
+                .takes_value(true)
+                .help("Input file containing object list"),
         );
 
     let matches = App::new("rebalancer-adm")

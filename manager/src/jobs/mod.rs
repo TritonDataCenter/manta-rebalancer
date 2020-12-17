@@ -56,6 +56,7 @@ pub enum JobPayload {
 pub struct EvacuateJobPayload {
     pub from_shark: String,
     pub max_objects: Option<u32>,
+    pub obj_file: Option<String>,
 }
 
 #[derive(Debug)]
@@ -97,6 +98,7 @@ impl JobBuilder {
         mut self,
         from_shark: String,
         max_objects: Option<u32>,
+        obj_file: Option<String>,
     ) -> JobBuilder {
         // A better approach here would be to create a thread in each job
         // that would listen for the job update messages and then based on
@@ -123,6 +125,7 @@ impl JobBuilder {
             &self.id.to_string(),
             rx,
             max_objects,
+            obj_file,
         ) {
             Ok(j) => {
                 let action = JobAction::Evacuate(Box::new(j));
@@ -632,7 +635,7 @@ mod test {
         assert_eq!(builder.state, JobState::Init);
 
         let from_shark = String::from("1.stor.domain");
-        let builder = builder.evacuate(from_shark, Some(1));
+        let builder = builder.evacuate(from_shark, Some(1), None);
         assert_eq!(builder.state, JobState::Init);
 
         let job = builder.commit().expect("failed to create job");

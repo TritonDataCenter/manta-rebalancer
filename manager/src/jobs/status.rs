@@ -263,7 +263,7 @@ mod tests {
         let job_builder = JobBuilder::new(config);
 
         let job = job_builder
-            .evacuate("fake_shark".to_string(), Some(NUM_OBJS as u32))
+            .evacuate("fake_shark".to_string(), Some(NUM_OBJS as u32), None)
             .commit()
             .expect("job builder");
 
@@ -300,7 +300,7 @@ mod tests {
         let config = Config::default();
         let job_builder = JobBuilder::new(config);
         let job = job_builder
-            .evacuate("fake_shark".to_string(), Some(NUM_OBJS as u32))
+            .evacuate("fake_shark".to_string(), Some(NUM_OBJS as u32), None)
             .commit()
             .expect("job builder");
 

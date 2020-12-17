@@ -466,7 +466,11 @@ impl Handler for JobCreateHandler {
                 };
 
                 let job = match job_builder
-                    .evacuate(evac_payload.from_shark, max_objects)
+                    .evacuate(
+                        evac_payload.from_shark,
+                        max_objects,
+                        evac_payload.obj_file
+                     )
                     .commit()
                 {
                     Ok(j) => j,
@@ -795,7 +799,7 @@ mod tests {
         let config = config.lock().expect("lock config").clone();
         let job_builder = JobBuilder::new(config);
         let job = job_builder
-            .evacuate(String::from("fake_storage_id"), None)
+            .evacuate(String::from("fake_storage_id"), None, None)
             .commit()
             .expect("Failed to create job");
         let job_id = job.get_id().to_string();
@@ -826,6 +830,7 @@ mod tests {
         let job_payload = JobPayload::Evacuate(EvacuateJobPayload {
             from_shark: String::from("fake_storage_id"),
             max_objects: Some(10),
+            obj_file: None,
         });
 
         let job_id = create_job(&test_server, job_payload);
@@ -866,6 +871,7 @@ mod tests {
         let job_payload = JobPayload::Evacuate(EvacuateJobPayload {
             from_shark: String::from("fake_storage_id"),
             max_objects: Some(10),
+            obj_file: None,
         });
         let job_id = create_job(&test_server, job_payload);
         let mut count = 0;
