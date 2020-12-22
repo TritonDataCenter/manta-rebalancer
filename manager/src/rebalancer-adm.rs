@@ -163,7 +163,12 @@ fn job_create_evacuate(matches: &ArgMatches) -> Result<(), String> {
     let obj_file = match matches.value_of("obj_file") {
         None => None,
         Some(of) => match of.parse::<String>() {
-            Ok(o) => Some(o),
+            Ok(o) => {
+                if !std::path::Path::new(&o).exists() {
+                    return Err(format!("Unable to locate file: {}", o));
+                }
+                Some(o)
+            },
             Err(e) => {
                 return Err(format!(
                     "String value required for obj_file: {}",
