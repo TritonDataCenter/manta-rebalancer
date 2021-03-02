@@ -1,4 +1,0 @@
-{
-  "domain_name": {{DOMAIN_NAME}},
-  "shards": {{INDEX_MORAY_SHARDS}}
-}
