@@ -6,6 +6,7 @@
 
 /*
  * Copyright 2021 Joyent, Inc.
+ * Copyright 2022 MNX Cloud, Inc.
  */
 
 @Library('jenkins-joylib@v1.0.8') _
@@ -53,7 +54,7 @@ pipeline {
                 branch 'master'
             }
             steps {
-                build(job:'joyent-org/manta-mako/master', wait: false)
+                build(job:'TritonDataCenter/manta-mako/master', wait: false)
             }
         }
     }
@@ -61,7 +62,6 @@ pipeline {
     post {
         always {
             joySlackNotifications(channel: 'jenkins')
-            joySlackNotifications(channel: 'rebalancer')
         }
     }
 }
