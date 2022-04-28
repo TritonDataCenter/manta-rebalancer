@@ -1,7 +1,6 @@
 [workspace]
 members = [
     "agent",
-    "manager",
     "rebalancer"
 ]
 
@@ -10,23 +9,3 @@ panic = "abort"
 
 [profile.release]
 panic = "abort"
-
-[patch.crates-io]
-# We require the use of certain constructs which unfortunately were not
-# included in the latest released version of diesel (1.4.3).  We are hopeful
-# that in a later version (presumably 1.4.4), they will be included, however
-# the minimum rustc version required will surely be higher then -- minimally,
-# at 1.37.  The patch tables below reference a version of diesel and related
-# utility macros that the rebalancer can safely use until we are able to move
-# to an officially released version of diesel which hopefully has the structures
-# and macros that we rely on.  In summary, there are two things that need to
-# happen in the future to move to the next diesel release.  First, we need to
-# upgrade rustc to something more current (ideally rustc 1.40) and then we need
-# to confirm whether or not the new release of diesel will contain the
-# constructs needed to successfully build the rebalancer manager.  If it does
-# not, then we will have to consider avenues for eliminating their use from
-# within the rebalancer code.  Finally, dependencies listed in the patch
-# section of this project are transitive, so they should also be used when
-# builing any depedencies that also rely on diesel (which is a good thing).
-diesel = { git = "https://github.com/diesel-rs/diesel", rev = "f75e930e166eb448e3c41d5cdc7251cfcad681f6"}
-diesel_derives = { git = "https://github.com/diesel-rs/diesel" , rev = "f75e930e166eb448e3c41d5cdc7251cfcad681f6"}
