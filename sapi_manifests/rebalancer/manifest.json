@@ -1,6 +1,0 @@
-{
-    "name": "rebalancer",
-    "path": "/opt/smartdc/rebalancer/config.json",
-    "master": true,
-    "post_cmd": "/usr/sbin/svcadm refresh rebalancer"
-}
