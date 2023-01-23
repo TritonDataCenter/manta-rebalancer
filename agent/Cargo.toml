@@ -14,11 +14,11 @@ futures = "0.1.29"
 gotham = "0.4.0"
 gotham_derive = "0.4.0"
 hyper = "0.12"
-joyent-rust-utils = { git = "https://github.com/joyent/rust-utils", tag = "v0.2.0" }
+joyent-rust-utils = { git = "https://github.com/TritonDataCenter/rust-utils", tag = "v0.2.0" }
 lazy_static = "1.4.0"
-libmanta = { git = "https://github.com/joyent/rust-libmanta", tag = "v0.7.0" }
+libmanta = { git = "https://github.com/TritonDataCenter/rust-libmanta", tag = "v0.7.0" }
 mime = "0.3.13"
-moray = { git = "https://github.com/joyent/rust-moray", tag = "v0.9.2" }
+moray = { git = "https://github.com/TritonDataCenter/rust-moray", tag = "v0.9.2" }
 rebalancer = { path = "../rebalancer" }
 reqwest = "0.9.24"
 rusqlite = "0.19.0"

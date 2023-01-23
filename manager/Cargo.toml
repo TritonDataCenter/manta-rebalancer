@@ -15,10 +15,10 @@ hyper = "0.12"
 indoc = "0.3.5"
 Inflector = "0.11.4"
 lazy_static = "1.4.0"
-libmanta = { git = "https://github.com/joyent/rust-libmanta", features = ["postgres"], tag = "v0.7.0" }
+libmanta = { git = "https://github.com/TritonDataCenter/rust-libmanta", features = ["postgres"], tag = "v0.7.0" }
 mime = "0.3.13"
-moray = { git = "https://github.com/joyent/rust-moray", features = ["postgres"], tag = "v0.11.4" }
-sharkspotter = { git = "https://github.com/joyent/rust-sharkspotter", features = ["postgres"], tag = "v0.16.5" }
+moray = { git = "https://github.com/TritonDataCenter/rust-moray", features = ["postgres"], tag = "v0.11.4" }
+sharkspotter = { git = "https://github.com/TritonDataCenter/rust-sharkspotter", features = ["postgres"], tag = "v0.16.5" }
 diesel = { version = "1.4.2", features = ["postgres"] }
 rand = "0.7.0"
 reqwest = "0.9.24"
@@ -29,7 +29,7 @@ gotham = "0.4.0"
 gotham_derive = "0.4.0"
 prometheus = "0.7.0"
 quickcheck = "0.8.5"
-quickcheck_helpers = { git = "https://github.com/joyent/rust-quickcheck-helpers.git", tag = "v0.1.0" }
+quickcheck_helpers = { git = "https://github.com/TritonDataCenter/rust-quickcheck-helpers.git", tag = "v0.1.0" }
 rebalancer = { path = "../rebalancer", features = ["postgres"] }
 serde_derive = "1.0.91"
 serde = { version = "1.0.91", features = ["derive"] }

@@ -20,14 +20,14 @@ uuid = { version = "0.7.4", features = ["v4"] }
 gotham = "0.4.0"
 gotham_derive = "0.4.0"
 hyper = "0.12"
-joyent-rust-utils = { git = "https://github.com/joyent/rust-utils", tag = "v0.2.0" }
+joyent-rust-utils = { git = "https://github.com/TritonDataCenter/rust-utils", tag = "v0.2.0" }
 lazy_static = "1.4.0"
-libmanta = { git = "https://github.com/joyent/rust-libmanta", tag = "v0.7.0" }
+libmanta = { git = "https://github.com/TritonDataCenter/rust-libmanta", tag = "v0.7.0" }
 mime = "0.3.13"
 md-5 = "0.8.0"
 prometheus = "0.7.0"
 quickcheck = "0.8.5"
-quickcheck_helpers = { git = "https://github.com/joyent/rust-quickcheck-helpers.git", tag = "v0.1.0" }
+quickcheck_helpers = { git = "https://github.com/TritonDataCenter/rust-quickcheck-helpers.git", tag = "v0.1.0" }
 reqwest = "0.9.18"
 rusqlite = "0.19.0"
 serde = { version = "1.0.91", features = ["derive"] }
