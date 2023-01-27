@@ -6,14 +6,20 @@
 
 #
 # Copyright 2020 Joyent, Inc.
+# Copyright 2023 MNX Cloud, Inc.
 #
 
 NAME=rebalancer
 
-RUST_CODE = 1
+RUST_TOOLCHAIN = 1.40.0
+
+# Rust < 1.49 must specify sun-solaris target:
+RUST_BOOTSTRAP_TARGET = x86_64-sun-solaris
 
 ENGBLD_REQUIRE       := $(shell git submodule update --init deps/eng)
 include ./deps/eng/tools/mk/Makefile.defs
+include ./deps/eng/tools/mk/Makefile.rust.defs
+
 TOP ?= $(error Unable to access eng.git submodule Makefiles.)
 
 SMF_MANIFESTS =     smf/manifests/rebalancer.xml \
@@ -51,7 +57,7 @@ include ./deps/eng/tools/mk/Makefile.smf.defs
 
 all: agent manager
 
-debug:
+debug: | $(CARGO_EXEC)
 	$(CARGO) build --manifest-path=agent/Cargo.toml
 	LD_LIBRARY_PATH=$(RELSTAGE_DIR)/root/opt/postgresql/$(PGVER)/lib:$(DEF_RPATH) \
 	    $(CARGO) build --manifest-path=manager/Cargo.toml
@@ -111,18 +117,18 @@ pg: deps/postgresql12/.git
 	RELSTAGEDIR="$(RELSTAGEDIR)" \
 	DEPSDIR="$(TOP)/deps" pg12
 
-doc:
+doc: | $(CARGO_EXEC)
 	$(CARGO) doc
 
-clean::
+clean:: | $(CARGO_EXEC)
 	$(CARGO) clean
 
 .PHONY: agent
-agent:
+agent: | $(CARGO_EXEC)
 	STAMP=$(STAMP) $(CARGO) build --manifest-path=agent/Cargo.toml --release
 
 .PHONY: manager
-manager:
+manager: | $(CARGO_EXEC)
 	LD_LIBRARY_PATH=$(RELSTAGE_DIR)/root/opt/postgresql/$(PGVER)/lib:$(DEF_RPATH) \
 	    $(CARGO) build --manifest-path=manager/Cargo.toml --release
 	/usr/bin/elfedit -e \
@@ -162,23 +168,20 @@ pkg_agent:
 	    > $(TOP)/$(AGENT_MANIFEST)
 	@rm -rf $(RELSTAGEDIR_AGENT)
 
-clippy-deps:
-	rustup component add clippy
-
-managertests:
+managertests: | $(CARGO_EXEC)
 	RUST_LOG=remora=trace $(CARGO) test tests --bin rebalancer-manager -- --test-threads=1
 
-jobtests:
+jobtests: | $(CARGO_EXEC)
 	RUST_LOG=remora=trace $(CARGO) test job -- --test-threads=1
 	RUST_LOG=remora=trace $(CARGO) test config -- --test-threads=1
 
-agenttests:
+agenttests: | $(CARGO_EXEC)
 	RUST_LOG=remora=trace $(CARGO) test agenttests
 
-rebalancer_adm_tests:
+rebalancer_adm_tests: | $(CARGO_EXEC)
 	RUST_LOG=remora=trace $(CARGO) test rebalancer_adm_tests
 
-doc_tests:
+doc_tests: | $(CARGO_EXEC)
 	RUST_LOG=remora=trace $(CARGO) test --doc
 
 test: agenttests jobtests managertests rebalancer_adm_tests doc_tests
@@ -192,3 +195,4 @@ ifeq ($(shell uname -s),SunOS)
 endif
 include ./deps/eng/tools/mk/Makefile.smf.targ
 include ./deps/eng/tools/mk/Makefile.targ
+include ./deps/eng/tools/mk/Makefile.rust.targ

@@ -10,3 +10,5 @@
 cscope.*
 *.db
 .DS_Store
+/rust
+/cache
