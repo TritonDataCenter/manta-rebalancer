@@ -120,9 +120,6 @@ pg: deps/postgresql12/.git
 doc: | $(CARGO_EXEC)
 	$(CARGO) doc
 
-clean:: | $(CARGO_EXEC)
-	$(CARGO) clean
-
 .PHONY: agent
 agent: | $(CARGO_EXEC)
 	STAMP=$(STAMP) $(CARGO) build --manifest-path=agent/Cargo.toml --release
