@@ -19,7 +19,7 @@ gethostname = "0.2.1"
 uuid = { version = "0.7.4", features = ["v4"] }
 gotham = "0.4.0"
 gotham_derive = "0.4.0"
-hyper = "0.12"
+hyper = "0.14"
 joyent-rust-utils = { git = "https://github.com/TritonDataCenter/rust-utils", tag = "v0.2.0" }
 lazy_static = "1.4.0"
 libmanta = { git = "https://github.com/TritonDataCenter/rust-libmanta", tag = "v0.7.0" }
