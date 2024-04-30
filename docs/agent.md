@@ -6,13 +6,14 @@
 
 <!--
     Copyright 2020 Joyent, Inc.
+    Copyright 2024 MNX Cloud, Inc.
 -->
 
 # Agent
-The [Manta](https://github.com/joyent/manta) object rebalancer agent is a
-subsystem within the
-[Rebalancer project](https://github.com/joyent/manta-rebalancer) which is
-orchestrated by the rebalancer manager.
+The [Manta](https://github.com/TritonDataCenter/manta) object rebalancer agent
+is a subsystem within the
+[Rebalancer project](https://github.com/TritonDataCenter/manta-rebalancer)
+which is orchestrated by the rebalancer manager.
 
 # Overview
 The rebalancer agent is a service which runs on every storage node in a Manta
@@ -177,7 +178,7 @@ comprised of the following:
 | Param           | Type   | Description                     |
 | --------------- | ------ | ------------------------------- |
 | Assignment uuid | String | Unique identifier of assignment |
-| Task list       | Array  | Array of [Tasks](https://github.com/joyent/manta-rebalancer/blob/77a5d01f182261f9842cb00134bd55ef1e280afc/src/jobs/mod.rs#L139-L148) |
+| Task list       | Array  | Array of [Tasks](https://github.com/TritonDataCenter/manta-rebalancer/blob/77a5d01f182261f9842cb00134bd55ef1e280afc/src/jobs/mod.rs#L139-L148) |
 
 ### Responses
 | Code | Description                                            |
