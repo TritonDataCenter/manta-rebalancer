@@ -9,16 +9,18 @@
 -->
 
 # Manta Rebalancer Manager
-The [Manta](https://github.com/joyent/manta) object rebalancer manager is a
-major subsystem within the rebalancer project that oversees and orchestrates
-operations referred to as jobs which currently evacuate objects from storage
-nodes in a Manta deployment.  A job is comprised of one or more assignments
-which are then delegated to agents for processing.  Each assignment consists of one or more objects to download.  The manager is responsible for ensuring that
-each assignment runs to completion as well as reporting detailed information
-about any failures that occur during the execution of a job, whether that be
-propagating failure information from an agent or reporting errors that occur
-during other stages of the job (e.g. assignment creation, metadata tier book
-keeping at the completion of an assignment, etc).
+The [Manta](https://github.com/TritonDataCenter/manta) object rebalancer
+manager is a major subsystem within the rebalancer project that oversees and
+orchestrates operations referred to as jobs which currently evacuate objects
+from storage nodes in a Manta deployment.  A job is comprised of one or more
+assignments which are then delegated to agents for processing.  Each
+assignment consists of one or more objects to download.  The manager is
+responsible for ensuring that each assignment runs to completion as well as
+reporting detailed information about any failures that occur during the
+execution of a job, whether that be propagating failure information from an
+agent or reporting errors that occur during other stages of the job (e.g.
+assignment creation, metadata tier book keeping at the completion of an
+assignment, etc).
 
 ## Rebalancer Manager Overview
 The diagram below shows the key components that comprise the rebalancer manager
@@ -214,7 +216,7 @@ rebalancer-adm job create evacuate --shark=<storage server name> [--max_objects=
 ```
 **Note [MANTA-4462](https://jira.joyent.us/browse/MANTA-4462): Before an
 evacuate job is run, the target storage node must be manually set read-only. See
-[Operators Guide](https://github.com/joyent/manta-rebalancer/docs/operators_guide.md#marking-evacuate-target-read-only) for more details.**
+[Operators Guide](https://github.com/TritonDataCenter/manta-rebalancer/docs/operators_guide.md#marking-evacuate-target-read-only) for more details.**
 
 
 ### Retrying a job
@@ -275,7 +277,7 @@ These options can be updated by SAPI.
 | shards               | Array  | The array of directory-api shards.  From SAPI application metadata `INDEX_MORAY_SHARDS`. |
 | listen_port | u16 | Optionally specify a port to listen on.  Default 80.|
 | log_level | u16 | Level of logging verbosity as a string (`critical`, `error`, `warning`, `info`, `debug`, or `trace).  Can be set with SAPI tunable `REBALANCER_LOG_LEVEL`.  Requires service restart. |
- 
+
 ## Development
 Currently the rebalancer manager and rebalancer-adm rely on a postgres database
 for maintaining records of known jobs and their status.  For this reason, it is
@@ -327,7 +329,7 @@ parts.
 
 | Param      | Type                    | Description                                              |
 | ---------- | ----------------------- | -------------------------------------------------------- |
-| action | [JobAction](https://github.com/joyent/manta-rebalancer/blob/b5fe811bd53813e4051aef282cf80853fb5af434/manager/src/jobs/mod.rs#L208-L211) | The action that this job will take. |
+| action | [JobAction](https://github.com/TritonDataCenter/manta-rebalancer/blob/b5fe811bd53813e4051aef282cf80853fb5af434/manager/src/jobs/mod.rs#L208-L211) | The action that this job will take. |
 | params | Object | Parameters unique to each job action |
 
 
