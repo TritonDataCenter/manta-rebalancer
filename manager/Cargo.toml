@@ -8,7 +8,7 @@ workspace = ".."
 [dependencies]
 assert_cli = "0.6.3"
 clap = "2.33.0"
-crossbeam-channel = "0.4.2"
+crossbeam-channel = "0.4.4"
 crossbeam-deque = "0.7.3"
 futures = "0.1.29"
 hyper = "0.12"
