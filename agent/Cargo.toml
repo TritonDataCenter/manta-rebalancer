@@ -13,7 +13,7 @@ base64 = "0.10.1"
 futures = "0.1.29"
 gotham = "0.4.0"
 gotham_derive = "0.4.0"
-hyper = "0.12"
+hyper = "0.14"
 joyent-rust-utils = { git = "https://github.com/TritonDataCenter/rust-utils", tag = "v0.2.0" }
 lazy_static = "1.4.0"
 libmanta = { git = "https://github.com/TritonDataCenter/rust-libmanta", tag = "v0.7.0" }
